@@ -227,9 +227,10 @@ func discoverSessionBeads(
 		// forks inherit the primary session's name from resolveSessionName
 		// cache, causing spurious config-drift when the cache changes.
 		tp.SessionName = sn
-		if tp.Env != nil {
-			tp.Env["GC_SESSION_NAME"] = sn
+		if tp.Env == nil {
+			tp.Env = make(map[string]string)
 		}
+		tp.Env["GC_SESSION_NAME"] = sn
 		installAgentSideEffects(bp, cfgAgent, tp, stderr)
 		desired[sn] = tp
 	}
