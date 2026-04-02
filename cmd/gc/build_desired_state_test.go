@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -522,6 +523,7 @@ func TestBuildDesiredState_ZeroScaledPoolSessionKeepsDependencyFloorWhileDrainin
 }
 
 func TestBuildDesiredState_PoolCheckInjectsDoltPortForRigScopedAgent(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "myrig")
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
@@ -559,6 +561,7 @@ func TestBuildDesiredState_PoolCheckInjectsDoltPortForRigScopedAgent(t *testing.
 }
 
 func TestBuildDesiredState_PoolCheckOmitsDoltPortForCityScopedAgent(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
 	cityPath := t.TempDir()
 	// Same check command but for a city-scoped agent (no rig). BEADS_DOLT_PORT
 	// should NOT be injected, so the check outputs 0.
@@ -584,13 +587,24 @@ func TestBuildDesiredState_PoolCheckOmitsDoltPortForCityScopedAgent(t *testing.T
 	}
 }
 
-func TestBuildDesiredState_PoolCheckOmitsDoltPortWhenRigHasNoDoltPort(t *testing.T) {
+func TestBuildDesiredState_PoolCheckUsesManagedCityDoltPortWhenRigHasNoOverride(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "myrig")
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// Rig exists but has no DoltPort configured.
+	ln := listenOnRandomPort(t)
+	defer ln.Close()
+	if err := writeDoltState(cityPath, doltRuntimeState{
+		Running:   true,
+		PID:       os.Getpid(),
+		Port:      ln.Addr().(*net.TCPAddr).Port,
+		DataDir:   filepath.Join(cityPath, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	checkCmd := `sh -c 'test -n "$BEADS_DOLT_PORT" && printf 2 || printf 0'`
 	cfg := &config.City{
 		Rigs: []config.Rig{{
@@ -613,8 +627,8 @@ func TestBuildDesiredState_PoolCheckOmitsDoltPortWhenRigHasNoDoltPort(t *testing
 			workerSlots++
 		}
 	}
-	if workerSlots != 0 {
-		t.Fatalf("worker desired slots = %d, want 0 (rig has no DoltPort)", workerSlots)
+	if workerSlots != 2 {
+		t.Fatalf("worker desired slots = %d, want 2 (managed city dolt port should be injected for rig)", workerSlots)
 	}
 }
 

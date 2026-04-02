@@ -260,6 +260,26 @@ func TestDoSlingEnvPassthrough(t *testing.T) {
 	})
 }
 
+func TestShellSlingRunnerOverridesInheritedBDEnv(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "stale-host")
+	t.Setenv("GC_DOLT_PORT", "9999")
+	t.Setenv("BEADS_DOLT_HOST", "stale-host")
+	t.Setenv("BEADS_DOLT_PORT", "9999")
+
+	out, err := shellSlingRunner("", `printf '%s|%s|%s|%s' "$GC_DOLT_HOST" "$GC_DOLT_PORT" "$BEADS_DOLT_HOST" "$BEADS_DOLT_PORT"`, map[string]string{
+		"GC_DOLT_HOST":    "rig-db.example.com",
+		"GC_DOLT_PORT":    "3307",
+		"BEADS_DOLT_HOST": "rig-db.example.com",
+		"BEADS_DOLT_PORT": "3307",
+	})
+	if err != nil {
+		t.Fatalf("shellSlingRunner: %v", err)
+	}
+	if got := strings.TrimSpace(out); got != "rig-db.example.com|3307|rig-db.example.com|3307" {
+		t.Fatalf("shellSlingRunner env = %q", got)
+	}
+}
+
 func TestDoSlingBeadToPool(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -1266,9 +1286,12 @@ func TestOnFormulaAttachesAndRoutes(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
+	}, nil)
 	opts := testOpts(a, "BL-42")
 	opts.OnFormula = "code-review"
-	code := doSling(opts, deps, nil)
+	code := doSling(opts, deps, deps.Store)
 
 	if code != 0 {
 		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
@@ -1282,13 +1305,21 @@ func TestOnFormulaAttachesAndRoutes(t *testing.T) {
 	if runner.calls[0] != wantSling {
 		t.Errorf("runner call = %q, want %q", runner.calls[0], wantSling)
 	}
-	// Verify wisp was created in the store with correct ParentID.
-	b, err := deps.Store.Get("gc-1")
+	source, err := deps.Store.Get("BL-42")
 	if err != nil {
-		t.Fatalf("store.Get(gc-1): %v", err)
+		t.Fatalf("store.Get(BL-42): %v", err)
 	}
-	if b.ParentID != "BL-42" {
-		t.Errorf("wisp ParentID = %q, want %q", b.ParentID, "BL-42")
+	rootID := source.Metadata["molecule_id"]
+	if rootID == "" {
+		t.Fatal("source bead missing molecule_id")
+	}
+	// Verify wisp was created in the store without parenting it to the outer bead.
+	b, err := deps.Store.Get(rootID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", rootID, err)
+	}
+	if b.ParentID != "" {
+		t.Errorf("wisp ParentID = %q, want empty", b.ParentID)
 	}
 	if b.Ref != "code-review" {
 		t.Errorf("wisp Ref = %q, want %q", b.Ref, "code-review")
@@ -1639,7 +1670,8 @@ func TestOnFormulaWithTitle(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
 	}
-	// MolCookOn goes through the store; verify bead was created with title and parent.
+	// MolCookOn goes through the store; verify bead was created with title and
+	// left unattached from the outer bead.
 	b, err := deps.Store.Get("gc-1")
 	if err != nil {
 		t.Fatalf("store.Get(gc-1): %v", err)
@@ -1647,8 +1679,8 @@ func TestOnFormulaWithTitle(t *testing.T) {
 	if b.Title != "my-review" {
 		t.Errorf("bead title = %q, want %q", b.Title, "my-review")
 	}
-	if b.ParentID != "BL-42" {
-		t.Errorf("bead ParentID = %q, want %q", b.ParentID, "BL-42")
+	if b.ParentID != "" {
+		t.Errorf("bead ParentID = %q, want empty", b.ParentID)
 	}
 }
 
@@ -1826,6 +1858,56 @@ func TestOnFormulaAutoBurnStaleMolecule(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "Auto-burned stale molecule MOL-1") {
 		t.Errorf("stderr = %q, want auto-burn message", stderr.String())
+	}
+}
+
+func TestOnFormulaMetadataAttachmentAutoBurnsAndReattaches(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	deps, _, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
+	}, nil)
+	opts := testOpts(a, "BL-42")
+	opts.OnFormula = "code-review"
+
+	if code := doSling(opts, deps, deps.Store); code != 0 {
+		t.Fatalf("first doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	source, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("Get(BL-42): %v", err)
+	}
+	firstRootID := source.Metadata["molecule_id"]
+	if firstRootID == "" {
+		t.Fatal("first sling did not set molecule_id")
+	}
+
+	stderr.Reset()
+	if code := doSling(opts, deps, deps.Store); code != 0 {
+		t.Fatalf("second doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "Auto-burned stale molecule "+firstRootID) {
+		t.Fatalf("stderr = %q, want auto-burn of %s", stderr.String(), firstRootID)
+	}
+
+	firstRoot, err := deps.Store.Get(firstRootID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", firstRootID, err)
+	}
+	if firstRoot.Status != "closed" {
+		t.Fatalf("first root status = %q, want closed", firstRoot.Status)
+	}
+
+	updatedSource, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("Get(BL-42) after reattach: %v", err)
+	}
+	if updatedSource.Metadata["molecule_id"] == "" || updatedSource.Metadata["molecule_id"] == firstRootID {
+		t.Fatalf("source molecule_id = %q, want new root id", updatedSource.Metadata["molecule_id"])
 	}
 }
 
@@ -2070,6 +2152,85 @@ func TestBatchAutoBurnStaleMolecules(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "Auto-burned stale molecule MOL-1") {
 		t.Errorf("stderr = %q, want auto-burn message", stderr.String())
+	}
+}
+
+func TestOnFormulaPoolAttachmentLeavesLegacyStepsUnrouted(t *testing.T) {
+	dir := testFormulaDir(t)
+	content := `
+formula = "multi-step"
+version = 1
+
+[[steps]]
+id = "prep"
+title = "Prep"
+
+[[steps]]
+id = "ship"
+title = "Ship"
+needs = ["prep"]
+`
+	if err := os.WriteFile(filepath.Join(dir, "multi-step.formula.toml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{dir},
+		},
+	}
+	a := config.Agent{Name: "polecat", Dir: "repo", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}
+
+	deps, _, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
+	}, nil)
+
+	opts := testOpts(a, "BL-42")
+	opts.OnFormula = "multi-step"
+	code := doSling(opts, deps, deps.Store)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	source, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("Get(BL-42): %v", err)
+	}
+	rootID := source.Metadata["molecule_id"]
+	if rootID == "" {
+		t.Fatal("source bead missing molecule_id")
+	}
+
+	root, err := deps.Store.Get(rootID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", rootID, err)
+	}
+	if root.ParentID != "" {
+		t.Fatalf("root ParentID = %q, want empty", root.ParentID)
+	}
+
+	all, err := deps.Store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, bead := range all {
+		if bead.ID == "BL-42" || bead.ID == rootID {
+			continue
+		}
+		if bead.Type == "convoy" && bead.Title == "sling-BL-42" {
+			continue
+		}
+		if bead.ParentID == "BL-42" {
+			t.Fatalf("internal bead %s ParentID = %q, want not outer bead", bead.ID, bead.ParentID)
+		}
+		if bead.Metadata["gc.routed_to"] != "" {
+			t.Fatalf("internal bead %s gc.routed_to = %q, want empty", bead.ID, bead.Metadata["gc.routed_to"])
+		}
 	}
 }
 

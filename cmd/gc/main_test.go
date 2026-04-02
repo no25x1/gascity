@@ -1323,6 +1323,9 @@ func TestDoInitCreatesSettings(t *testing.T) {
 	if !ok {
 		t.Fatal("hooks/claude.json not created")
 	}
+	if _, ok := f.Files[filepath.Join("/bright-lights", ".gc", "settings.json")]; !ok {
+		t.Fatal(".gc/settings.json not created")
+	}
 	if len(data) == 0 {
 		t.Fatal("hooks/claude.json is empty")
 	}
@@ -1337,6 +1340,9 @@ func TestDoInitSettingsIsValidJSON(t *testing.T) {
 	}
 	settingsPath := filepath.Join("/bright-lights", "hooks", "claude.json")
 	data := f.Files[settingsPath]
+	if got := string(f.Files[filepath.Join("/bright-lights", ".gc", "settings.json")]); got != string(data) {
+		t.Fatalf(".gc/settings.json = %q, want mirror of hooks/claude.json", got)
+	}
 
 	var parsed map[string]any
 	if err := json.Unmarshal(data, &parsed); err != nil {
@@ -1375,6 +1381,9 @@ func TestDoInitDoesNotOverwriteExistingSettings(t *testing.T) {
 	got := string(f.Files[settingsPath])
 	if got != `{"custom": true}` {
 		t.Errorf("settings.json was overwritten: %q", got)
+	}
+	if runtime := string(f.Files[filepath.Join("/city", ".gc", "settings.json")]); runtime != `{"custom": true}` {
+		t.Errorf("runtime settings were not mirrored from existing hooks file: %q", runtime)
 	}
 }
 

@@ -195,22 +195,16 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		// Rig-scoped agents override the rig-specific keys below.
 		"GT_ROOT": p.cityPath,
 	}
+	if gcHome := os.Getenv("GC_HOME"); gcHome != "" {
+		// Pin HOME to the current city runtime home so provider transcripts
+		// and auth state do not leak in from the tmux server's inherited env.
+		agentEnv["HOME"] = gcHome
+	}
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		agentEnv["GC_BIN"] = exe
 	}
-	// Inject dolt config from per-city config map (set by
-	// startBeadsLifecycle) so agents connect to the right server.
-	// For external hosts, host/port come from config; for local
-	// managed Dolt, port comes from runtime state files.
-	if host := doltHostForCity(p.cityPath); host != "" {
-		agentEnv["GC_DOLT_HOST"] = host
-	}
-	if isExternalDolt(p.cityPath) {
-		if port := doltPortForCity(p.cityPath); port != "" {
-			agentEnv["GC_DOLT_PORT"] = port
-		}
-	} else if port := currentDoltPort(p.cityPath); port != "" {
-		agentEnv["GC_DOLT_PORT"] = port
+	for key, value := range sessionDoltEnv(p.cityPath, rigRoot, p.rigs) {
+		agentEnv[key] = value
 	}
 	if rigName != "" {
 		agentEnv["GC_RIG"] = rigName
@@ -305,6 +299,64 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		WakeMode:         cfgAgent.WakeMode,
 		IsACP:            cfgAgent.Session == "acp",
 	}, nil
+}
+
+func sessionDoltEnv(cityPath, rigRoot string, rigs []config.Rig) map[string]string {
+	env := map[string]string{
+		// Explicit empty values let tmux unset stale Dolt vars inherited from
+		// the server environment when the current city/rig does not use them.
+		"GC_DOLT_HOST":    "",
+		"GC_DOLT_PORT":    "",
+		"BEADS_DOLT_HOST": "",
+		"BEADS_DOLT_PORT": "",
+	}
+
+	if host := doltHostForCity(cityPath); host != "" {
+		env["GC_DOLT_HOST"] = host
+		env["BEADS_DOLT_HOST"] = host
+	}
+	if isExternalDolt(cityPath) {
+		if port := doltPortForCity(cityPath); port != "" {
+			env["GC_DOLT_PORT"] = port
+			env["BEADS_DOLT_PORT"] = port
+		}
+	} else if port := currentDoltPort(cityPath); port != "" {
+		env["GC_DOLT_PORT"] = port
+		env["BEADS_DOLT_PORT"] = port
+	}
+	if rigRoot == "" {
+		return env
+	}
+
+	for _, r := range rigs {
+		rp := r.Path
+		if !filepath.IsAbs(rp) {
+			rp = filepath.Join(cityPath, rp)
+		}
+		if filepath.Clean(rp) != filepath.Clean(rigRoot) {
+			continue
+		}
+		if r.DoltHost != "" {
+			env["GC_DOLT_HOST"] = r.DoltHost
+			env["BEADS_DOLT_HOST"] = r.DoltHost
+		}
+		if r.DoltPort != "" {
+			env["GC_DOLT_PORT"] = r.DoltPort
+			env["BEADS_DOLT_PORT"] = r.DoltPort
+		}
+		if r.DoltHost != "" || r.DoltPort != "" {
+			return env
+		}
+		break
+	}
+
+	if port := currentDoltPort(rigRoot); port != "" {
+		env["GC_DOLT_HOST"] = ""
+		env["BEADS_DOLT_HOST"] = ""
+		env["GC_DOLT_PORT"] = port
+		env["BEADS_DOLT_PORT"] = port
+	}
+	return env
 }
 
 // templateParamsToConfig converts TemplateParams to the runtime.Config
