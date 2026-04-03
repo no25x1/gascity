@@ -509,7 +509,7 @@ func reconcileSessionBeads(
 		if shouldWake && target.alive {
 			// Session is correctly awake. Cancel any non-drift drain
 			// (handles scale-back-up: agent returns to desired set while draining).
-			cancelSessionDrain(*target.session, dt)
+			cancelSessionDrain(*target.session, sp, dt)
 			clearCompletedIdleProbe(target.session.ID, dt)
 			if target.session.Metadata["sleep_intent"] == "idle-stop-pending" {
 				_ = store.SetMetadata(target.session.ID, "sleep_intent", "")

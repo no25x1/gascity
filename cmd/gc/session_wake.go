@@ -140,7 +140,9 @@ func beginSessionDrain(
 }
 
 // cancelSessionDrain removes a drain if wake reasons reappeared for the same generation.
-func cancelSessionDrain(session beads.Bead, dt *drainTracker) bool {
+// If GC_DRAIN_ACK was already set by the reconciler (deferred drain signal),
+// it is cleared so the Phase 1 drain-ack check doesn't kill the session.
+func cancelSessionDrain(session beads.Bead, sp runtime.Provider, dt *drainTracker) bool {
 	ds := dt.get(session.ID)
 	if ds == nil {
 		return false
@@ -150,6 +152,12 @@ func cancelSessionDrain(session beads.Bead, dt *drainTracker) bool {
 		dt.clearIdleProbe(session.ID)
 		dt.remove(session.ID)
 		name := session.Metadata["session_name"]
+		// Clear GC_DRAIN_ACK if it was set — prevents stale ack from
+		// killing the session on the next Phase 1 drain-ack check.
+		if ds.ackSet {
+			_ = sp.RemoveMeta(name, "GC_DRAIN_ACK")
+			_ = sp.RemoveMeta(name, "GC_DRAIN")
+		}
 		telemetry.RecordDrainTransition(context.Background(), name, ds.reason, "cancel")
 		return true
 	}
@@ -230,6 +238,12 @@ func advanceSessionDrainsWithSessions(
 		if ds.reason != "config-drift" && ds.reason != "orphaned" && ds.reason != "suspended" {
 			if eval, ok := wakeEvals[session.ID]; ok && len(eval.Reasons) > 0 {
 				dt.clearIdleProbe(id)
+				// Clear GC_DRAIN_ACK if it was set — prevents stale ack
+				// from killing the session on the next Phase 1 check.
+				if ds.ackSet {
+					_ = sp.RemoveMeta(name, "GC_DRAIN_ACK")
+					_ = sp.RemoveMeta(name, "GC_DRAIN")
+				}
 				dt.remove(id)
 				continue
 			}

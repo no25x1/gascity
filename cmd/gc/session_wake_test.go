@@ -331,6 +331,7 @@ func TestBeginSessionDrain_AlreadyDraining(t *testing.T) {
 }
 
 func TestCancelSessionDrain(t *testing.T) {
+	sp := runtime.NewFake()
 	dt := newDrainTracker()
 	dt.set("b1", &drainState{
 		reason:     "idle",
@@ -341,7 +342,7 @@ func TestCancelSessionDrain(t *testing.T) {
 		"generation": "5",
 	})
 
-	if !cancelSessionDrain(session, dt) {
+	if !cancelSessionDrain(session, sp, dt) {
 		t.Error("expected cancel to succeed")
 	}
 	if dt.get("b1") != nil {
@@ -349,7 +350,35 @@ func TestCancelSessionDrain(t *testing.T) {
 	}
 }
 
+func TestCancelSessionDrain_ClearsAck(t *testing.T) {
+	sp := runtime.NewFake()
+	_ = sp.Start(context.Background(), "test-session", runtime.Config{})
+	_ = sp.SetMeta("test-session", "GC_DRAIN_ACK", "1")
+
+	dt := newDrainTracker()
+	dt.set("b1", &drainState{
+		reason:     "idle",
+		generation: 5,
+		ackSet:     true,
+	})
+
+	session := makeBead("b1", map[string]string{
+		"session_name": "test-session",
+		"generation":   "5",
+	})
+
+	if !cancelSessionDrain(session, sp, dt) {
+		t.Error("expected cancel to succeed")
+	}
+	// GC_DRAIN_ACK should be cleared.
+	ack, _ := sp.GetMeta("test-session", "GC_DRAIN_ACK")
+	if ack != "" {
+		t.Errorf("GC_DRAIN_ACK = %q, want empty (should be cleared on cancel)", ack)
+	}
+}
+
 func TestCancelSessionDrain_GenerationMismatch(t *testing.T) {
+	sp := runtime.NewFake()
 	dt := newDrainTracker()
 	dt.set("b1", &drainState{
 		reason:     "idle",
@@ -360,7 +389,7 @@ func TestCancelSessionDrain_GenerationMismatch(t *testing.T) {
 		"generation": "6", // re-woken
 	})
 
-	if cancelSessionDrain(session, dt) {
+	if cancelSessionDrain(session, sp, dt) {
 		t.Error("cancel should fail when generation doesn't match")
 	}
 }
