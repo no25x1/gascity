@@ -2,20 +2,6 @@
 
 A city is the environment where agents live, projects connect, and work happens. Each city is an independent workspace with its own agents, sessions, and work — you might have one for your team's backend services and another for a side project. 
 
-Gas City knows about all the cities on your machine, and monitors their health, resource usage, and other runtime characteristics. You can see the list of registered cities at any time:
-
-```
-$ gc cities
-NAME                          PATH
-my-city                       /Users/you/my-city
-project-management            /Users/you/pmc
-develop-and-deploy            /Users/you/dev
-```
-
-Each city is tracked by its path on disk — two cities can't share the same directory. The city name must also be unique; if you initialize two cities with the same name, the second will fail to register.
-
-If you're just getting started, this list is empty. Let's fix that.
-
 You create cities using the `gc init` command, specifying a directory for your city and a default provider to be used by agents:
 
 ```
@@ -52,12 +38,14 @@ $ cat ~/hello.py
 print("Hello, world!")
 ```
 
+## City Definitions
+
 When you ran `gc init`, Gas City populated the new directory to support both you defining what the city is and how it should work, and for Gas City to write out its own state needed to keep the city running.
 
 Your city directory looks like this:
 ```
 my-city/
-├── city.toml           # City definition
+├── city.toml           # City definition and local bindings
 ├── packs/              # Packages of reusable definitions
 ├── prompts/            # Prompts that initialize agents
 ├── formulas/           # Workflow definitions
@@ -134,18 +122,68 @@ One request went to Claude, the other to Codex. Providers remove the need to kno
 
 The `[[agent]]` entries define agents inline — the agents chapter covers all the definition fields. As things grow further, you'll compose reusable *packs* into the config rather than defining everything inline. Packs are covered later in this chapter.
 
-## Starting and stopping
+## Running Your Cities
 
-`gc init` starts your city automatically. But you'll also need to start and stop cities manually — after a reboot, when making config changes, or when you want to free resources.
+Gas City has two layers of infrastructure working behind the scenes: the *supervisor* and the *controller*.
+
+The **supervisor** is a machine-wide daemon that manages all your cities. It starts when you first run `gc init` or `gc start` and stays running in the background. It's responsible for starting and stopping city controllers, tracking registration, and restarting cities after a reboot.
+
+You can see the list of registered cities at any time:
+
+```
+$ gc cities
+NAME                          PATH
+my-city                       /Users/you/my-city
+project-management            /Users/you/pmc
+develop-and-deploy            /Users/you/dev
+```
+
+Each city is tracked by its path on disk — two cities can't share the same directory. The city name must also be unique; if you initialize two cities with the same name, the second will fail to register.
+
+When you called `gc init`, your city was registered automatically. To remove your city, deleting the directory isn't sufficient — you must unregister it from the supervisor:
+
+```
+$ gc unregister ~/my-city
+```
+
+To register an existing city directory (one that already has a `city.toml`) with the supervisor:
+
+```
+$ gc register ~/my-city
+```
+
+### City Controllers
+Each city gets its own **controller** — a background process launched by the supervisor. The controller is what keeps the city alive. It manages sessions, handles scaling, enforces timeouts, and watches for `city.toml` changes and applying them live.
+
+`gc init` starts your city automatically. But you'll want to start and stop cities manually — after a reboot, when making config changes, or when you want to free resources.
 
 ```
 $ gc start
 City started under supervisor.
 ```
 
-This starts the city controller under the machine-wide *supervisor*. The controller watches your config, reconciles agent sessions, handles scaling, and enforces idle timeouts.
+Once started, a city can be suspended and resumed. Suspending pauses all agent activity — sessions stop accepting work and go quiet — but the controller stays alive, watching for config changes and ready to bring everything back:
 
-Check what's running:
+```
+$ gc suspend
+City suspended.
+
+$ gc resume
+City resumed.
+```
+
+Suspend is useful when you need agents to stop temporarily — during infrastructure work, or to free up rate limits — without tearing down the city. The controller is still running, so resuming is instant.
+
+`gc stop` is more drastic. It shuts down the controller entirely, terminates all sessions, and unregisters the city from the supervisor:
+
+```
+$ gc stop
+City stopped.
+```
+
+The difference: suspend is a pause button, stop is a full shutdown. After stop, you need `gc start` to bring the city back.
+
+You can check the status of the city using `gc status`:
 
 ```
 $ gc status
@@ -162,15 +200,8 @@ Agents:
 Sessions: 2 active, 0 suspended
 ```
 
-Stop everything:
 
-```
-$ gc stop
-City stopped.
-```
-
-Stop sends a graceful shutdown signal, waits for the configured timeout, then force-kills anything still running.
-
+<!--
 Restart is just stop + start:
 
 ```
@@ -187,7 +218,9 @@ Dry-run: 2 agent(s) would start in city 'my-city'
   reviewer               session=my-city-reviewer
 
 No side effects executed (--dry-run).
-```
+-->
+
+
 
 ## Rigs
 
@@ -396,45 +429,6 @@ includes = ["packs/gastown"]
 
 
 
-## How Gas City keeps your city running
-
-Gas City has two layers of infrastructure working behind the scenes: the *supervisor* and the *controller*.
-
-The **supervisor** is a machine-wide daemon that manages all your cities. It starts when you first run `gc init` or `gc start` and stays running in the background. It's responsible for starting and stopping city controllers, tracking registration, and restarting cities after a reboot.
-
-Each city gets its own **controller** — a background process launched by the supervisor. The controller is what keeps the city alive. It:
-
-- Watches `city.toml` for changes and applies them live
-- Starts missing agent sessions, drains excess ones
-- Enforces idle timeouts and pool scaling
-- Restarts crashed sessions (with backoff)
-- Listens on a Unix socket for commands from the CLI
-
-You don't interact with either directly — the `gc` commands talk to them for you. But it's useful to know they exist, because when you edit `city.toml` while the city is running, the controller picks up the changes automatically on its next patrol tick (every 30 seconds by default).
-
-### Health checks
-
-When something isn't working right, `gc doctor` runs a suite of diagnostics:
-
-```
-$ gc doctor
-[OK]   City structure
-[OK]   City configuration
-[OK]   Infrastructure binaries
-[FAIL] Agent sessions: 1 session missing
-       agent 'mayor' not running
-[OK]   Bead store
-[OK]   Event log
-
-Passed: 5/6  Failed: 1  Warnings: 0
-```
-
-Add `--fix` to attempt automatic repairs:
-
-```
-$ gc doctor --fix
-```
-
 
 ## Command reference
 
@@ -466,8 +460,37 @@ $ gc doctor --fix
 | `gc pack list` | List configured packs |
 | `gc pack fetch` | Clone or update remote packs |
 
+
+
 <!--
 BONEYARD — draft material for future sections. Not part of the published tutorial.
+
+
+### Health checks
+
+`gc doctor` runs a suite of diagnostics that check the structural integrity of your city — is the config valid, are the expected binaries installed, are agent sessions running, is the bead store healthy. It's the first thing to run when something isn't working right.
+
+```
+$ gc doctor
+[OK]   City structure
+[OK]   City configuration
+[OK]   Infrastructure binaries
+[FAIL] Agent sessions: 1 session missing
+       agent 'mayor' not running
+[OK]   Bead store
+[OK]   Event log
+
+Passed: 5/6  Failed: 1  Warnings: 0
+```
+
+Each check reports OK, WARN, or FAIL. Packs can ship their own doctor checks (e.g., Gastown checks that its scripts are executable, Maintenance checks that `jq` and `gh` are on PATH).
+
+Add `--fix` to attempt automatic repairs — doctor will try to restart missing sessions, reinitialize stores, and fix what it can:
+
+```
+$ gc doctor --fix
+```
+
 
 ### Local overrides (city.local.toml)
 
