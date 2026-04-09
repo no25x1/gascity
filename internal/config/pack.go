@@ -54,7 +54,7 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 	for i := range cfg.Rigs {
 		rig := &cfg.Rigs[i]
 		topoRefs := rig.Includes
-		if len(topoRefs) == 0 {
+		if len(topoRefs) == 0 && len(rig.Imports) == 0 {
 			continue
 		}
 
@@ -131,6 +131,105 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				for name, spec := range providers {
 					if _, exists := cfg.Providers[name]; !exists {
 						cfg.Providers[name] = spec
+					}
+				}
+			}
+		}
+
+		// Process rig-level [imports.X] entries (V2).
+		if len(rig.Imports) > 0 {
+			importNames := make([]string, 0, len(rig.Imports))
+			for name := range rig.Imports {
+				importNames = append(importNames, name)
+			}
+			sort.Strings(importNames)
+
+			for _, bindingName := range importNames {
+				imp := rig.Imports[bindingName]
+
+				impDir, err := resolvePackRef(imp.Source, cityRoot, cityRoot)
+				if err != nil {
+					return fmt.Errorf("rig %q import %q: %w", rig.Name, bindingName, err)
+				}
+
+				impPath := filepath.Join(impDir, packFile)
+				agents, namedSessions, providers, services, topoDirs, reqs, globals, err := loadPack(
+					fs, impPath, impDir, cityRoot, rig.Name, nil)
+				if err != nil {
+					return fmt.Errorf("rig %q import %q: %w", rig.Name, bindingName, err)
+				}
+				if len(services) > 0 {
+					return fmt.Errorf("rig %q import %q: [[service]] is only allowed in city-scoped packs", rig.Name, bindingName)
+				}
+				rigGlobals = append(rigGlobals, globals...)
+
+				// Stamp binding name.
+				for i := range agents {
+					if agents[i].BindingName == "" {
+						agents[i].BindingName = bindingName
+					} else if imp.Export {
+						agents[i].BindingName = bindingName
+					}
+				}
+
+				// Read pack name for provenance.
+				impData, _ := fs.ReadFile(impPath)
+				var impMeta struct {
+					Pack struct {
+						Name string `toml:"name"`
+					} `toml:"pack"`
+				}
+				if impData != nil {
+					toml.Decode(string(impData), &impMeta)
+				}
+				for i := range agents {
+					if agents[i].PackName == "" {
+						agents[i].PackName = impMeta.Pack.Name
+					}
+				}
+
+				// Validate rig-scoped requirements.
+				for _, req := range reqs {
+					if req.Scope != "rig" {
+						continue
+					}
+					found := false
+					for _, a := range agents {
+						if a.Name == req.Agent {
+							found = true
+							break
+						}
+					}
+					if !found {
+						return fmt.Errorf("rig %q: import %q requires rig agent %q — not found", rig.Name, bindingName, req.Agent)
+					}
+				}
+
+				rigTopoDirs = appendUnique(rigTopoDirs, topoDirs...)
+
+				agents = filterAgentsByScope(agents, false)
+				namedSessions = filterNamedSessionsByScope(namedSessions, false)
+
+				if rigFormulaDirs != nil {
+					for _, td := range topoDirs {
+						fd := filepath.Join(td, "formulas")
+						if _, sErr := fs.Stat(fd); sErr == nil {
+							rigFormulaDirs[rig.Name] = append(rigFormulaDirs[rig.Name], fd)
+						}
+					}
+				}
+
+				rigAgents = append(rigAgents, agents...)
+				rigNamedSessions = append(rigNamedSessions, namedSessions...)
+
+				if len(providers) > 0 {
+					if cfg.Providers == nil {
+						cfg.Providers = make(map[string]ProviderSpec)
+					}
+					for name, spec := range providers {
+						if _, exists := cfg.Providers[name]; !exists {
+							cfg.Providers[name] = spec
+						}
 					}
 				}
 			}
@@ -1302,7 +1401,7 @@ func PackDefinesAgent(fs fsys.FS, packRef, cityRoot, agentName string) bool {
 // HasPackRigs reports whether any rig in the config uses a pack.
 func HasPackRigs(rigs []Rig) bool {
 	for _, r := range rigs {
-		if len(r.Includes) > 0 {
+		if len(r.Includes) > 0 || len(r.Imports) > 0 {
 			return true
 		}
 	}

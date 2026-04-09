@@ -251,10 +251,13 @@ type Rig struct {
 	// pack formulas for this rig by filename.
 	// Relative paths resolve against the city directory.
 	FormulasDir string `toml:"formulas_dir,omitempty"`
-	// Includes lists pack directories or URLs for this rig.
-	// Replaces the older pack/packs fields. Each entry is a
-	// local path, a git source//sub#ref URL, or a GitHub tree URL.
+	// Includes lists pack directories or URLs for this rig (V1 mechanism).
+	// Each entry is a local path, a git source//sub#ref URL, or a GitHub tree URL.
 	Includes []string `toml:"includes,omitempty"`
+	// Imports defines named pack imports for this rig (V2 mechanism).
+	// Each key is a binding name; agents from these imports get qualified
+	// names like "rigName/bindingName.agentName".
+	Imports map[string]Import `toml:"imports,omitempty"`
 	// MaxActiveSessions is the rig-level cap on total concurrent sessions across
 	// all agents in this rig. Nil means inherit from workspace (or unlimited).
 	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
