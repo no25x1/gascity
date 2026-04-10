@@ -37,6 +37,7 @@ func configureTestscriptEnvDefaults() {
 	setTestscriptEnvDefault("GC_SESSION", "fake")
 	setTestscriptEnvDefault("GC_BEADS", "file")
 	setTestscriptEnvDefault("GC_DOLT", "skip")
+	setTestscriptEnvDefault("GC_BOOTSTRAP", "skip")
 }
 
 func configureIsolatedRuntimeEnv(t *testing.T) {
@@ -51,6 +52,9 @@ func configureIsolatedRuntimeEnv(t *testing.T) {
 	}
 	if os.Getenv("GC_DOLT") == "" {
 		t.Setenv("GC_DOLT", "skip")
+	}
+	if os.Getenv("GC_BOOTSTRAP") == "" {
+		t.Setenv("GC_BOOTSTRAP", "skip")
 	}
 }
 

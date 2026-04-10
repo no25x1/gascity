@@ -239,6 +239,7 @@ func TestFinalizeInitBootstrapsImplicitImports(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BOOTSTRAP", "on")
 
 	repo := initBootstrapTaggedPackRepo(t, "gc-import", "v0.2.0")
 	oldBootstrap := bootstrap.BootstrapPacks
@@ -281,11 +282,45 @@ func TestFinalizeInitBootstrapsImplicitImports(t *testing.T) {
 		t.Fatalf("reading implicit-import.toml: %v", err)
 	}
 	text := string(data)
-	if !strings.Contains(text, `[imports.import]`) {
+	if !strings.Contains(text, `[imports."import"]`) {
 		t.Fatalf("implicit-import.toml missing import entry:\n%s", text)
 	}
 	if !strings.Contains(text, `source = `+`"`+repo+`"`) {
 		t.Fatalf("implicit-import.toml missing repo source:\n%s", text)
+	}
+}
+
+func TestFinalizeInitReportsBootstrapFailure(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BOOTSTRAP", "on")
+
+	oldBootstrap := bootstrap.BootstrapPacks
+	bootstrap.BootstrapPacks = []bootstrap.BootstrapEntry{{
+		Name:    "import",
+		Source:  filepath.Join(t.TempDir(), "missing-repo"),
+		Version: "0.2.0",
+	}}
+	t.Cleanup(func() { bootstrap.BootstrapPacks = oldBootstrap })
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	var initStdout, initStderr bytes.Buffer
+	code := doInit(fsys.OSFS{}, cityPath, defaultWizardConfig(), "", &initStdout, &initStderr)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
+	}
+
+	var stdout, stderr bytes.Buffer
+	code = finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{
+		commandName:           "gc init",
+		skipProviderReadiness: true,
+	})
+	if code != 1 {
+		t.Fatalf("finalizeInit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "bootstrapping implicit imports") {
+		t.Fatalf("stderr = %q, want bootstrap failure message", stderr.String())
 	}
 }
 

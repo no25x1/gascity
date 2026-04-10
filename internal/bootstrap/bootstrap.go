@@ -48,6 +48,9 @@ func CacheDir(source, commit string) string {
 
 // EnsureBootstrap populates the global cache and updates implicit-import.toml.
 func EnsureBootstrap(gcHome string) error {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("GC_BOOTSTRAP")), "skip") {
+		return nil
+	}
 	if strings.TrimSpace(gcHome) == "" {
 		gcHome = defaultGCHome()
 	}
@@ -94,6 +97,9 @@ func defaultGCHome() string {
 	if v := strings.TrimSpace(os.Getenv("GC_HOME")); v != "" {
 		return v
 	}
+	if strings.HasSuffix(os.Args[0], ".test") {
+		return ""
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return filepath.Join(os.TempDir(), ".gc")
@@ -108,7 +114,7 @@ func materializeBootstrapPack(gcHome string, entry BootstrapEntry) (string, erro
 	}
 	defer os.RemoveAll(tmpDir) //nolint:errcheck // best-effort cleanup
 
-	if _, err := runGit("", "clone", "--quiet", "--depth", "1", "--branch", entry.Version, entry.Source, tmpDir); err != nil {
+	if err := cloneBootstrapPack(entry.Source, entry.Version, tmpDir); err != nil {
 		return "", err
 	}
 	commit, err := runGit(tmpDir, "rev-parse", "HEAD")
@@ -222,7 +228,7 @@ func writeImplicitFile(path string, imports map[string]implicitImport) error {
 	for _, name := range names {
 		imp := imports[name]
 		b.WriteString("\n")
-		b.WriteString("[imports." + name + "]\n")
+		b.WriteString(fmt.Sprintf("[imports.%q]\n", name))
 		b.WriteString(fmt.Sprintf("source = %q\n", imp.Source))
 		if imp.Version != "" {
 			b.WriteString(fmt.Sprintf("version = %q\n", imp.Version))
@@ -247,7 +253,37 @@ func runGit(dir string, args ...string) (string, error) {
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
 	}
 	return string(out), nil
+}
+
+func cloneBootstrapPack(source, version, dst string) error {
+	versions := []string{version}
+	switch {
+	case version == "":
+	case strings.HasPrefix(version, "v"):
+		versions = append(versions, strings.TrimPrefix(version, "v"))
+	default:
+		versions = append(versions, "v"+version)
+	}
+
+	var lastErr error
+	for _, candidate := range versions {
+		args := []string{"clone", "--quiet", "--depth", "1"}
+		if candidate != "" {
+			args = append(args, "--branch", candidate)
+		}
+		args = append(args, source, dst)
+		if _, err := runGit("", args...); err == nil {
+			return nil
+		} else {
+			lastErr = err
+			_ = os.RemoveAll(dst)
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no version candidates available")
+	}
+	return lastErr
 }

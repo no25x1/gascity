@@ -15,7 +15,7 @@ func TestEnsureBootstrapPopulatesCacheAndWritesImplicitFile(t *testing.T) {
 	BootstrapPacks = []BootstrapEntry{{
 		Name:    "import",
 		Source:  repo,
-		Version: "v0.2.0",
+		Version: "0.2.0",
 	}}
 	t.Cleanup(func() { BootstrapPacks = old })
 
@@ -29,10 +29,10 @@ func TestEnsureBootstrapPopulatesCacheAndWritesImplicitFile(t *testing.T) {
 		t.Fatalf("reading implicit-import.toml: %v", err)
 	}
 	text := string(data)
-	if !strings.Contains(text, `[imports.import]`) {
+	if !strings.Contains(text, `[imports."import"]`) {
 		t.Fatalf("implicit-import.toml missing import entry:\n%s", text)
 	}
-	if !strings.Contains(text, `version = "v0.2.0"`) {
+	if !strings.Contains(text, `version = "0.2.0"`) {
 		t.Fatalf("implicit-import.toml missing version:\n%s", text)
 	}
 
