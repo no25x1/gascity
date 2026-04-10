@@ -3,10 +3,11 @@ package bootstrap
 
 import (
 	"crypto/sha256"
+	"embed"
 	"fmt"
-	"io"
+	"io/fs"
 	"os"
-	"os/exec"
+	pathpkg "path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -16,17 +17,23 @@ import (
 
 const implicitImportSchema = 1
 
+//go:embed packs/**
+var embeddedBootstrapPacks embed.FS
+
+var bootstrapAssets fs.FS = embeddedBootstrapPacks
+
 // BootstrapEntry describes a pack that gc init bootstraps into the global cache.
 type BootstrapEntry struct {
-	Name    string
-	Source  string
-	Version string
+	Name     string
+	Source   string
+	Version  string
+	AssetDir string
 }
 
 // BootstrapPacks is the hardcoded set of implicit packs bootstrapped by gc init.
 var BootstrapPacks = []BootstrapEntry{
-	{Name: "import", Source: "github.com/gastownhall/gc-import", Version: "0.2.0"},
-	{Name: "registry", Source: "github.com/gastownhall/gc-registry", Version: "0.1.0"},
+	{Name: "import", Source: "github.com/gastownhall/gc-import", Version: "0.2.0", AssetDir: "packs/import"},
+	{Name: "registry", Source: "github.com/gastownhall/gc-registry", Version: "0.1.0", AssetDir: "packs/registry"},
 }
 
 type implicitImport struct {
@@ -66,29 +73,36 @@ func EnsureBootstrap(gcHome string) error {
 	if err != nil {
 		return err
 	}
+	updated := false
 
 	for _, entry := range BootstrapPacks {
-		existing, ok := imports[entry.Name]
-		if ok && existing.Source == entry.Source && existing.Version == entry.Version && existing.Commit != "" {
-			cacheDir := filepath.Join(gcHome, "cache", "repos", CacheDir(existing.Source, existing.Commit))
-			if _, err := os.Stat(filepath.Join(cacheDir, "pack.toml")); err == nil {
-				continue
-			}
-		}
-
-		commit, err := materializeBootstrapPack(gcHome, entry)
+		commit, err := bootstrapPackRevision(entry)
 		if err != nil {
 			return fmt.Errorf("bootstrapping %q: %w", entry.Name, err)
 		}
-		imports[entry.Name] = implicitImport{
+
+		cacheDir := filepath.Join(gcHome, "cache", "repos", CacheDir(entry.Source, commit))
+		if _, err := os.Stat(filepath.Join(cacheDir, "pack.toml")); err != nil {
+			if err := materializeBootstrapPack(cacheDir, entry); err != nil {
+				return fmt.Errorf("bootstrapping %q: %w", entry.Name, err)
+			}
+		}
+
+		next := implicitImport{
 			Source:  entry.Source,
 			Version: entry.Version,
 			Commit:  commit,
 		}
+		if imports[entry.Name] != next {
+			imports[entry.Name] = next
+			updated = true
+		}
 	}
 
-	if err := writeImplicitFile(implicitPath, imports); err != nil {
-		return err
+	if updated {
+		if err := writeImplicitFile(implicitPath, imports); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -107,88 +121,120 @@ func defaultGCHome() string {
 	return filepath.Join(home, ".gc")
 }
 
-func materializeBootstrapPack(gcHome string, entry BootstrapEntry) (string, error) {
-	tmpDir, err := os.MkdirTemp(gcHome, "bootstrap-pack-*")
-	if err != nil {
-		return "", fmt.Errorf("creating temp dir: %w", err)
-	}
-	defer os.RemoveAll(tmpDir) //nolint:errcheck // best-effort cleanup
-
-	if err := cloneBootstrapPack(entry.Source, entry.Version, tmpDir); err != nil {
-		return "", err
-	}
-	commit, err := runGit(tmpDir, "rev-parse", "HEAD")
+func bootstrapPackRevision(entry BootstrapEntry) (string, error) {
+	paths, err := collectAssetFiles(entry.AssetDir)
 	if err != nil {
 		return "", err
 	}
-	commit = strings.TrimSpace(commit)
-	cacheDir := filepath.Join(gcHome, "cache", "repos", CacheDir(entry.Source, commit))
-	if _, err := os.Stat(filepath.Join(cacheDir, "pack.toml")); err == nil {
-		return commit, nil
+	h := sha256.New()
+	for _, rel := range paths {
+		data, err := fs.ReadFile(bootstrapAssets, pathpkg.Join(entry.AssetDir, rel))
+		if err != nil {
+			return "", err
+		}
+		h.Write([]byte(rel)) //nolint:errcheck // hash.Write never errors
+		h.Write([]byte{0})   //nolint:errcheck // hash.Write never errors
+		h.Write(data)        //nolint:errcheck // hash.Write never errors
+		h.Write([]byte{0})   //nolint:errcheck // hash.Write never errors
 	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
 
+func materializeBootstrapPack(cacheDir string, entry BootstrapEntry) error {
 	stageDir := cacheDir + ".tmp"
 	_ = os.RemoveAll(stageDir)
-	if err := copyTree(tmpDir, stageDir); err != nil {
+	if err := copyEmbeddedTree(entry.AssetDir, stageDir); err != nil {
 		_ = os.RemoveAll(stageDir)
-		return "", fmt.Errorf("copying bootstrap pack: %w", err)
+		return err
+	}
+	if _, err := os.Stat(filepath.Join(stageDir, "pack.toml")); err != nil {
+		_ = os.RemoveAll(stageDir)
+		return fmt.Errorf("embedded bootstrap pack %q is missing pack.toml", entry.AssetDir)
 	}
 	if err := os.Rename(stageDir, cacheDir); err != nil {
 		_ = os.RemoveAll(stageDir)
 		if _, statErr := os.Stat(filepath.Join(cacheDir, "pack.toml")); statErr == nil {
-			return commit, nil
-		}
-		return "", fmt.Errorf("moving bootstrap pack into cache: %w", err)
-	}
-	return commit, nil
-}
-
-func copyTree(src, dst string) error {
-	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		if rel == ".git" || strings.HasPrefix(rel, ".git"+string(filepath.Separator)) {
-			if info.IsDir() {
-				return filepath.SkipDir
-			}
 			return nil
 		}
-		target := filepath.Join(dst, rel)
-		if info.IsDir() {
-			return os.MkdirAll(target, info.Mode().Perm())
+		return fmt.Errorf("moving bootstrap pack into cache: %w", err)
+	}
+	return nil
+}
+
+func collectAssetFiles(root string) ([]string, error) {
+	if strings.TrimSpace(root) == "" {
+		return nil, fmt.Errorf("bootstrap asset directory is required")
+	}
+	var paths []string
+	if _, err := fs.Stat(bootstrapAssets, root); err != nil {
+		return nil, fmt.Errorf("reading embedded bootstrap pack %q: %w", root, err)
+	}
+	err := fs.WalkDir(bootstrapAssets, root, func(assetPath string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel := assetRel(root, assetPath)
+		paths = append(paths, rel)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(paths)
+	if !containsString(paths, "pack.toml") {
+		return nil, fmt.Errorf("embedded bootstrap pack %q is missing pack.toml", root)
+	}
+	return paths, nil
+}
+
+func copyEmbeddedTree(root, dst string) error {
+	return fs.WalkDir(bootstrapAssets, root, func(assetPath string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel := assetRel(root, assetPath)
+		target := dst
+		if rel != "." {
+			target = filepath.Join(dst, rel)
+		}
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+
+		data, err := fs.ReadFile(bootstrapAssets, assetPath)
+		if err != nil {
+			return err
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
 		}
-		in, err := os.Open(path)
-		if err != nil {
-			return err
+		perm := os.FileMode(0o644)
+		if strings.HasSuffix(assetPath, ".sh") {
+			perm = 0o755
 		}
-
-		out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode().Perm())
-		if err != nil {
-			in.Close() //nolint:errcheck // best effort
-			return err
-		}
-		if _, err := io.Copy(out, in); err != nil {
-			out.Close() //nolint:errcheck // best effort
-			in.Close()  //nolint:errcheck // best effort
-			return err
-		}
-		if err := out.Close(); err != nil {
-			in.Close() //nolint:errcheck // best effort
-			return err
-		}
-		if err := in.Close(); err != nil {
-			return err
-		}
-		return nil
+		return os.WriteFile(target, data, perm)
 	})
+}
+
+func assetRel(root, assetPath string) string {
+	cleanRoot := pathpkg.Clean(root)
+	cleanPath := pathpkg.Clean(assetPath)
+	if cleanPath == cleanRoot {
+		return "."
+	}
+	return strings.TrimPrefix(cleanPath, cleanRoot+"/")
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func readImplicitFile(path string) (map[string]implicitImport, error) {
@@ -246,44 +292,4 @@ func writeImplicitFile(path string, imports map[string]implicitImport) error {
 		return fmt.Errorf("replacing implicit-import.toml: %w", err)
 	}
 	return nil
-}
-
-func runGit(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
-	}
-	return string(out), nil
-}
-
-func cloneBootstrapPack(source, version, dst string) error {
-	versions := []string{version}
-	switch {
-	case version == "":
-	case strings.HasPrefix(version, "v"):
-		versions = append(versions, strings.TrimPrefix(version, "v"))
-	default:
-		versions = append(versions, "v"+version)
-	}
-
-	var lastErr error
-	for _, candidate := range versions {
-		args := []string{"clone", "--quiet", "--depth", "1"}
-		if candidate != "" {
-			args = append(args, "--branch", candidate)
-		}
-		args = append(args, source, dst)
-		if _, err := runGit("", args...); err == nil {
-			return nil
-		} else {
-			lastErr = err
-			_ = os.RemoveAll(dst)
-		}
-	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("no version candidates available")
-	}
-	return lastErr
 }

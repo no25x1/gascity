@@ -5,7 +5,6 @@ import (
 	"context"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -241,15 +240,6 @@ func TestFinalizeInitBootstrapsImplicitImports(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	t.Setenv("GC_BOOTSTRAP", "on")
 
-	repo := initBootstrapTaggedPackRepo(t, "gc-import", "v0.2.0")
-	oldBootstrap := bootstrap.BootstrapPacks
-	bootstrap.BootstrapPacks = []bootstrap.BootstrapEntry{{
-		Name:    "import",
-		Source:  repo,
-		Version: "v0.2.0",
-	}}
-	t.Cleanup(func() { bootstrap.BootstrapPacks = oldBootstrap })
-
 	cityPath := filepath.Join(t.TempDir(), "bright-lights")
 	var initStdout, initStderr bytes.Buffer
 	code := doInit(fsys.OSFS{}, cityPath, defaultWizardConfig(), "", &initStdout, &initStderr)
@@ -285,8 +275,8 @@ func TestFinalizeInitBootstrapsImplicitImports(t *testing.T) {
 	if !strings.Contains(text, `[imports."import"]`) {
 		t.Fatalf("implicit-import.toml missing import entry:\n%s", text)
 	}
-	if !strings.Contains(text, `source = `+`"`+repo+`"`) {
-		t.Fatalf("implicit-import.toml missing repo source:\n%s", text)
+	if !strings.Contains(text, `source = "github.com/gastownhall/gc-import"`) {
+		t.Fatalf("implicit-import.toml missing import source:\n%s", text)
 	}
 }
 
@@ -298,9 +288,10 @@ func TestFinalizeInitReportsBootstrapFailure(t *testing.T) {
 
 	oldBootstrap := bootstrap.BootstrapPacks
 	bootstrap.BootstrapPacks = []bootstrap.BootstrapEntry{{
-		Name:    "import",
-		Source:  filepath.Join(t.TempDir(), "missing-repo"),
-		Version: "0.2.0",
+		Name:     "import",
+		Source:   "github.com/gastownhall/gc-import",
+		Version:  "0.2.0",
+		AssetDir: "packs/missing",
 	}}
 	t.Cleanup(func() { bootstrap.BootstrapPacks = oldBootstrap })
 
@@ -322,44 +313,6 @@ func TestFinalizeInitReportsBootstrapFailure(t *testing.T) {
 	if !strings.Contains(stderr.String(), "bootstrapping implicit imports") {
 		t.Fatalf("stderr = %q, want bootstrap failure message", stderr.String())
 	}
-}
-
-func initBootstrapTaggedPackRepo(t *testing.T, packName, version string) string {
-	t.Helper()
-
-	dir := filepath.Join(t.TempDir(), packName)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	runInitGit(t, dir, "init")
-	runInitGit(t, dir, "config", "user.name", "Test User")
-	runInitGit(t, dir, "config", "user.email", "test@example.com")
-	if err := os.WriteFile(filepath.Join(dir, "pack.toml"), []byte(`
-[pack]
-name = "`+packName+`"
-schema = 1
-
-[[agent]]
-name = "runner"
-scope = "city"
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runInitGit(t, dir, "add", "pack.toml")
-	runInitGit(t, dir, "commit", "-m", "init")
-	runInitGit(t, dir, "tag", version)
-	return dir
-}
-
-func runInitGit(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v: %v\n%s", args, err, out)
-	}
-	return strings.TrimSpace(string(out))
 }
 
 func TestFinalizeInitReportsConfigLoadErrorDuringProviderPreflight(t *testing.T) {
