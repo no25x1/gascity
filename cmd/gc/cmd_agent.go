@@ -261,7 +261,7 @@ func doAgentAdd(fs fsys.FS, cityPath, name, promptTemplate, dir string, suspende
 
 	inputDir, inputName := config.ParseQualifiedName(name)
 	for _, a := range cfg.Agents {
-		if a.Dir == inputDir && a.Name == inputName {
+		if config.AgentMatchesIdentity(&a, name) {
 			fmt.Fprintf(stderr, "gc agent add: agent %q already exists\n", name) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -358,8 +358,9 @@ func doAgentSuspend(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer)
 	resolved, ok := resolveAgentIdentity(cfg, name, currentRigContext(cfg))
 	if ok {
 		// Found in raw config — toggle and write back.
+		resolvedQN := resolved.QualifiedName()
 		for i := range cfg.Agents {
-			if cfg.Agents[i].Dir == resolved.Dir && cfg.Agents[i].Name == resolved.Name {
+			if cfg.Agents[i].QualifiedName() == resolvedQN {
 				cfg.Agents[i].Suspended = true
 				break
 			}
@@ -458,8 +459,9 @@ func doAgentResume(fs fsys.FS, cityPath, name string, stdout, stderr io.Writer) 
 	resolved, ok := resolveAgentIdentity(cfg, name, currentRigContext(cfg))
 	if ok {
 		// Found in raw config — toggle and write back.
+		resolvedQN := resolved.QualifiedName()
 		for i := range cfg.Agents {
-			if cfg.Agents[i].Dir == resolved.Dir && cfg.Agents[i].Name == resolved.Name {
+			if cfg.Agents[i].QualifiedName() == resolvedQN {
 				cfg.Agents[i].Suspended = false
 				break
 			}
