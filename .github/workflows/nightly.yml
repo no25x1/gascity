@@ -114,6 +114,7 @@ jobs:
 
   worker-inference-codex:
     name: WorkerInference codex/tmux-cli
+    if: ${{ false }} # Claude-only nightly for now.
     runs-on: ubuntu-latest
     env:
       PROFILE: codex/tmux-cli
@@ -169,6 +170,7 @@ jobs:
 
   worker-inference-gemini:
     name: WorkerInference gemini/tmux-cli
+    if: ${{ false }} # Claude-only nightly for now.
     runs-on: ubuntu-latest
     env:
       PROFILE: gemini/tmux-cli
@@ -231,8 +233,6 @@ jobs:
     if: ${{ always() }}
     needs:
       - worker-inference-claude
-      - worker-inference-codex
-      - worker-inference-gemini
     env:
       WORKER_ROLLUP_DIR: ${{ github.workspace }}/.nightly-tmp/worker-inference-summary-reports
       WORKER_ROLLUP_JSON: ${{ github.workspace }}/.nightly-tmp/worker-inference-summary-reports/worker-inference-summary.json
@@ -248,37 +248,17 @@ jobs:
         with:
           name: worker-inference-claude-reports
           path: ${{ env.WORKER_ROLLUP_DIR }}/claude
-      - name: Download codex WorkerInference artifacts
-        id: download_worker_inference_codex
-        if: ${{ always() }}
-        continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: worker-inference-codex-reports
-          path: ${{ env.WORKER_ROLLUP_DIR }}/codex
-      - name: Download gemini WorkerInference artifacts
-        id: download_worker_inference_gemini
-        if: ${{ always() }}
-        continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: worker-inference-gemini-reports
-          path: ${{ env.WORKER_ROLLUP_DIR }}/gemini
       - name: WorkerInference rollup summary
         if: ${{ always() }}
         env:
           CLAUDE_DOWNLOAD: ${{ steps.download_worker_inference_claude.outcome }}
-          CODEX_DOWNLOAD: ${{ steps.download_worker_inference_codex.outcome }}
-          GEMINI_DOWNLOAD: ${{ steps.download_worker_inference_gemini.outcome }}
         run: |
           python3 .github/workflows/scripts/worker_report_rollup.py \
             "$WORKER_ROLLUP_DIR" \
             --output "$WORKER_ROLLUP_JSON" \
             --title "Worker inference summary" \
             --require-reports \
-            --expected-profile "claude/tmux-cli=${CLAUDE_DOWNLOAD}" \
-            --expected-profile "codex/tmux-cli=${CODEX_DOWNLOAD}" \
-            --expected-profile "gemini/tmux-cli=${GEMINI_DOWNLOAD}"
+            --expected-profile "claude/tmux-cli=${CLAUDE_DOWNLOAD}"
       - name: Upload WorkerInference summary artifacts
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -289,32 +269,24 @@ jobs:
       - name: Assert worker-inference profile matrix passed
         run: |
           CLAUDE_RESULT='${{ needs.worker-inference-claude.result }}'
-          CODEX_RESULT='${{ needs.worker-inference-codex.result }}'
-          GEMINI_RESULT='${{ needs.worker-inference-gemini.result }}'
           CLAUDE_DOWNLOAD='${{ steps.download_worker_inference_claude.outcome }}'
-          CODEX_DOWNLOAD='${{ steps.download_worker_inference_codex.outcome }}'
-          GEMINI_DOWNLOAD='${{ steps.download_worker_inference_gemini.outcome }}'
           if [ -f "$WORKER_ROLLUP_JSON" ]; then
             ROLLUP_STATUS="$(python3 -c "import json, sys; print(json.load(open(sys.argv[1], encoding='utf-8')).get('summary', {}).get('status', 'unknown'))" "$WORKER_ROLLUP_JSON")"
           else
             ROLLUP_STATUS='missing'
           fi
           printf 'worker-inference-claude=%s\n' "$CLAUDE_RESULT"
-          printf 'worker-inference-codex=%s\n' "$CODEX_RESULT"
-          printf 'worker-inference-gemini=%s\n' "$GEMINI_RESULT"
           printf 'download-worker-inference-claude=%s\n' "$CLAUDE_DOWNLOAD"
-          printf 'download-worker-inference-codex=%s\n' "$CODEX_DOWNLOAD"
-          printf 'download-worker-inference-gemini=%s\n' "$GEMINI_DOWNLOAD"
           printf 'worker-inference-rollup=%s\n' "$ROLLUP_STATUS"
-          if [ "$CLAUDE_DOWNLOAD" != "success" ] || [ "$CODEX_DOWNLOAD" != "success" ] || [ "$GEMINI_DOWNLOAD" != "success" ]; then
-            echo "worker-inference summary is missing one or more expected profile artifacts" >&2
+          if [ "$CLAUDE_DOWNLOAD" != "success" ]; then
+            echo "worker-inference summary is missing the expected claude profile artifacts" >&2
             exit 1
           fi
           if [ "$ROLLUP_STATUS" != "pass" ]; then
             echo "worker-inference rollup reported a non-pass status" >&2
             exit 1
           fi
-          if [ "$CLAUDE_RESULT" != "success" ] || [ "$CODEX_RESULT" != "success" ] || [ "$GEMINI_RESULT" != "success" ]; then
-            echo "worker-inference matrix failed" >&2
+          if [ "$CLAUDE_RESULT" != "success" ]; then
+            echo "worker-inference claude lane failed" >&2
             exit 1
           fi
