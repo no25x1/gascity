@@ -1226,25 +1226,9 @@ func runFreshManualSessionTurn(t *testing.T, provider, templateName, alias, prom
 			"output_rel":  outputRel,
 		}, nil, "spawn", fmt.Errorf("creating city API client: %w", err)
 	}
-	sessionInfo, statusOut, err = waitForSessionRunning(c.Dir, sessionID, sessionInfo.SessionName)
-	if err != nil {
-		return inferenceSessionRun{}, map[string]string{
-			"city_dir":       c.Dir,
-			"provider":       provider,
-			"template":       templateName,
-			"alias":          alias,
-			"session_id":     sessionID,
-			"session_name":   sessionInfo.SessionName,
-			"session_key":    sessionInfo.SessionKey,
-			"session_out":    strings.TrimSpace(newOut),
-			"start_out":      strings.TrimSpace(startOut),
-			"status":         strings.TrimSpace(statusOut),
-			"api_city_scope": cityScope,
-			"output_rel":     outputRel,
-		}, nil, "spawn", fmt.Errorf("manual session did not reach running state before first message: %w", err)
-	}
 	outputPath := filepath.Join(c.Dir, outputRel)
-	if err := client.SendSessionMessage(sessionID, prompt); err != nil {
+	sessionInfo, statusOut, err = sendSessionMessageWhenReady(c.Dir, sessionID, sessionInfo.SessionName, client, prompt)
+	if err != nil {
 		evidence := map[string]string{
 			"city_dir":         c.Dir,
 			"provider":         provider,
@@ -1268,7 +1252,7 @@ func runFreshManualSessionTurn(t *testing.T, provider, templateName, alias, prom
 			SessionKey:   sessionInfo.SessionKey,
 			OutputPath:   outputPath,
 			LastStatus:   strings.TrimSpace(statusOut),
-		}, evidence, evidence, "task", fmt.Errorf("session API message failed: %w", err)
+		}, evidence, evidence, "task", fmt.Errorf("initial session API message failed: %w", err)
 	}
 
 	sessionInfo, statusOut, err = waitForSessionRunning(c.Dir, sessionID, sessionInfo.SessionName)
@@ -1981,58 +1965,106 @@ func waitForSessionPresent(cityDir, identity, expectedSessionName string) (sessi
 
 func waitForSessionState(cityDir, identity, expectedSessionName string, requireRunning bool) (sessionJSON, string, error) {
 	var (
-		lastStatus   string
-		lastSessions string
-		liveSession  sessionJSON
+		lastStatus  string
+		liveSession sessionJSON
 	)
 	ready := pollForCondition(90*time.Second, 5*time.Second, func() bool {
-		statusOut, statusErr := runGCWithTimeout(10*time.Second, liveEnv, cityDir, "status")
-		lastStatus = strings.TrimSpace(statusOut)
-		if statusErr != nil {
-			lastStatus = strings.TrimSpace(statusOut + "\nERR: " + statusErr.Error())
-			return false
-		}
-		sessionsOut, sessionsErr := runGCWithTimeout(10*time.Second, liveEnv, cityDir, "session", "list", "--json")
-		lastSessions = strings.TrimSpace(sessionsOut)
-		if sessionsErr != nil {
-			lastSessions = strings.TrimSpace(sessionsOut + "\nERR: " + sessionsErr.Error())
-			return false
-		}
-		sessions, err := parseSessionListJSON(sessionsOut)
-		if err != nil {
-			lastSessions = strings.TrimSpace(sessionsOut + "\nERR: " + err.Error())
-			return false
-		}
-		liveSession, _ = selectSessionMatch(sessions, identity, expectedSessionName, requireRunning)
-		if liveSession.ID == "" {
-			return false
-		}
-		if expectedSessionName != "" && liveSession.SessionName != expectedSessionName {
-			return false
-		}
-		if strings.TrimSpace(liveSession.SessionName) == "" {
-			return false
-		}
-		if !requireRunning {
-			return !strings.EqualFold(strings.TrimSpace(liveSession.State), "closed")
-		}
-		return sessionStateCountsAsRunning(liveSession.State)
+		var err error
+		liveSession, lastStatus, err = sessionStateSnapshot(cityDir, identity, expectedSessionName, requireRunning)
+		return err == nil
 	})
 	if !ready {
-		diag := strings.TrimSpace(lastStatus)
-		if strings.TrimSpace(lastSessions) != "" {
-			diag = strings.TrimSpace(diag + "\nSESSIONS:\n" + lastSessions)
-		}
 		if requireRunning {
-			return liveSession, diag, fmt.Errorf("session %s did not reach a running state within the timeout", identity)
+			return liveSession, lastStatus, fmt.Errorf("session %s did not reach a running state within the timeout", identity)
 		}
-		return liveSession, diag, fmt.Errorf("session %s did not reappear within the timeout", identity)
+		return liveSession, lastStatus, fmt.Errorf("session %s did not reappear within the timeout", identity)
 	}
+	return liveSession, lastStatus, nil
+}
+
+func sessionStateSnapshot(cityDir, identity, expectedSessionName string, requireRunning bool) (sessionJSON, string, error) {
+	statusOut, statusErr := runGCWithTimeout(10*time.Second, liveEnv, cityDir, "status")
+	lastStatus := strings.TrimSpace(statusOut)
+	if statusErr != nil {
+		return sessionJSON{}, strings.TrimSpace(statusOut + "\nERR: " + statusErr.Error()), statusErr
+	}
+	sessionsOut, sessionsErr := runGCWithTimeout(10*time.Second, liveEnv, cityDir, "session", "list", "--json")
+	lastSessions := strings.TrimSpace(sessionsOut)
+	if sessionsErr != nil {
+		return sessionJSON{}, strings.TrimSpace(lastStatus + "\nSESSIONS:\n" + sessionsOut + "\nERR: " + sessionsErr.Error()), sessionsErr
+	}
+	sessions, err := parseSessionListJSON(sessionsOut)
+	if err != nil {
+		return sessionJSON{}, strings.TrimSpace(lastStatus + "\nSESSIONS:\n" + sessionsOut + "\nERR: " + err.Error()), err
+	}
+	liveSession, _ := selectSessionMatch(sessions, identity, expectedSessionName, requireRunning)
 	diag := strings.TrimSpace(lastStatus)
-	if strings.TrimSpace(lastSessions) != "" {
+	if lastSessions != "" {
 		diag = strings.TrimSpace(diag + "\nSESSIONS:\n" + lastSessions)
 	}
+	if liveSession.ID == "" {
+		return liveSession, diag, fmt.Errorf("session %s not present", identity)
+	}
+	if expectedSessionName != "" && liveSession.SessionName != expectedSessionName {
+		return liveSession, diag, fmt.Errorf("session %s present with unexpected runtime name %q", identity, liveSession.SessionName)
+	}
+	if strings.TrimSpace(liveSession.SessionName) == "" {
+		return liveSession, diag, fmt.Errorf("session %s missing runtime name", identity)
+	}
+	if !requireRunning {
+		if strings.EqualFold(strings.TrimSpace(liveSession.State), "closed") {
+			return liveSession, diag, fmt.Errorf("session %s is closed", identity)
+		}
+		return liveSession, diag, nil
+	}
+	if !sessionStateCountsAsRunning(liveSession.State) {
+		return liveSession, diag, fmt.Errorf("session %s not running yet", identity)
+	}
 	return liveSession, diag, nil
+}
+
+func sendSessionMessageWhenReady(cityDir, identity, expectedSessionName string, client *api.Client, message string) (sessionJSON, string, error) {
+	deadline := time.Now().Add(90 * time.Second)
+	var (
+		lastErr    error
+		lastStatus string
+		info       sessionJSON
+	)
+	for {
+		snapshot, statusOut, snapshotErr := sessionStateSnapshot(cityDir, identity, expectedSessionName, false)
+		if strings.TrimSpace(statusOut) != "" {
+			lastStatus = strings.TrimSpace(statusOut)
+		}
+		if snapshot.ID != "" {
+			info = snapshot
+			if expectedSessionName == "" {
+				expectedSessionName = snapshot.SessionName
+			}
+		}
+		switch {
+		case snapshotErr == nil:
+			sendErr := client.SendSessionMessage(identity, message)
+			if sendErr == nil {
+				return info, lastStatus, nil
+			}
+			lastErr = sendErr
+			if !api.IsConnError(sendErr) {
+				return info, lastStatus, sendErr
+			}
+		case info.ID != "" && strings.EqualFold(strings.TrimSpace(info.State), "closed"):
+			return info, lastStatus, fmt.Errorf("session %s closed before the first message could be delivered", identity)
+		default:
+			lastErr = snapshotErr
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("session %s did not accept the first message before timeout", identity)
+	}
+	return info, lastStatus, lastErr
 }
 
 func selectSessionMatch(sessions []sessionJSON, identity, expectedSessionName string, requireRunning bool) (sessionJSON, bool) {
