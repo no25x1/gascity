@@ -65,16 +65,26 @@ func renderPrompt(fs fsys.FS, cityPath, cityName, templatePath string, ctx Promp
 		Option("missingkey=zero")
 
 	// Load shared templates from pack dirs (lower priority).
-	// Each pack directory may contain a prompts/shared/ subdirectory.
+	// Each pack directory may contain prompts/shared/ and/or
+	// template-fragments/ subdirectories.
 	for _, dir := range packDirs {
 		sharedDir := filepath.Join(dir, "prompts", "shared")
 		loadSharedTemplates(fs, tmpl, sharedDir, stderr)
+		// V2: template-fragments/ at pack level.
+		fragDir := filepath.Join(dir, "template-fragments")
+		loadSharedTemplates(fs, tmpl, fragDir, stderr)
 	}
 
 	// Load shared templates from sibling shared/ directory (highest priority —
 	// wins on name collision with cross-pack templates).
 	sharedDir := filepath.Join(filepath.Dir(sourcePath), "shared")
 	loadSharedTemplates(fs, tmpl, sharedDir, stderr)
+
+	// V2: per-agent template-fragments/ (if the prompt lives in agents/<name>/).
+	// Load from agents/<name>/template-fragments/ so per-agent fragments
+	// are available alongside pack-level ones.
+	agentFragDir := filepath.Join(filepath.Dir(sourcePath), "template-fragments")
+	loadSharedTemplates(fs, tmpl, agentFragDir, stderr)
 
 	// Parse main template last — its body becomes the "prompt" template.
 	tmpl, err = tmpl.Parse(raw)
