@@ -8,19 +8,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func newImportCmd(stdout, stderr io.Writer) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "import",
-		Short: "Manage V2 imports and migration helpers",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return cmd.Help()
-		},
-	}
-	cmd.AddCommand(newImportMigrateCmd(stdout, stderr))
-	return cmd
-}
-
 func newImportMigrateCmd(stdout, stderr io.Writer) *cobra.Command {
 	var dryRun bool
 	cmd := &cobra.Command{
