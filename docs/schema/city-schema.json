@@ -306,7 +306,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "AllowOverlay lists template fields that sessions may override at\ncreation time (e.g., [\"model\", \"prompt\", \"title\"])."
+          "description": "AllowOverlay is parsed and composed as a city-level allowlist for\nsession overlays, but it is not yet inherited onto agents\nautomatically at runtime."
         },
         "allow_env_override": {
           "items": {
@@ -325,7 +325,7 @@
       },
       "additionalProperties": false,
       "type": "object",
-      "description": "AgentDefaults provides default values applied to all agents that don't explicitly override them."
+      "description": "AgentDefaults provides city-level agent defaults declared via [agent_defaults] in city.toml."
     },
     "AgentOverride": {
       "properties": {
@@ -784,7 +784,14 @@
             "$ref": "#/$defs/PackSource"
           },
           "type": "object",
-          "description": "Packs defines named remote pack sources fetched via git."
+          "description": "Packs defines named remote pack sources fetched via git (V1 mechanism)."
+        },
+        "imports": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Import"
+          },
+          "type": "object",
+          "description": "Imports defines named pack imports (V2 mechanism). Each key is a\nbinding name; the value specifies the source and optional version,\nexport, and transitive controls. Processed during ExpandCityPacks."
         },
         "agent": {
           "items": {
@@ -868,7 +875,7 @@
         },
         "agent_defaults": {
           "$ref": "#/$defs/AgentDefaults",
-          "description": "AgentDefaults provides default values applied to all agents that\ndon't override them. Useful for setting city-wide model, wake_mode,\nand overlay allowlists."
+          "description": "AgentDefaults provides city-level defaults for agents that don't\noverride them (canonical TOML key: agent_defaults). The runtime\ncurrently applies default_sling_formula and append_fragments; other\nfields are parsed/composed but not yet inherited automatically."
         }
       },
       "additionalProperties": false,
@@ -995,6 +1002,40 @@
       "additionalProperties": false,
       "type": "object",
       "description": "FormulasConfig holds formula directory settings."
+    },
+    "Import": {
+      "properties": {
+        "source": {
+          "type": "string",
+          "description": "Source is the pack location: a local relative path (e.g.,\n\"./assets/imports/gastown\") or a remote URL (e.g.,\n\"github.com/gastownhall/gastown\"). Local paths have no version."
+        },
+        "version": {
+          "type": "string",
+          "description": "Version is a semver constraint for remote imports (e.g., \"^1.2\").\nEmpty for local paths. \"sha:\u003chex\u003e\" for commit pinning."
+        },
+        "export": {
+          "type": "boolean",
+          "description": "Export re-exports this import's contents into the parent pack's\nnamespace. Consumers of the parent get this import's agents\nflattened under the parent's binding name."
+        },
+        "transitive": {
+          "type": "boolean",
+          "description": "Transitive controls whether this import's own imports are visible\nto the consumer. Defaults to true (transitive). Set to false to\nsuppress transitive resolution for this specific import."
+        },
+        "shadow": {
+          "type": "string",
+          "enum": [
+            "warn",
+            "silent"
+          ],
+          "description": "Shadow controls shadow warnings when the importer defines an agent\nwith the same name as one from this import. \"warn\" (default) emits\na warning; \"silent\" suppresses it."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "source"
+      ],
+      "description": "Import defines a named import of another pack."
     },
     "K8sConfig": {
       "properties": {
@@ -1516,7 +1557,14 @@
             "type": "string"
           },
           "type": "array",
-          "description": "Includes lists pack directories or URLs for this rig.\nReplaces the older pack/packs fields. Each entry is a\nlocal path, a git source//sub#ref URL, or a GitHub tree URL."
+          "description": "Includes lists pack directories or URLs for this rig (V1 mechanism).\nEach entry is a local path, a git source//sub#ref URL, or a GitHub tree URL."
+        },
+        "imports": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Import"
+          },
+          "type": "object",
+          "description": "Imports defines named pack imports for this rig (V2 mechanism).\nEach key is a binding name; agents from these imports get qualified\nnames like \"rigName/bindingName.agentName\"."
         },
         "max_active_sessions": {
           "type": "integer",
@@ -1527,7 +1575,14 @@
             "$ref": "#/$defs/AgentOverride"
           },
           "type": "array",
-          "description": "Overrides are per-agent patches applied after pack expansion."
+          "description": "Overrides are per-agent patches applied after pack expansion.\nV2 renames this to \"patches\" for consistency with [[patches.agent]].\nBoth TOML keys are accepted during migration."
+        },
+        "patches": {
+          "items": {
+            "$ref": "#/$defs/AgentOverride"
+          },
+          "type": "array",
+          "description": "Patches is the V2 name for rig-level agent overrides. Takes\nprecedence over Overrides if both are set."
         },
         "default_sling_target": {
           "type": "string",
