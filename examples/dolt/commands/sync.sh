@@ -119,9 +119,11 @@ if [ -d "$data_dir" ]; then
 fi
 
 # Restart server if it was running.
+# `start` blocks on full TCP+query readiness before returning, so the server
+# is ready to serve queries when this completes. A follow-up `ensure-ready`
+# call races against the just-verified server (see gastownhall/gascity#560).
 if [ "$was_running" = true ] && [ "$dry_run" = false ] && [ -x "$beads_bd" ]; then
   "$beads_bd" start 2>/dev/null || true
-  "$beads_bd" ensure-ready 2>/dev/null || true
 fi
 
 exit $exit_code

@@ -526,6 +526,169 @@ func TestGcBeadsBdStartUsesRootBeadsDataDir(t *testing.T) {
 	}
 }
 
+// TestGcBeadsBdEnsureReadyDoesNotKillOnProbeFailure is the regression test
+// for gastownhall/gascity#560: gc dolt sync double-restarts dolt via a
+// start + ensure-ready race. The bug was that op_ensure_ready was aliased
+// to op_start, whose reuse-or-kill branch SIGKILLed and relaunched the
+// running dolt server when a transient nc TCP probe flaked.
+//
+// The fix makes op_ensure_ready verify-only: find_dolt_pid + tcp_check_port,
+// never kill. This test installs a nc PATH shim that fails its first call,
+// runs ensure-ready, and asserts the dolt PID is unchanged and dolt.log
+// still has exactly one "Starting server" entry. On the pre-fix script it
+// would see two entries and a different PID.
+func TestGcBeadsBdEnsureReadyDoesNotKillOnProbeFailure(t *testing.T) {
+	doltPath, err := exec.LookPath("dolt")
+	if err != nil {
+		t.Skip("dolt not installed")
+	}
+	ncPath, err := exec.LookPath("nc")
+	if err != nil {
+		t.Skip("nc not installed")
+	}
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script, err := MaterializeBeadsBdScript(cityPath)
+	if err != nil {
+		t.Fatalf("MaterializeBeadsBdScript: %v", err)
+	}
+
+	homeDir := filepath.Join(t.TempDir(), "home")
+	if err := os.MkdirAll(homeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitConfig := filepath.Join(homeDir, ".gitconfig")
+	if err := os.WriteFile(gitConfig, []byte("[user]\n\tname = Test User\n\temail = test@example.com\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	basePath := strings.Join([]string{
+		filepath.Dir(doltPath),
+		os.Getenv("PATH"),
+	}, string(os.PathListSeparator))
+
+	// Strip every GC_* var from the inherited environment so the script's
+	// path resolution is driven entirely by GC_CITY_PATH below. Otherwise a
+	// parent GC_CITY_RUNTIME_DIR or GC_DOLT_PORT points the test at the
+	// caller's dolt state and the start command fails or collides.
+	cleanEnv := make([]string, 0, len(os.Environ()))
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "GC_") {
+			continue
+		}
+		cleanEnv = append(cleanEnv, e)
+	}
+	baseEnv := make([]string, len(cleanEnv), len(cleanEnv)+4)
+	copy(baseEnv, cleanEnv)
+	baseEnv = append(baseEnv,
+		"HOME="+homeDir,
+		"GIT_CONFIG_GLOBAL="+gitConfig,
+		"GC_CITY_PATH="+cityPath,
+		"PATH="+basePath,
+	)
+
+	t.Cleanup(func() {
+		cmd := exec.Command(script, "stop")
+		cmd.Env = baseEnv
+		_ = cmd.Run()
+	})
+
+	startCmd := exec.Command(script, "start")
+	startCmd.Env = baseEnv
+	if out, err := startCmd.CombinedOutput(); err != nil {
+		t.Fatalf("start: %v\n%s", err, out)
+	}
+
+	logPath := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt.log")
+	pidPath := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt.pid")
+
+	countStarts := func() int {
+		data, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatalf("read dolt.log: %v", err)
+		}
+		return strings.Count(string(data), "Starting server")
+	}
+
+	if got := countStarts(); got != 1 {
+		data, _ := os.ReadFile(logPath)
+		t.Fatalf("after start: want 1 'Starting server' entry, got %d\nlog:\n%s", got, data)
+	}
+
+	pidBefore, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatalf("read dolt.pid: %v", err)
+	}
+
+	// Remove dolt-server.port so allocate_port uses the state-file path
+	// (kill -0 only, no nc call) and the nc shim's single failure lands
+	// inside op_ensure_ready's tcp_check_port instead of allocate_port's.
+	portFile := filepath.Join(cityPath, ".beads", "dolt-server.port")
+	if err := os.Remove(portFile); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove dolt-server.port: %v", err)
+	}
+
+	// Install a nc PATH shim that fails on first invocation and passes
+	// through to the real nc afterwards. This mirrors the deterministic
+	// reproduction in gastownhall/gascity#560.
+	shimDir := filepath.Join(t.TempDir(), "nc-shim")
+	if err := os.MkdirAll(shimDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	shimFlag := filepath.Join(t.TempDir(), "nc-shim-fired")
+	shimBody := "#!/bin/sh\n" +
+		"if [ ! -f " + shimFlag + " ]; then\n" +
+		"  : > " + shimFlag + "\n" +
+		"  exit 1\n" +
+		"fi\n" +
+		"exec " + ncPath + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(shimDir, "nc"), []byte(shimBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	shimEnv := append(append([]string(nil), cleanEnv...),
+		"HOME="+homeDir,
+		"GIT_CONFIG_GLOBAL="+gitConfig,
+		"GC_CITY_PATH="+cityPath,
+		"PATH="+strings.Join([]string{
+			shimDir,
+			filepath.Dir(doltPath),
+			os.Getenv("PATH"),
+		}, string(os.PathListSeparator)),
+	)
+
+	// ensure-ready is expected to exit non-zero when the probe fails; the
+	// regression we are guarding against is a kill+relaunch, not the exit
+	// code. Ignore the error and inspect the server state instead.
+	ensureCmd := exec.Command(script, "ensure-ready")
+	ensureCmd.Env = shimEnv
+	_, _ = ensureCmd.CombinedOutput()
+
+	if _, err := os.Stat(shimFlag); err != nil {
+		t.Fatalf("nc shim never fired (%v) — ensure-ready didn't reach tcp_check_port; test is inconclusive", err)
+	}
+
+	if got := countStarts(); got != 1 {
+		data, _ := os.ReadFile(logPath)
+		t.Fatalf("after ensure-ready: want 1 'Starting server' entry, got %d — ensure-ready restarted the server\nlog:\n%s", got, data)
+	}
+
+	pidAfter, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatalf("read dolt.pid after ensure-ready: %v", err)
+	}
+	if strings.TrimSpace(string(pidBefore)) != strings.TrimSpace(string(pidAfter)) {
+		t.Fatalf("dolt PID changed across ensure-ready: before=%q after=%q — op_ensure_ready must be verify-only",
+			pidBefore, pidAfter)
+	}
+}
+
 func TestGcBeadsBdInitRetriesRootStoreVerification(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {

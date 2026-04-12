@@ -818,9 +818,35 @@ op_start() {
     sync_port_files
 }
 
-# op_ensure_ready is a legacy alias for start.
+# op_ensure_ready verifies the dolt server is running and reachable.
+# Exits 0 if a managed dolt process is alive and the TCP port is reachable,
+# exits 2 if the operation is a no-op on a remote server, and exits 1
+# otherwise. Never kills or restarts the server — callers that need to
+# (re)start should invoke op_start explicitly. This replaces a previous
+# destructive alias that SIGKILLed the server when a transient nc probe
+# failed (gastownhall/gascity#560).
 op_ensure_ready() {
-    op_start
+    if is_remote; then
+        exit 2
+    fi
+
+    local pid
+    pid=$(find_dolt_pid)
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+        exit 1
+    fi
+
+    local port
+    port=$(load_state_field port)
+    if [ -z "$port" ]; then
+        exit 1
+    fi
+
+    if ! tcp_check_port "$port"; then
+        exit 1
+    fi
+
+    exit 0
 }
 
 # ensure_config_yaml creates a minimal .beads/config.yaml with prefix settings
