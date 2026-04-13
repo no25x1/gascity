@@ -400,7 +400,7 @@ Per-machine state lives in `.gc/` and is managed by `gc` commands:
 
 The rule: **if it's in a checked-in TOML file, it's definition or deployment. If it's in `.gc/`, it's site binding.** No gray area.
 
-> **Target design ([#588](https://github.com/gastownhall/gascity/issues/588)):** Rig paths and other machine-local rig bindings move from `city.toml` to `.gc/site.toml`. The loader overlays site.toml onto city.toml at load time. Legacy rig paths in city.toml load with a deprecation warning for one release. This may ship post-0.13.6.
+> **Target design ([#588](https://github.com/gastownhall/gascity/issues/588)):** Rig paths and other machine-local rig bindings move from `city.toml` to `.gc/site.toml`. The loader overlays site.toml onto city.toml at load time. Legacy rig paths in city.toml load with a deprecation warning for one release. This may ship in a later Pack/City v2 wave.
 
 #### Rig lifecycle
 

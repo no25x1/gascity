@@ -1,7 +1,7 @@
-# Pack/City 0.13.6 Conformance Matrix
+# Pack/City v2 Conformance Matrix
 
 This document turns the reconciled pack/city v.next docs into an
-executable conformance plan for Gas City 0.13.6.
+executable conformance plan for the current Pack/City v2 rollout.
 
 The goal is not to restate the full design. The goal is to answer three
 practical questions:
@@ -16,7 +16,7 @@ practical questions:
 Use the sources in this order when deciding what the suite should assert:
 
 1. [skew-analysis.md](skew-analysis.md) — release gating ledger for the
-   0.13.6 desired state
+   current desired state
 2. [migrating-to-pack-vnext.md](../guides/migrating-to-pack-vnext.md) —
    migration-target behavior, but only where `skew-analysis.md` does not
    mark the surface missing, deferred, or non-gating
@@ -51,7 +51,7 @@ These are settled enough, and implemented enough, to block CI now.
 | Pack imports | `[imports.<binding>]` in `pack.toml` resolves and composes imported content | Unit + testscript | `internal/config/pack.go` |
 | Rig imports | `[rigs.imports.<binding>]` in `city.toml` resolves for the targeted rig | Unit + testscript | `internal/config/pack.go`, `internal/config/compose.go` |
 | Agent discovery | `agents/<name>/` creates an agent without requiring `[[agent]]` | Unit | `internal/config/agent_discovery.go` |
-| Current runtime provider resolution | Gate only the implemented runtime chain we are willing to freeze for 0.13.6: `agent.start_command` escape hatch, then `agent.provider`, then `workspace.provider`, then auto-detect; `workspace.start_command` is only the no-provider escape hatch. Do not treat the replacement/deprecation direction from `skew-analysis.md` as part of this row. | Unit | `internal/config/resolve.go` |
+| Current runtime provider resolution | Gate only the implemented runtime chain we are willing to freeze in this release wave: `agent.start_command` escape hatch, then `agent.provider`, then `workspace.provider`, then auto-detect; `workspace.start_command` is only the no-provider escape hatch. Do not treat the replacement/deprecation direction from `skew-analysis.md` as part of this row. | Unit | `internal/config/resolve.go` |
 | Provider preset merge and lookup | Imported pack providers merge into the city provider map additively, city/local providers shadow imported ones on name collision, and provider lookup layers city overrides onto builtins when supported | Unit | `internal/config/pack.go`, `internal/config/resolve.go` |
 | Prompt naming | `prompt.md` is inert markdown and `prompt.template.md` enables template processing | Unit + testscript | `internal/config/agent_discovery.go`, `cmd/gc/prompt.go` |
 | Overlay discovery | pack-wide `overlays/` and agent-local `agents/<name>/overlay/` are discovered by convention | Unit | `internal/config/agent_discovery.go`, `internal/overlay/overlay.go` |
@@ -71,7 +71,7 @@ These are settled enough, and implemented enough, to block CI now.
 
 ## Add To CI When Warning Plumbing Lands
 
-These behaviors are part of the 0.13.6 desired state, but they depend on
+These behaviors are part of the current Pack/City v2 desired state, but they depend on
 deprecation or warning infrastructure that is not yet fully trustworthy.
 Write the tests now if helpful, but do not let them fail CI until the
 warning surface is implemented end to end.
@@ -99,12 +99,12 @@ unsettled to be reliable release gates.
 | `[agent_defaults] provider` driving runtime provider selection | migration target is documented, but runtime behavior is not aligned enough to gate | Current implementation still resolves runtime defaults through `workspace.provider` / `ResolveProvider`; locking in the future rule now would create false failures |
 | `gc register --name` | documented in design docs, not implemented | Release docs mention it, but `skew-analysis.md` marks it red, so the suite must not assume it exists |
 | `patches/` directory convention for imported prompt replacements | documented in v.next docs, not implemented | Current implementation still relies on explicit patch fields rather than full loader-discovered patch files |
-| Pack `skills/` discovery | documented, not implemented | Not a proven 0.13.6 runtime surface yet |
+| Pack `skills/` discovery | documented, not implemented | Not a proven runtime surface yet in this wave |
 | `mcp/` TOML abstraction | documented, not implemented | Same as skills: valuable spec surface, not release-ready conformance surface |
-| `.gc/site.toml` rig-path split (`#588`) | future work | Important, but it is a separate migration and should not muddy the 0.13.6 pack/city suite |
+| `.gc/site.toml` rig-path split (`#588`) | future work | Important, but it is a separate migration and should not muddy the current pack/city suite |
 | Final doctor manifest symmetry/shape | still under-specified | Discovery is testable now, but the final manifest shape should not be frozen by the first-pass suite |
 | Command collision rules and final command/doctor manifest shape | still under-specified | The docs still use "current preferred direction" language rather than frozen contract language |
-| Post-release cleanup surfaces | e.g. removing `.order.` / `.formula.` infixes or dismantling `[workspace]` | Valid roadmap work, but not a 0.13.6 ship gate |
+| Post-release cleanup surfaces | e.g. removing `.order.` / `.formula.` infixes or dismantling `[workspace]` | Valid roadmap work, but not a current-wave ship gate |
 
 ## First Fixture Set
 

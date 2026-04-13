@@ -1,10 +1,10 @@
-# Spec vs. Implementation Skew Analysis — 0.13.6 Desired State
+# Spec vs. Implementation Skew Analysis — Current Pack/City v2 Desired State
 
 > Generated 2026-04-12 by comparing `docs/reference/config.md` (as-built
 > from the release branch Go structs) against the reconciled pack v2 specs.
-> Revised through field-by-field walkthrough to reflect the **0.13.6
-> desired state** — not the ideal end-state, but what should ship in this
-> release.
+> Revised through field-by-field walkthrough to reflect the **current
+> Pack/City v2 desired state** — not the ideal end-state, but what should
+> ship in this release wave.
 
 ## Color key
 
@@ -12,8 +12,8 @@
 |-------|---------|
 | 🟢 | Implemented on release branch |
 | 🔴 | Not implemented on release branch |
-| 🟡 | NYI — in plan for 0.13.6 |
-| 🔵 | NYI — post-0.13.6 |
+| 🟡 | NYI — in plan for the current rollout |
+| 🔵 | NYI — later wave |
 
 ## Field placement authority
 
@@ -24,7 +24,7 @@
 - `[beads]`, `[session]`, `[mail]`, `[events]`, `[dolt]`
 - `[daemon]`, `[orders]`, `[api]`
 - `[chat_sessions]`, `[session_sleep]`, `[convergence]`
-- `[[service]]` (#657 tracks whether packs can define services post-0.13.6)
+- `[[service]]` (#657 tracks whether packs can define services in a later wave)
 - `max_active_sessions` (city-wide, currently on `[workspace]`)
 
 ### pack.toml only (not legal in city.toml)
@@ -48,7 +48,7 @@
 - **Loud warning** — emitted on every `gc start` / `gc config` for schema 2 cities. These are V1 surfaces that users should not be writing new content against.
 - **Soft warning** — emitted once. Field is accepted but deprecated.
 - **Hard error** — field value is rejected.
-- **Accept silently** — no warning for 0.13.6. Tracked for post-release deprecation.
+- **Accept silently** — no warning in this rollout. Tracked for post-release deprecation.
 
 **Fast-follow (pre-April 21 launch):** implement deprecation warning infrastructure for all soft/loud warnings below.
 
@@ -56,17 +56,17 @@
 
 ## City (top-level struct)
 
-| Status | Field | As-built | 0.13.6 disposition |
+| Status | Field | As-built | Current rollout disposition |
 |--------|-------|----------|--------------------|
 | 🟢 | `include` | []string, merges fragments | **Keep.** Fragment-only (`-f` path). If a fragment contains `[imports]`, `includes`, or references `pack.toml` → hard error. |
-| 🟢 | `workspace` | Required block | **Keep as container.** Deprecated post-0.13.6 (#600). Sub-fields walked individually below. |
+| 🟢 | `workspace` | Required block | **Keep as container.** Deprecated after this rollout (#600). Sub-fields walked individually below. |
 | 🟡 | `packs` | map[string]PackSource | **Loud warning on schema 2.** V1 mechanism, use `[imports]` + `pack.lock`. |
 | 🟡 | `agent` | []Agent, required | **Loud warning on schema 2.** Not required for schema 2 — agents discovered from `agents/<name>/`. |
 | 🟢 | `imports` | map[string]Import | **Keep.** V2 mechanism, working. |
 | 🟢 | `named_session` | []NamedSession | **Keep.** Legal in both pack.toml and city.toml, city wins. |
 | 🟢 | `rigs` | []Rig | **Keep in city.toml.** |
 | 🟢 | `patches` | Patches | **Keep.** `[[patches.agent]]` and `[[patches.providers]]` legal in both, city wins. `[[patches.rigs]]` city.toml only. |
-| 🟢 | `agent_defaults` | AgentDefaults | **Keep.** Legal in both pack.toml and city.toml, city wins. Surface stays as-is (no expansion in 0.13.6). |
+| 🟢 | `agent_defaults` | AgentDefaults | **Keep.** Legal in both pack.toml and city.toml, city wins. Surface stays as-is (no expansion in this wave). |
 | 🟢 | `providers` | map[string]ProviderSpec | **Keep.** Legal in both, city wins. |
 | 🟡 | `formulas` | FormulasConfig | See `[formulas].dir` below. |
 | 🟢 | `beads` | BeadsConfig | **Keep in city.toml.** |
@@ -84,7 +84,7 @@
 
 ## Workspace sub-fields
 
-| Status | Field | As-built | 0.13.6 disposition | Post-0.13.6 destination |
+| Status | Field | As-built | Current rollout disposition | Later destination |
 |--------|-------|----------|--------------------|-----------------------|
 | 🟡 | `name` | Required string | **Optional.** Falls back to `pack.name` → directory basename. Soft warning: "use `gc register --name` instead." | `.gc/` site binding (#600) |
 | 🟡 | `prefix` | String | **Optional.** Same treatment as `name`. Soft warning. | `.gc/` site binding (#600) |
@@ -100,11 +100,11 @@
 
 ## Agent fields
 
-In 0.13.6, `[[agent]]` gets a loud warning on schema 2. Agent fields below describe what is legal in `agent.toml` inside `agents/<name>/`.
+In this rollout, `[[agent]]` gets a loud warning on schema 2. Agent fields below describe what is legal in `agent.toml` inside `agents/<name>/`.
 
 ### Convention-replaced (no TOML field)
 
-| Status | Field | As-built | 0.13.6 disposition |
+| Status | Field | As-built | Current rollout disposition |
 |--------|-------|----------|--------------------|
 | 🟢 | `name` | Required string | **Convention-replaced.** Directory name is identity. |
 | 🟢 | `prompt_template` | Path string | **Convention-replaced.** `prompt.template.md` or `prompt.md` in agent dir. |
@@ -113,7 +113,7 @@ In 0.13.6, `[[agent]]` gets a loud warning on schema 2. Agent fields below descr
 
 ### V1 remnants
 
-| Status | Field | As-built | 0.13.6 disposition |
+| Status | Field | As-built | Current rollout disposition |
 |--------|-------|----------|--------------------|
 | 🟡 | `dir` | String | **Gone.** Rig scoping handled by import binding. |
 | 🟡 | `inject_fragments` | []string | **Loud warning on schema 2.** Use `append_fragments` or explicit `{{ template }}`. |
@@ -121,13 +121,13 @@ In 0.13.6, `[[agent]]` gets a loud warning on schema 2. Agent fields below descr
 
 ### Legal in agent.toml
 
-All other agent fields are legal in `agent.toml`. `[agent_defaults]` surface stays as-is for 0.13.6 (no expansion).
+All other agent fields are legal in `agent.toml`. `[agent_defaults]` surface stays as-is in this wave (no expansion).
 
 | Status | Field | Notes |
 |--------|-------|-------|
 | 🟢 | `description` | |
 | 🟢 | `scope` | `"city"` or `"rig"` |
-| 🟢 | `suspended` | Stays in agent.toml for 0.13.6; moves to `.gc/` post-release |
+| 🟢 | `suspended` | Stays in agent.toml in this wave; moves to `.gc/` post-release |
 | 🟢 | `provider` | |
 | 🟢 | `start_command` | |
 | 🟢 | `args` | |
@@ -166,7 +166,7 @@ All other agent fields are legal in `agent.toml`. `[agent_defaults]` surface sta
 
 ## AgentDefaults
 
-| Status | Field | As-built | 0.13.6 disposition |
+| Status | Field | As-built | Current rollout disposition |
 |--------|-------|----------|--------------------|
 | 🟢 | `model` | Present | **Keep.** Not yet auto-applied at runtime. |
 | 🟢 | `wake_mode` | Present | **Keep.** Not yet auto-applied at runtime. |
@@ -175,17 +175,17 @@ All other agent fields are legal in `agent.toml`. `[agent_defaults]` surface sta
 | 🟢 | `allow_env_override` | Present | **Keep.** Not yet auto-applied at runtime. |
 | 🟢 | `append_fragments` | Present | **Keep.** Migration bridge for global_fragments/inject_fragments. |
 
-No expansion of `[agent_defaults]` surface in 0.13.6.
+No expansion of `[agent_defaults]` surface in this wave.
 
 ## FormulasConfig
 
-| Status | Field | As-built | 0.13.6 disposition |
+| Status | Field | As-built | Current rollout disposition |
 |--------|-------|----------|--------------------|
 | 🟡 | `dir` | Default `"formulas"` | **Soft warning if present and equals `"formulas"`.** Hard error if set to anything else. `formulas/` is a fixed convention. |
 
 ## Import
 
-| Status | Field | As-built | 0.13.6 disposition |
+| Status | Field | As-built | Current rollout disposition |
 |--------|-------|----------|--------------------|
 | 🟢 | `source` | Present | **Keep.** |
 | 🟢 | `version` | Present | **Keep.** |
@@ -197,7 +197,7 @@ All Import fields match spec. No changes needed.
 
 ## Rig
 
-| Status | Field | As-built | 0.13.6 disposition | Post-0.13.6 |
+| Status | Field | As-built | Current rollout disposition | Later destination |
 |--------|-------|----------|--------------------|----|
 | 🟢 | `name` | Required | **Keep in city.toml.** | |
 | 🟢 | `path` | Required | **Keep in city.toml.** | `.gc/site.toml` (#588) |
@@ -216,18 +216,18 @@ All Import fields match spec. No changes needed.
 
 ## AgentOverride / AgentPatch
 
-| Status | Field | As-built | 0.13.6 disposition |
+| Status | Field | As-built | Current rollout disposition |
 |--------|-------|----------|--------------------|
 | 🟡 | `inject_fragments` | Present | **Loud warning.** V1 remnant. |
 | 🟡 | `inject_fragments_append` | Present | **Loud warning.** V1 remnant. |
-| 🟢 | `prompt_template` | Path string | **Keep for 0.13.6.** Post-release: convention-based via `patches/`. |
-| 🟢 | `overlay_dir` | Path string | **Keep for 0.13.6.** Post-release: convention-based. |
-| 🟢 | `dir` + `name` targeting (AgentPatch) | Present | **Keep for 0.13.6.** Qualified name targeting already works. |
+| 🟢 | `prompt_template` | Path string | **Keep in this wave.** Post-release: convention-based via `patches/`. |
+| 🟢 | `overlay_dir` | Path string | **Keep in this wave.** Post-release: convention-based. |
+| 🟢 | `dir` + `name` targeting (AgentPatch) | Present | **Keep in this wave.** Qualified name targeting already works. |
 | 🟢 | All other override fields | Present | **Keep.** |
 
 ## PackSource
 
-| Status | Field | As-built | 0.13.6 disposition |
+| Status | Field | As-built | Current rollout disposition |
 |--------|-------|----------|--------------------|
 | 🟡 | (entire struct) | Present | **Loud warning on schema 2.** V1 mechanism, use `[imports]` + `pack.lock`. |
 
@@ -256,10 +256,10 @@ All Import fields match spec. No changes needed.
 | 🔴 | `patches/` directory convention | doc-agent-v2 | Not implemented |
 | 🔴 | `skills/` pack discovery | doc-agent-v2 | Embedded docs only, no pack walking |
 | 🔴 | `mcp/` TOML abstraction | doc-agent-v2 | Not implemented |
-| 🔵 | `.gc/site.toml` for rig bindings | doc-pack-v2 | #588 (may slip post-0.13.6) |
+| 🔵 | `.gc/site.toml` for rig bindings | doc-pack-v2 | #588 (may slip to a later wave) |
 | 🔵 | Pack/Deployment/SiteBinding struct separation | doc-loader-v2 | Loader composes into one City struct |
 | 🔵 | Pack-defined `[[service]]` | — | #657 |
-| 🔵 | Expansion of `[agent_defaults]` to all agent fields | — | 0.13.7 |
+| 🔵 | Expansion of `[agent_defaults]` to all agent fields | — | later wave |
 
 ---
 

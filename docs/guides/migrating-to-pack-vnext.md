@@ -1,10 +1,10 @@
 ---
-title: "Migrating to Gas City 0.13.6"
-description: How to move an existing Gas City 0.13.5 city or pack to the Gas City 0.13.6 pack/city schema and directory conventions.
+title: "Migrating from Gas City 14.0 to Pack/City v2"
+description: How to move an existing Gas City 14.0 city or pack to the Pack/City v2 schema and directory conventions.
 ---
 
-This guide is the practical migration companion to the Gas City 0.13.6
-pack/city, agent, command, and directory-structure work.
+This guide is the practical migration companion to the current
+Pack/City v2 pack/city, agent, command, and directory-structure work.
 
 The migration has two layers:
 
@@ -31,8 +31,8 @@ pack directory tree.
 
 The important mental shift is:
 
-- **Gas City 0.13.5** centers `city.toml` and a lot of explicit path wiring
-- **Gas City 0.13.6** centers `pack.toml`, named imports, and convention-based directories
+- **Gas City 14.0** centers `city.toml` and a lot of explicit path wiring
+- **Pack/City v2** centers `pack.toml`, named imports, and convention-based directories
 
 The clean target shape is:
 
@@ -84,8 +84,8 @@ lives.
 For most existing cities, the first change you will actually make is
 composition.
 
-In Gas City 0.13.5, composition is include-based. In Gas City 0.13.6,
-composition is import-based.
+In Gas City 14.0, composition is include-based. In the Pack/City v2
+rollout, composition is import-based.
 
 ### Old city-level include
 
@@ -404,7 +404,7 @@ runs.
 
 ## Assets and paths
 
-This is the positive rule that replaces a lot of 0.13.5 ad hoc path
+This is the positive rule that replaces a lot of 14.0 ad hoc path
 habits.
 
 ### `assets/` is the opaque home
@@ -464,7 +464,7 @@ respectively.
 ### "I used to rely on `scripts/`"
 
 Do not recreate `scripts/` as a standard top-level convention just
-because 0.13.5 had it.
+because 14.0 had it.
 
 Instead:
 
@@ -515,12 +515,12 @@ Use TOML when you actually need:
 - metadata
 - explicit placement
 
-## Reference: Gas City 0.13.5 `city.toml` elements to 0.13.6
+## Reference: Gas City 14.0 `city.toml` elements to Pack/City v2
 
 This is the exhaustive top-level lookup table for the old `city.toml`
 schema, plus the qualified rows that matter most during migration.
 
-| 0.13.5 element | What it did | New home or action |
+| 14.0 element | What it did | New home or action |
 |---|---|---|
 | `include` | Merged extra config fragments into `city.toml` before load | Remove as part of migration. Move real composition to imports and move remaining config to `pack.toml`, `city.toml`, or discovered directories. |
 | `[workspace]` | Held city metadata and pack composition in one place | Split across the root `pack.toml`, `city.toml`, and `.gc/`. |
@@ -558,12 +558,12 @@ schema, plus the qualified rows that matter most during migration.
 | `[[service]]` | Workspace-owned service declarations | Keep in `city.toml` if they are deployment-owned services. |
 | `[agent_defaults]` | Defaults applied to agents in this city | Lives in both `pack.toml` (pack-wide portable defaults) and `city.toml` (city-level deployment overrides). City layers on top of pack. |
 
-## Reference: Gas City 0.13.5 `pack.toml` elements to 0.13.6
+## Reference: Gas City 14.0 `pack.toml` elements to Pack/City v2
 
 This is the lookup table for the old shareable-pack schema and the
 transitional pack fields that people are likely to have.
 
-| 0.13.5 element | What it did | New home or action |
+| 14.0 element | What it did | New home or action |
 |---|---|---|
 | `[pack]` | Pack metadata | Keep in `pack.toml`. |
 | `pack.name` | Pack identity | Keep in `[pack]`. |
@@ -594,7 +594,7 @@ transitional pack fields that people are likely to have.
 
 This table is the filesystem companion to the two schema tables above.
 
-| Old directory or pattern | What it meant in 0.13.5 | New home or action |
+| Old directory or pattern | What it meant in 14.0 | New home or action |
 |---|---|---|
 | `prompts/` | Shared bucket of prompt templates addressed by path | Move prompt content into `agents/<name>/prompt.template.md` for templated prompts. Use `prompt.md` only for plain, non-templated Markdown. |
 | `scripts/` | Shared bucket of helper and entrypoint scripts | Do not preserve as a standard top-level directory. Put entrypoint scripts next to what uses them, and put general helpers under `assets/`. |
