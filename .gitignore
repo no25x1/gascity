@@ -34,3 +34,4 @@ reports/
 .vscode/settings.json
 .env
 node_modules/
+specgen
