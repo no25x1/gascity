@@ -3,13 +3,10 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -19,22 +16,28 @@ func TestEventList(t *testing.T) {
 	ep.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "worker"})
 	ep.Record(events.Event{Type: events.BeadCreated, Actor: "worker", Subject: "gc-1"})
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/events", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
-	}
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "events-1",
+		Action: "events.list",
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
 
-	var resp struct {
+	var list struct {
 		Items []events.Event `json:"items"`
 		Total int            `json:"total"`
 	}
-	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
-	if resp.Total != 2 {
-		t.Errorf("Total = %d, want 2", resp.Total)
+	json.Unmarshal(resp.Result, &list) //nolint:errcheck
+	if list.Total != 2 {
+		t.Errorf("Total = %d, want 2", list.Total)
 	}
 }
 
@@ -44,123 +47,36 @@ func TestEventListFilterByType(t *testing.T) {
 	ep.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
 	ep.Record(events.Event{Type: events.BeadCreated, Actor: "worker"})
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/events?type=bead.created", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	var resp struct {
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "events-filter",
+		Action: "events.list",
+		Payload: map[string]any{
+			"type": "bead.created",
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+
+	var list struct {
 		Items []events.Event `json:"items"`
 		Total int            `json:"total"`
 	}
-	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
-	if resp.Total != 1 {
-		t.Errorf("Total = %d, want 1", resp.Total)
+	json.Unmarshal(resp.Result, &list) //nolint:errcheck
+	if list.Total != 1 {
+		t.Errorf("Total = %d, want 1", list.Total)
 	}
 }
 
-func TestEventStream(t *testing.T) {
-	state := newFakeState(t)
-	ep := state.eventProv.(*events.Fake)
-	srv := New(state)
-
-	// Create a context with timeout to avoid hanging.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	req := httptest.NewRequest("GET", "/v0/events/stream", nil).WithContext(ctx)
-	rec := httptest.NewRecorder()
-
-	// Run the handler in a goroutine since it blocks.
-	done := make(chan struct{})
-	go func() {
-		srv.ServeHTTP(rec, req)
-		close(done)
-	}()
-
-	// Give the handler time to set up.
-	time.Sleep(50 * time.Millisecond)
-
-	// Record an event.
-	ep.Record(events.Event{Type: events.SessionWoke, Actor: "gc", Subject: "worker"})
-
-	// Wait for event to be delivered or timeout.
-	time.Sleep(100 * time.Millisecond)
-	cancel() // Stop the stream.
-	<-done
-
-	body := rec.Body.String()
-	if !strings.Contains(body, "event: session.woke") {
-		t.Errorf("SSE body missing event type, got: %s", body)
-	}
-	if !strings.Contains(body, "id: 1") {
-		t.Errorf("SSE body missing event id, got: %s", body)
-	}
-
-	// Check SSE headers.
-	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
-		t.Errorf("Content-Type = %q, want %q", ct, "text/event-stream")
-	}
-}
-
-func TestEventStreamProjectsWorkflowMetadata(t *testing.T) {
-	state := newFakeState(t)
-	store := state.stores["myrig"]
-	root, err := store.Create(beads.Bead{
-		Title: "Workflow root",
-		Type:  "task",
-		Metadata: map[string]string{
-			"gc.kind":        "workflow",
-			"gc.workflow_id": "wf_123",
-			"gc.scope_kind":  "city",
-			"gc.scope_ref":   "test-city",
-		},
-	})
-	if err != nil {
-		t.Fatalf("create root: %v", err)
-	}
-
-	payload, err := json.Marshal(root)
-	if err != nil {
-		t.Fatalf("marshal root: %v", err)
-	}
-
-	srv := New(state)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	req := httptest.NewRequest("GET", "/v0/events/stream", nil).WithContext(ctx)
-	rec := httptest.NewRecorder()
-
-	done := make(chan struct{})
-	go func() {
-		srv.ServeHTTP(rec, req)
-		close(done)
-	}()
-
-	time.Sleep(50 * time.Millisecond)
-	state.eventProv.(*events.Fake).Record(events.Event{
-		Type:    events.BeadUpdated,
-		Actor:   "worker",
-		Subject: root.ID,
-		Payload: payload,
-	})
-
-	time.Sleep(100 * time.Millisecond)
-	cancel()
-	<-done
-
-	body := rec.Body.String()
-	if !strings.Contains(body, `"workflow":{"type":"workflow:event"`) {
-		t.Fatalf("SSE body missing workflow projection: %s", body)
-	}
-	if !strings.Contains(body, `"workflow_id":"wf_123"`) {
-		t.Fatalf("SSE body missing workflow id: %s", body)
-	}
-	if !strings.Contains(body, `"scope_kind":"city"`) {
-		t.Fatalf("SSE body missing logical scope: %s", body)
-	}
-}
+// TestEventStream and TestEventStreamProjectsWorkflowMetadata are deleted.
+// SSE is eliminated. WS subscription tests in websocket_test.go cover this.
 
 func TestWatcherCloseUnblocksNext(t *testing.T) {
 	ep := events.NewFake()
@@ -193,31 +109,33 @@ func TestWatcherCloseUnblocksNext(t *testing.T) {
 	}
 }
 
-func TestEventStreamNoEvents(t *testing.T) {
-	state := newFakeState(t)
-	state.eventProv = nil
-	srv := New(state)
-
-	req := httptest.NewRequest("GET", "/v0/events/stream", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
-	}
-}
+// TestEventStreamNoEvents is deleted. SSE is eliminated.
 
 func TestHandleEventEmit(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	body := `{"type":"deploy.completed","actor":"ci","subject":"myapp","message":"v2.3.1"}`
-	req := newPostRequest("/v0/events", strings.NewReader(body))
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusCreated, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "emit-1",
+		Action: "event.emit",
+		Payload: map[string]any{
+			"type":    "deploy.completed",
+			"actor":   "ci",
+			"subject": "myapp",
+			"message": "v2.3.1",
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("emit response type = %q, want response", resp.Type)
 	}
 
 	ep := state.eventProv.(*events.Fake)
@@ -239,28 +157,50 @@ func TestHandleEventEmit(t *testing.T) {
 func TestHandleEventEmit_MissingType(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	body := `{"actor":"ci"}`
-	req := newPostRequest("/v0/events", strings.NewReader(body))
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "emit-notype",
+		Action: "event.emit",
+		Payload: map[string]any{
+			"actor": "ci",
+		},
+	})
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Type != "error" {
+		t.Fatalf("expected error response, got type = %q", errResp.Type)
 	}
 }
 
 func TestHandleEventEmit_MissingActor(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	body := `{"type":"test.event"}`
-	req := newPostRequest("/v0/events", strings.NewReader(body))
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "emit-noactor",
+		Action: "event.emit",
+		Payload: map[string]any{
+			"type": "test.event",
+		},
+	})
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Type != "error" {
+		t.Fatalf("expected error response, got type = %q", errResp.Type)
 	}
 }
 
@@ -268,13 +208,25 @@ func TestHandleEventEmit_NoEventsProvider(t *testing.T) {
 	state := newFakeState(t)
 	state.eventProv = nil
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	body := `{"type":"test.event","actor":"ci"}`
-	req := newPostRequest("/v0/events", strings.NewReader(body))
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "emit-noep",
+		Action: "event.emit",
+		Payload: map[string]any{
+			"type":  "test.event",
+			"actor": "ci",
+		},
+	})
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Type != "error" {
+		t.Fatalf("expected error response, got type = %q", errResp.Type)
 	}
 }

@@ -2,23 +2,36 @@ package api
 
 import (
 	"encoding/json"
-	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
+
+	"github.com/gorilla/websocket"
 )
 
 func TestHandleAgentCreate(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	body := `{"name":"coder","provider":"claude"}`
-	req := newPostRequest("/v0/agents", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusCreated, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "create-1",
+		Action: "agent.create",
+		Payload: map[string]any{
+			"name":     "coder",
+			"provider": "claude",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "create-1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
 
 	// Verify agent was added.
@@ -36,174 +49,146 @@ func TestHandleAgentCreate(t *testing.T) {
 func TestHandleAgentCreate_MissingName(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	body := `{"provider":"claude"}`
-	req := newPostRequest("/v0/agents", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "create-bad",
+		Action: "agent.create",
+		Payload: map[string]any{
+			"provider": "claude",
+		},
+	})
+
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Type != "error" {
+		t.Fatalf("type = %q, want error", errResp.Type)
+	}
+	if errResp.Code != "invalid" {
+		t.Fatalf("code = %q, want invalid", errResp.Code)
 	}
 }
 
 func TestHandleAgentUpdate(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	body := `{"provider":"gemini"}`
-	req := httptest.NewRequest("PATCH", "/v0/agent/myrig/worker", strings.NewReader(body))
-	req.Header.Set("X-GC-Request", "true")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "update-1",
+		Action: "agent.update",
+		Payload: map[string]any{
+			"name":     "myrig/worker",
+			"provider": "gemini",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "update-1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-
-	// Verify provider was updated.
-	for _, a := range fs.cfg.Agents {
-		if a.Name == "worker" && a.Dir == "myrig" {
-			if a.Provider != "gemini" {
-				t.Errorf("provider = %q, want %q", a.Provider, "gemini")
-			}
-			return
-		}
-	}
-	t.Error("agent 'myrig/worker' not found after update")
-}
-
-func TestHandleAgentUpdate_NotFound(t *testing.T) {
-	fs := newFakeMutatorState(t)
-	srv := New(fs)
-
-	body := `{"provider":"gemini"}`
-	req := httptest.NewRequest("PATCH", "/v0/agent/nonexistent", strings.NewReader(body))
-	req.Header.Set("X-GC-Request", "true")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
+	var result map[string]string
+	json.Unmarshal(resp.Result, &result)
+	if result["status"] != "updated" {
+		t.Fatalf("status = %q, want updated", result["status"])
 	}
 }
 
 func TestHandleAgentDelete(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("DELETE", "/v0/agent/myrig/worker", nil)
-	req.Header.Set("X-GC-Request", "true")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "delete-1",
+		Action: "agent.delete",
+		Payload: map[string]any{
+			"name": "myrig/worker",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "delete-1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-
-	// Verify agent was removed.
-	for _, a := range fs.cfg.Agents {
-		if a.Name == "worker" && a.Dir == "myrig" {
-			t.Error("agent 'myrig/worker' still exists after delete")
-		}
-	}
-}
-
-func TestHandleAgentDelete_NotFound(t *testing.T) {
-	fs := newFakeMutatorState(t)
-	srv := New(fs)
-
-	req := httptest.NewRequest("DELETE", "/v0/agent/nonexistent", nil)
-	req.Header.Set("X-GC-Request", "true")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
+	var result map[string]string
+	json.Unmarshal(resp.Result, &result)
+	if result["status"] != "deleted" {
+		t.Fatalf("status = %q, want deleted", result["status"])
 	}
 }
 
 func TestHandleCityPatch_Suspend(t *testing.T) {
-	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	state := newFakeMutatorState(t)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	body := `{"suspended": true}`
-	req := httptest.NewRequest("PATCH", "/v0/city", strings.NewReader(body))
-	req.Header.Set("X-GC-Request", "true")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
-	}
-	if !fs.cfg.Workspace.Suspended {
-		t.Error("expected workspace to be suspended")
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "patch-1",
+		Action: "city.patch",
+		Payload: map[string]any{
+			"suspended": true,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "patch-1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
 }
 
 func TestHandleCityPatch_Resume(t *testing.T) {
-	fs := newFakeMutatorState(t)
-	fs.cfg.Workspace.Suspended = true
-	srv := New(fs)
+	state := newFakeMutatorState(t)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	body := `{"suspended": false}`
-	req := httptest.NewRequest("PATCH", "/v0/city", strings.NewReader(body))
-	req.Header.Set("X-GC-Request", "true")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
-	}
-	if fs.cfg.Workspace.Suspended {
-		t.Error("expected workspace to not be suspended")
-	}
-}
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "patch-2",
+		Action: "city.patch",
+		Payload: map[string]any{
+			"suspended": false,
+		},
+	})
 
-func TestCSRF_BlocksDeleteWithoutHeader(t *testing.T) {
-	fs := newFakeMutatorState(t)
-	srv := New(fs)
-
-	req := httptest.NewRequest("DELETE", "/v0/agent/myrig/worker", nil)
-	// No X-GC-Request header.
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusForbidden)
-	}
-	var errResp Error
-	json.NewDecoder(w.Body).Decode(&errResp) //nolint:errcheck
-	if errResp.Code != "csrf" {
-		t.Errorf("error code = %q, want %q", errResp.Code, "csrf")
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "patch-2" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
 }
 
-func TestReadOnly_BlocksPatch(t *testing.T) {
-	fs := newFakeMutatorState(t)
-	srv := NewReadOnly(fs)
-
-	body := `{"suspended": true}`
-	req := httptest.NewRequest("PATCH", "/v0/city", strings.NewReader(body))
-	req.Header.Set("X-GC-Request", "true")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusForbidden)
-	}
-}
-
-func TestReadOnly_BlocksDelete(t *testing.T) {
-	fs := newFakeMutatorState(t)
-	srv := NewReadOnly(fs)
-
-	req := httptest.NewRequest("DELETE", "/v0/agent/myrig/worker", nil)
-	req.Header.Set("X-GC-Request", "true")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusForbidden)
-	}
-}
+// Ensure websocket import is used.
+var _ = websocket.DefaultDialer

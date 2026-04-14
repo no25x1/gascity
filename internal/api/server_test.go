@@ -109,16 +109,20 @@ func TestCORSRejectsNonLocalhost(t *testing.T) {
 }
 
 func TestMethodNotAllowed(t *testing.T) {
+	// HTTP method validation doesn't apply to WS. Verify unknown action error.
 	state := newFakeState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	// POST to a GET-only endpoint
-	req := newPostRequest("/v0/status", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusMethodNotAllowed {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "bad", Action: "nonexistent.action"})
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Type != "error" || errResp.Code != "not_found" {
+		t.Errorf("expected not_found error, got %#v", errResp)
 	}
 }
 

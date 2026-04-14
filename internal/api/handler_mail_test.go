@@ -1,9 +1,7 @@
 package api
 
 import (
-	"bytes"
 	"encoding/json"
-	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -14,19 +12,33 @@ import (
 func TestMailLifecycle(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
 	// Send a message. Bare "worker" resolves to "myrig/worker" (the qualified name).
-	body := `{"from":"mayor","to":"worker","subject":"Review needed","body":"Please check gc-456"}`
-	req := newPostRequest("/v0/mail", bytes.NewBufferString(body))
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("send status = %d, want %d, body: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "send-1",
+		Action: "mail.send",
+		Payload: map[string]any{
+			"from":    "mayor",
+			"to":      "worker",
+			"subject": "Review needed",
+			"body":    "Please check gc-456",
+		},
+	})
+	var sendResp wsResponseEnvelope
+	readWSJSON(t, conn, &sendResp)
+	if sendResp.Type != "response" || sendResp.ID != "send-1" {
+		t.Fatalf("send response = %#v, want correlated response", sendResp)
 	}
 
 	var sent mail.Message
-	json.NewDecoder(rec.Body).Decode(&sent) //nolint:errcheck
+	json.Unmarshal(sendResp.Result, &sent) //nolint:errcheck
 	if sent.Subject != "Review needed" {
 		t.Errorf("Subject = %q, want %q", sent.Subject, "Review needed")
 	}
@@ -35,75 +47,115 @@ func TestMailLifecycle(t *testing.T) {
 	}
 
 	// Check inbox using the resolved qualified name.
-	req = httptest.NewRequest("GET", "/v0/mail?agent=myrig/worker", nil)
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "list-1",
+		Action: "mail.list",
+		Payload: map[string]any{
+			"agent": "myrig/worker",
+		},
+	})
+	var listResp wsResponseEnvelope
+	readWSJSON(t, conn, &listResp)
 
 	var inbox struct {
 		Items []mail.Message `json:"items"`
 		Total int            `json:"total"`
 	}
-	json.NewDecoder(rec.Body).Decode(&inbox) //nolint:errcheck
+	json.Unmarshal(listResp.Result, &inbox) //nolint:errcheck
 	if inbox.Total != 1 {
 		t.Fatalf("inbox Total = %d, want 1", inbox.Total)
 	}
 
 	// Mark read.
-	req = newPostRequest("/v0/mail/"+sent.ID+"/read", nil)
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("read status = %d, want %d", rec.Code, http.StatusOK)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "read-1",
+		Action: "mail.read",
+		Payload: map[string]any{
+			"id": sent.ID,
+		},
+	})
+	var readResp wsResponseEnvelope
+	readWSJSON(t, conn, &readResp)
+	if readResp.Type != "response" {
+		t.Fatalf("read response type = %q, want response", readResp.Type)
 	}
 
 	// Inbox should be empty now (only unread).
-	req = httptest.NewRequest("GET", "/v0/mail?agent=myrig/worker", nil)
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "list-2",
+		Action: "mail.list",
+		Payload: map[string]any{
+			"agent": "myrig/worker",
+		},
+	})
+	var listResp2 wsResponseEnvelope
+	readWSJSON(t, conn, &listResp2)
 
-	json.NewDecoder(rec.Body).Decode(&inbox) //nolint:errcheck
+	json.Unmarshal(listResp2.Result, &inbox) //nolint:errcheck
 	if inbox.Total != 0 {
 		t.Errorf("inbox after read: Total = %d, want 0", inbox.Total)
 	}
 
 	// Get still works.
-	req = httptest.NewRequest("GET", "/v0/mail/"+sent.ID, nil)
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("get status = %d, want %d", rec.Code, http.StatusOK)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "get-1",
+		Action: "mail.get",
+		Payload: map[string]any{
+			"id": sent.ID,
+		},
+	})
+	var getResp wsResponseEnvelope
+	readWSJSON(t, conn, &getResp)
+	if getResp.Type != "response" {
+		t.Fatalf("get response type = %q, want response", getResp.Type)
 	}
 
 	// Archive.
-	req = newPostRequest("/v0/mail/"+sent.ID+"/archive", nil)
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("archive status = %d, want %d", rec.Code, http.StatusOK)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "archive-1",
+		Action: "mail.archive",
+		Payload: map[string]any{
+			"id": sent.ID,
+		},
+	})
+	var archiveResp wsResponseEnvelope
+	readWSJSON(t, conn, &archiveResp)
+	if archiveResp.Type != "response" {
+		t.Fatalf("archive response type = %q, want response", archiveResp.Type)
 	}
 }
 
 func TestMailSendValidation(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
 	// Missing required fields.
-	body := `{"from":"mayor"}`
-	req := newPostRequest("/v0/mail", bytes.NewBufferString(body))
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "send-bad",
+		Action: "mail.send",
+		Payload: map[string]any{
+			"from": "mayor",
+		},
+	})
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Type != "error" {
+		t.Fatalf("expected error response, got type = %q", errResp.Type)
 	}
-
-	var apiErr Error
-	json.NewDecoder(rec.Body).Decode(&apiErr) //nolint:errcheck
-	if len(apiErr.Details) != 2 {
-		t.Errorf("Details count = %d, want 2", len(apiErr.Details))
+	if len(errResp.Details) != 2 {
+		t.Errorf("Details count = %d, want 2", len(errResp.Details))
 	}
 }
 
@@ -113,15 +165,28 @@ func TestMailCount(t *testing.T) {
 	mp.Send("a", "b", "msg1", "body1") //nolint:errcheck
 	mp.Send("a", "b", "msg2", "body2") //nolint:errcheck
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/mail/count?agent=b", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	var resp map[string]int
-	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
-	if resp["unread"] != 2 {
-		t.Errorf("unread = %d, want 2", resp["unread"])
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "count-1",
+		Action: "mail.count",
+		Payload: map[string]any{
+			"agent": "b",
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+
+	var counts map[string]int
+	json.Unmarshal(resp.Result, &counts) //nolint:errcheck
+	if counts["unread"] != 2 {
+		t.Errorf("unread = %d, want 2", counts["unread"])
 	}
 }
 
@@ -130,26 +195,44 @@ func TestMailDelete(t *testing.T) {
 	mp := state.cityMailProv
 	msg, _ := mp.Send("mayor", "worker", "To delete", "content")
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("DELETE", "/v0/mail/"+msg.ID, nil)
-	req.Header.Set("X-GC-Request", "true")
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("delete status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "delete-1",
+		Action: "mail.delete",
+		Payload: map[string]any{
+			"id": msg.ID,
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("delete response type = %q, want response", resp.Type)
 	}
 
 	// After delete (soft delete/archive), message should no longer appear in inbox.
-	req = httptest.NewRequest("GET", "/v0/mail?agent=worker", nil)
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "list-after-delete",
+		Action: "mail.list",
+		Payload: map[string]any{
+			"agent": "worker",
+		},
+	})
+	var listResp wsResponseEnvelope
+	readWSJSON(t, conn, &listResp)
 
 	var inbox struct {
 		Items []mail.Message `json:"items"`
 		Total int            `json:"total"`
 	}
-	json.NewDecoder(rec.Body).Decode(&inbox) //nolint:errcheck
+	json.Unmarshal(listResp.Result, &inbox) //nolint:errcheck
 	if inbox.Total != 0 {
 		t.Errorf("inbox after delete: Total = %d, want 0", inbox.Total)
 	}
@@ -158,14 +241,28 @@ func TestMailDelete(t *testing.T) {
 func TestMailDeleteNotFound(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("DELETE", "/v0/mail/nonexistent", nil)
-	req.Header.Set("X-GC-Request", "true")
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "delete-nf",
+		Action: "mail.delete",
+		Payload: map[string]any{
+			"id": "nonexistent",
+		},
+	})
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Type != "error" {
+		t.Fatalf("expected error response, got type = %q", errResp.Type)
+	}
+	if errResp.Code != "not_found" {
+		t.Errorf("code = %q, want not_found", errResp.Code)
 	}
 }
 
@@ -178,45 +275,73 @@ func TestMailListStatusAll(t *testing.T) {
 	mp.Send("mayor", "worker", "Second", "body2") //nolint:errcheck
 
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
 	// Default (no status) returns only unread — both should appear.
-	req := httptest.NewRequest("GET", "/v0/mail?agent=worker", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "list-unread",
+		Action: "mail.list",
+		Payload: map[string]any{
+			"agent": "worker",
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
 
-	var resp struct {
+	var list struct {
 		Items []mail.Message `json:"items"`
 		Total int            `json:"total"`
 	}
-	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
-	if resp.Total != 2 {
-		t.Fatalf("unread Total = %d, want 2", resp.Total)
+	json.Unmarshal(resp.Result, &list) //nolint:errcheck
+	if list.Total != 2 {
+		t.Fatalf("unread Total = %d, want 2", list.Total)
 	}
 
 	// Mark the first message as read.
-	mp.MarkRead(resp.Items[0].ID) //nolint:errcheck
+	mp.MarkRead(list.Items[0].ID) //nolint:errcheck
 
 	// Default (unread) should now return 1.
-	req = httptest.NewRequest("GET", "/v0/mail?agent=worker&status=unread", nil)
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "list-unread2",
+		Action: "mail.list",
+		Payload: map[string]any{
+			"agent":  "worker",
+			"status": "unread",
+		},
+	})
+	var resp2 wsResponseEnvelope
+	readWSJSON(t, conn, &resp2)
 
-	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
-	if resp.Total != 1 {
-		t.Fatalf("unread after mark-read Total = %d, want 1", resp.Total)
+	json.Unmarshal(resp2.Result, &list) //nolint:errcheck
+	if list.Total != 1 {
+		t.Fatalf("unread after mark-read Total = %d, want 1", list.Total)
 	}
 
 	// status=all should return both (read + unread).
-	req = httptest.NewRequest("GET", "/v0/mail?agent=worker&status=all", nil)
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=all returned %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "list-all",
+		Action: "mail.list",
+		Payload: map[string]any{
+			"agent":  "worker",
+			"status": "all",
+		},
+	})
+	var resp3 wsResponseEnvelope
+	readWSJSON(t, conn, &resp3)
+	if resp3.Type != "response" {
+		t.Fatalf("status=all returned type = %q, want response", resp3.Type)
 	}
-	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
-	if resp.Total != 2 {
-		t.Errorf("status=all Total = %d, want 2", resp.Total)
+	json.Unmarshal(resp3.Result, &list) //nolint:errcheck
+	if list.Total != 2 {
+		t.Errorf("status=all Total = %d, want 2", list.Total)
 	}
 }
 
@@ -229,36 +354,61 @@ func TestMailListStatusAllAcrossRigs(t *testing.T) {
 	mp.MarkRead(msg2.ID) //nolint:errcheck
 
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
 	// status=all without rig param aggregates across all rigs.
-	req := httptest.NewRequest("GET", "/v0/mail?agent=worker&status=all", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=all returned %d, want %d", rec.Code, http.StatusOK)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "list-all-rigs",
+		Action: "mail.list",
+		Payload: map[string]any{
+			"agent":  "worker",
+			"status": "all",
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("status=all returned type = %q, want response", resp.Type)
 	}
 
-	var resp struct {
+	var list struct {
 		Items []mail.Message `json:"items"`
 		Total int            `json:"total"`
 	}
-	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
-	if resp.Total != 2 {
-		t.Errorf("status=all across rigs Total = %d, want 2", resp.Total)
+	json.Unmarshal(resp.Result, &list) //nolint:errcheck
+	if list.Total != 2 {
+		t.Errorf("status=all across rigs Total = %d, want 2", list.Total)
 	}
 }
 
 func TestMailListStatusInvalid(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/mail?status=bogus", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status=bogus returned %d, want %d", rec.Code, http.StatusBadRequest)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "list-bogus",
+		Action: "mail.list",
+		Payload: map[string]any{
+			"status": "bogus",
+		},
+	})
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Type != "error" {
+		t.Fatalf("expected error response, got type = %q", errResp.Type)
 	}
 }
 
@@ -267,18 +417,32 @@ func TestMailReply(t *testing.T) {
 	mp := state.cityMailProv
 	msg, _ := mp.Send("mayor", "worker", "Initial", "content")
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	body := `{"from":"worker","subject":"Re: Initial","body":"Done!"}`
-	req := newPostRequest("/v0/mail/"+msg.ID+"/reply", bytes.NewBufferString(body))
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("reply status = %d, want %d, body: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "reply-1",
+		Action: "mail.reply",
+		Payload: map[string]any{
+			"id":      msg.ID,
+			"from":    "worker",
+			"subject": "Re: Initial",
+			"body":    "Done!",
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("reply response type = %q, want response", resp.Type)
 	}
 
 	var reply mail.Message
-	json.NewDecoder(rec.Body).Decode(&reply) //nolint:errcheck
+	json.Unmarshal(resp.Result, &reply) //nolint:errcheck
 	if reply.ThreadID == "" {
 		t.Error("reply has no ThreadID")
 	}
@@ -289,34 +453,55 @@ func TestMailListIncludesRig(t *testing.T) {
 	mp := state.cityMailProv
 	mp.Send("alice", "bob", "Hi", "hello") //nolint:errcheck
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
 	// List without rig filter — aggregation path.
-	req := httptest.NewRequest("GET", "/v0/mail?status=all", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "list-norigs",
+		Action: "mail.list",
+		Payload: map[string]any{
+			"status": "all",
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
 
-	var resp struct {
+	var list struct {
 		Items []mail.Message `json:"items"`
 	}
-	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
-	if len(resp.Items) == 0 {
+	json.Unmarshal(resp.Result, &list) //nolint:errcheck
+	if len(list.Items) == 0 {
 		t.Fatal("expected at least 1 message")
 	}
-	if resp.Items[0].Rig != "test-city" {
-		t.Errorf("Items[0].Rig = %q, want %q", resp.Items[0].Rig, "test-city")
+	if list.Items[0].Rig != "test-city" {
+		t.Errorf("Items[0].Rig = %q, want %q", list.Items[0].Rig, "test-city")
 	}
 
-	// List with rig filter — single-rig path. The rig param is used as the tag.
-	req = httptest.NewRequest("GET", "/v0/mail?rig=test-city&status=all", nil)
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	// List with rig filter — single-rig path.
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "list-rig",
+		Action: "mail.list",
+		Payload: map[string]any{
+			"rig":    "test-city",
+			"status": "all",
+		},
+	})
+	var resp2 wsResponseEnvelope
+	readWSJSON(t, conn, &resp2)
 
-	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
-	if len(resp.Items) == 0 {
+	json.Unmarshal(resp2.Result, &list) //nolint:errcheck
+	if len(list.Items) == 0 {
 		t.Fatal("expected at least 1 message")
 	}
-	if resp.Items[0].Rig != "test-city" {
-		t.Errorf("Items[0].Rig = %q, want %q (single-rig path)", resp.Items[0].Rig, "test-city")
+	if list.Items[0].Rig != "test-city" {
+		t.Errorf("Items[0].Rig = %q, want %q (single-rig path)", list.Items[0].Rig, "test-city")
 	}
 }
 
@@ -329,19 +514,33 @@ func TestMailThreadIncludesRig(t *testing.T) {
 	mp.Reply(msg.ID, "bob", "Re: Thread test", "reply body") //nolint:errcheck
 
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/mail/thread/"+msg.ThreadID+"?rig=test-city", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	var resp struct {
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "thread-1",
+		Action: "mail.thread",
+		Payload: map[string]any{
+			"id":  msg.ThreadID,
+			"rig": "test-city",
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+
+	var list struct {
 		Items []mail.Message `json:"items"`
 	}
-	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
-	if len(resp.Items) == 0 {
+	json.Unmarshal(resp.Result, &list) //nolint:errcheck
+	if len(list.Items) == 0 {
 		t.Fatal("expected thread messages")
 	}
-	for i, m := range resp.Items {
+	for i, m := range list.Items {
 		if m.Rig != "test-city" {
 			t.Errorf("Items[%d].Rig = %q, want %q", i, m.Rig, "test-city")
 		}
@@ -351,30 +550,36 @@ func TestMailThreadIncludesRig(t *testing.T) {
 func TestMailSendIdempotentReplayIncludesRig(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	body := `{"rig":"test-city","from":"alice","to":"worker","subject":"Hi","body":"hello"}`
-	req := newPostRequest("/v0/mail", bytes.NewBufferString(body))
-	req.Header.Set("Idempotency-Key", "mail-send-1")
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("first send status = %d, want %d, body: %s", rec.Code, http.StatusCreated, rec.Body.String())
-	}
-
-	req = newPostRequest("/v0/mail", bytes.NewBufferString(body))
-	req.Header.Set("Idempotency-Key", "mail-send-1")
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("replayed send status = %d, want %d, body: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	// First send.
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "send-idem-1",
+		Action: "mail.send",
+		Payload: map[string]any{
+			"rig":     "test-city",
+			"from":    "alice",
+			"to":      "worker",
+			"subject": "Hi",
+			"body":    "hello",
+		},
+	})
+	var resp1 wsResponseEnvelope
+	readWSJSON(t, conn, &resp1)
+	if resp1.Type != "response" {
+		t.Fatalf("first send type = %q, want response", resp1.Type)
 	}
 
 	var msg mail.Message
-	json.NewDecoder(rec.Body).Decode(&msg) //nolint:errcheck
+	json.Unmarshal(resp1.Result, &msg) //nolint:errcheck
 	if msg.Rig != "test-city" {
-		t.Fatalf("replayed send Rig = %q, want %q", msg.Rig, "test-city")
+		t.Fatalf("send Rig = %q, want %q", msg.Rig, "test-city")
 	}
 }
 
@@ -383,17 +588,29 @@ func TestMailGetWithoutRigHintIncludesResolvedRig(t *testing.T) {
 	mp := state.cityMailProv
 	msg, _ := mp.Send("alice", "bob", "Hi", "hello")
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/mail/"+msg.ID, nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("get status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "get-norig",
+		Action: "mail.get",
+		Payload: map[string]any{
+			"id": msg.ID,
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("get response type = %q, want response", resp.Type)
 	}
 
 	var got mail.Message
-	json.NewDecoder(rec.Body).Decode(&got) //nolint:errcheck
+	json.Unmarshal(resp.Result, &got) //nolint:errcheck
 	if got.Rig != "test-city" {
 		t.Fatalf("get Rig = %q, want %q", got.Rig, "test-city")
 	}
@@ -405,14 +622,27 @@ func TestMailMutationEventsUseResolvedRigWithoutHint(t *testing.T) {
 	mp := state.cityMailProv
 	msg, _ := mp.Send("alice", "bob", "Hi", "hello")
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := newPostRequest("/v0/mail/"+msg.ID+"/read", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("read status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "read-rig",
+		Action: "mail.read",
+		Payload: map[string]any{
+			"id": msg.ID,
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("read response type = %q, want response", resp.Type)
 	}
+
 	if len(ep.Events) == 0 {
 		t.Fatal("expected read event")
 	}
@@ -434,18 +664,32 @@ func TestMailReplyWithoutRigHintUsesResolvedRig(t *testing.T) {
 	mp := state.cityMailProv
 	msg, _ := mp.Send("alice", "bob", "Hi", "hello")
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	body := `{"from":"bob","subject":"Re: Hi","body":"reply"}`
-	req := newPostRequest("/v0/mail/"+msg.ID+"/reply", bytes.NewBufferString(body))
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("reply status = %d, want %d, body: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "reply-rig",
+		Action: "mail.reply",
+		Payload: map[string]any{
+			"id":      msg.ID,
+			"from":    "bob",
+			"subject": "Re: Hi",
+			"body":    "reply",
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("reply response type = %q, want response", resp.Type)
 	}
 
 	var reply mail.Message
-	json.NewDecoder(rec.Body).Decode(&reply) //nolint:errcheck
+	json.Unmarshal(resp.Result, &reply) //nolint:errcheck
 	if reply.Rig != "test-city" {
 		t.Fatalf("reply Rig = %q, want %q", reply.Rig, "test-city")
 	}
@@ -454,17 +698,17 @@ func TestMailReplyWithoutRigHintUsesResolvedRig(t *testing.T) {
 		t.Fatal("expected reply event")
 	}
 
-	var payload struct {
+	var evtPayload struct {
 		Rig     string       `json:"rig"`
 		Message mail.Message `json:"message"`
 	}
-	if err := json.Unmarshal(ep.Events[len(ep.Events)-1].Payload, &payload); err != nil {
+	if err := json.Unmarshal(ep.Events[len(ep.Events)-1].Payload, &evtPayload); err != nil {
 		t.Fatalf("unmarshal reply payload: %v", err)
 	}
-	if payload.Rig != "test-city" {
-		t.Fatalf("reply event rig = %q, want %q", payload.Rig, "test-city")
+	if evtPayload.Rig != "test-city" {
+		t.Fatalf("reply event rig = %q, want %q", evtPayload.Rig, "test-city")
 	}
-	if payload.Message.Rig != "test-city" {
-		t.Fatalf("reply event message rig = %q, want %q", payload.Message.Rig, "test-city")
+	if evtPayload.Message.Rig != "test-city" {
+		t.Fatalf("reply event message rig = %q, want %q", evtPayload.Message.Rig, "test-city")
 	}
 }

@@ -33,12 +33,25 @@
     };
 
     // ============================================
-    // SSE (Server-Sent Events) CONNECTION
+    // WEBSOCKET CONNECTION
     // ============================================
-    window.sseConnected = false;
-    var evtSource = null;
-    var sseReconnectDelay = 1000;
-    var sseMaxReconnectDelay = 30000;
+    // The browser connects directly to the supervisor/city WS endpoint.
+    // The API URL is injected via a <meta> tag by the dashboard server.
+    var _apiUrlMeta = document.querySelector('meta[name="api-url"]');
+    var _apiBaseUrl = _apiUrlMeta ? _apiUrlMeta.getAttribute('content') : '';
+    var _wsUrl = _apiBaseUrl ? _apiBaseUrl.replace(/^http/, 'ws') + '/v0/ws' : '';
+
+    window.wsConnected = false;
+    // Legacy alias for SSE-era code that checks this flag:
+    Object.defineProperty(window, 'sseConnected', {
+        get: function() { return window.wsConnected; },
+        set: function(v) { window.wsConnected = v; }
+    });
+    var _ws = null;
+    var _wsReqId = 0;
+    var _wsPending = {}; // reqId -> {resolve, reject}
+    var _wsReconnectDelay = 1000;
+    var _wsMaxReconnectDelay = 30000;
 
     // Category-based refresh: observation events update only the activity
     // panel (cheap, 1 API call). State-changing events trigger a full-page
@@ -60,31 +73,27 @@
     var _activityThrottle = 2000;
 
     function _scheduleActivityRefresh() {
-        if (_activityTimer) return; // Already scheduled
+        if (_activityTimer) return;
         _activityTimer = setTimeout(function() {
             _activityTimer = null;
             if (window.pauseRefresh) return;
-            var panel = document.getElementById('activity-panel');
-            if (panel && typeof htmx !== 'undefined') {
-                htmx.trigger(panel, 'panel-refresh');
-            }
+            // Refresh activity panel via WS.
+            wsRequest('events.list', {limit: 20}).then(function(data) {
+                renderActivityPanel(data.items || []);
+            }).catch(function() {});
         }, _activityThrottle);
     }
 
-    // Full page: debounced (resets on each new event, fires after quiet period).
     var _fullRefreshTimer = null;
 
     function _scheduleFullRefresh() {
         if (_fullRefreshTimer) clearTimeout(_fullRefreshTimer);
         _fullRefreshTimer = setTimeout(function() {
             _fullRefreshTimer = null;
-            // Cancel pending activity refresh — full refresh includes it.
             if (_activityTimer) { clearTimeout(_activityTimer); _activityTimer = null; }
             if (window.pauseRefresh) return;
-            var dashboard = document.getElementById('dashboard-main');
-            if (dashboard && typeof htmx !== 'undefined') {
-                htmx.trigger(dashboard, 'dashboard:update');
-            }
+            // Full refresh: reload all panels via WS.
+            loadDashboard();
         }, 500);
     }
 
@@ -108,39 +117,297 @@
         _scheduleFullRefresh();
     }
 
-    function connectSSE() {
-        if (evtSource) {
-            evtSource.close();
+    // --- WebSocket transport layer ---
+
+    // wsRequest sends a typed request and returns a promise for the response.
+    function wsRequest(action, payload) {
+        return new Promise(function(resolve, reject) {
+            if (!_ws || _ws.readyState !== WebSocket.OPEN) {
+                reject(new Error('WebSocket not connected'));
+                return;
+            }
+            _wsReqId++;
+            var id = 'dash-' + _wsReqId;
+            var msg = {type: 'request', id: id, action: action};
+            if (_selectedCity) {
+                msg.scope = {city: _selectedCity};
+            }
+            if (payload) {
+                msg.payload = payload;
+            }
+            _wsPending[id] = {resolve: resolve, reject: reject};
+            _ws.send(JSON.stringify(msg));
+            // Timeout after 30s.
+            setTimeout(function() {
+                if (_wsPending[id]) {
+                    _wsPending[id].reject(new Error('WebSocket request timeout'));
+                    delete _wsPending[id];
+                }
+            }, 30000);
+        });
+    }
+
+    function connectWebSocket() {
+        if (_ws) {
+            _ws.close();
+        }
+        if (!_wsUrl) {
+            console.warn('dashboard: no api-url meta tag, cannot connect WebSocket');
+            return;
         }
 
-        var sseURL = '/api/events';
-        var sseSep = '?';
-        if (_selectedCity) { sseURL += sseSep + 'city=' + encodeURIComponent(_selectedCity); sseSep = '&'; }
-        if (_lastEventId) { sseURL += sseSep + 'after_seq=' + encodeURIComponent(_lastEventId); }
-        evtSource = new EventSource(sseURL);
+        _ws = new WebSocket(_wsUrl);
 
-        evtSource.addEventListener('connected', function() {
-            window.sseConnected = true;
-            sseReconnectDelay = 1000;
-            updateConnectionStatus('live');
-        });
-
-        // Typed event stream: the proxy forwards each upstream event as
-        // "gc-event" with the full JSON payload (including type field).
-        // Events are routed by category: observation events refresh only
-        // the activity panel; state changes trigger full-page morph.
-        evtSource.addEventListener('gc-event', _handleSSEEvent);
-
-        evtSource.onerror = function() {
-            window.sseConnected = false;
-            updateConnectionStatus('reconnecting');
-            evtSource.close();
-            // Exponential backoff reconnect
-            setTimeout(function() {
-                sseReconnectDelay = Math.min(sseReconnectDelay * 2, sseMaxReconnectDelay);
-                connectSSE();
-            }, sseReconnectDelay);
+        _ws.onopen = function() {
+            // First message is the hello envelope — read and discard.
         };
+
+        _ws.onmessage = function(e) {
+            var msg;
+            try { msg = JSON.parse(e.data); } catch(err) { return; }
+
+            switch (msg.type) {
+            case 'hello':
+                // Hello received — subscribe to events, build commands, load data.
+                window.wsConnected = true;
+                _wsReconnectDelay = 1000;
+                updateConnectionStatus('live');
+                _buildCommandsFromCapabilities(msg.capabilities);
+                _subscribeEvents();
+                loadDashboard();
+                break;
+            case 'response':
+                if (msg.id && _wsPending[msg.id]) {
+                    _wsPending[msg.id].resolve(msg.result);
+                    delete _wsPending[msg.id];
+                }
+                break;
+            case 'error':
+                if (msg.id && _wsPending[msg.id]) {
+                    _wsPending[msg.id].reject(new Error(msg.message || msg.code || 'API error'));
+                    delete _wsPending[msg.id];
+                }
+                break;
+            case 'event':
+                _handleWSEvent(msg);
+                break;
+            }
+        };
+
+        _ws.onclose = function() {
+            window.wsConnected = false;
+            updateConnectionStatus('reconnecting');
+            setTimeout(function() {
+                _wsReconnectDelay = Math.min(_wsReconnectDelay * 2, _wsMaxReconnectDelay);
+                connectWebSocket();
+            }, _wsReconnectDelay);
+        };
+
+        _ws.onerror = function() {
+            // onclose will fire after onerror.
+        };
+    }
+
+    function _subscribeEvents() {
+        var payload = {kind: 'events'};
+        if (_lastEventId) {
+            if (_selectedCity) {
+                payload.after_seq = parseInt(_lastEventId, 10) || 0;
+            } else {
+                payload.after_cursor = _lastEventId;
+            }
+        }
+        wsRequest('subscription.start', payload).catch(function(err) {
+            console.warn('dashboard: event subscription failed:', err);
+        });
+    }
+
+    // Map CLI-style commands to WS actions for the command palette.
+    function dispatchCommandAsWSAction(cmdStr) {
+        var parts = cmdStr.trim().split(/\s+/);
+        var cmd = parts[0];
+        var subcmd = parts[1] || '';
+        var args = parts.slice(2);
+
+        switch (cmd) {
+        case 'status':
+            return wsRequest('status.get');
+        case 'sling':
+            return wsRequest('sling.run', {bead_id: parts[1], rig: parts[2] || ''});
+        case 'unsling':
+            return wsRequest('bead.assign', {id: parts[1], assignee: ''});
+        case 'mail':
+            switch (subcmd) {
+            case 'inbox': case 'check':
+                return wsRequest('mail.list');
+            case 'send':
+                return wsRequest('mail.send', {to: args[0], subject: args.slice(1).join(' '), body: ''});
+            case 'read': case 'mark-read':
+                return wsRequest('mail.read', {id: args[0]});
+            case 'archive':
+                return wsRequest('mail.archive', {id: args[0]});
+            case 'mark-unread':
+                return wsRequest('mail.mark_unread', {id: args[0]});
+            default:
+                return Promise.reject(new Error('Unknown mail command: ' + subcmd));
+            }
+        case 'convoy':
+            switch (subcmd) {
+            case 'list':
+                return wsRequest('convoys.list');
+            case 'status': case 'show':
+                return wsRequest('convoy.get', {id: args[0]});
+            case 'create':
+                return wsRequest('convoy.create', {title: args[0], items: args.slice(1)});
+            case 'add':
+                return wsRequest('convoy.add', {id: args[0], items: args.slice(1)});
+            default:
+                return Promise.reject(new Error('Unknown convoy command: ' + subcmd));
+            }
+        case 'rig':
+            switch (subcmd) {
+            case 'list':
+                return wsRequest('rigs.list');
+            default:
+                return Promise.reject(new Error('Unknown rig command: ' + subcmd));
+            }
+        case 'agent':
+            switch (subcmd) {
+            case 'list':
+                return wsRequest('agents.list');
+            default:
+                return Promise.reject(new Error('Unknown agent command: ' + subcmd));
+            }
+        default:
+            return Promise.reject(new Error('Command not available over WebSocket: ' + cmd));
+        }
+    }
+
+    // Group flat mail messages into threads by thread_id.
+    function groupMailIntoThreads(messages) {
+        var threads = {};
+        (messages || []).forEach(function(msg) {
+            var tid = msg.thread_id || msg.id;
+            if (!threads[tid]) {
+                threads[tid] = {id: tid, subject: msg.subject, messages: [], unread_count: 0, latest_at: msg.created_at};
+            }
+            threads[tid].messages.push(msg);
+            if (msg.status === 'unread') threads[tid].unread_count++;
+            if (msg.created_at > threads[tid].latest_at) threads[tid].latest_at = msg.created_at;
+        });
+        return Object.values(threads).sort(function(a, b) {
+            return (b.latest_at || '').localeCompare(a.latest_at || '');
+        });
+    }
+
+    // ============================================
+    // DASHBOARD DATA LOADING + RENDERING
+    // ============================================
+
+    function loadDashboard() {
+        // Fetch all panel data in parallel via WS.
+        Promise.all([
+            wsRequest('convoys.list').catch(function() { return {items: []}; }),
+            wsRequest('sessions.list', {state: 'active', peek: true}).catch(function() { return {items: []}; }),
+            wsRequest('mail.list').catch(function() { return {items: []}; }),
+            wsRequest('beads.list', {status: 'open', type: 'task'}).catch(function() { return {items: []}; }),
+            wsRequest('events.list', {limit: 20}).catch(function() { return {items: []}; }),
+            wsRequest('status.get').catch(function() { return {}; }),
+        ]).then(function(results) {
+            renderConvoysPanel(results[0].items || []);
+            renderCrewPanel(results[1].items || []);
+            renderMailPanel(results[2].items || []);
+            renderIssuesPanel(results[3].items || []);
+            renderActivityPanel(results[4].items || []);
+        });
+    }
+
+    function renderConvoysPanel(convoys) {
+        var body = document.getElementById('convoys-body');
+        if (!body) return;
+        if (convoys.length === 0) {
+            body.innerHTML = '<div class="panel-empty">No active convoys</div>';
+            return;
+        }
+        var html = '<table class="panel-table"><thead><tr><th>Name</th><th>Items</th><th>Status</th></tr></thead><tbody>';
+        convoys.forEach(function(c) {
+            html += '<tr><td>' + escapeHtml(c.title || c.id) + '</td><td>' + (c.child_count || 0) + '</td><td>' + escapeHtml(c.status || 'open') + '</td></tr>';
+        });
+        html += '</tbody></table>';
+        body.innerHTML = html;
+    }
+
+    function renderCrewPanel(sessions) {
+        var body = document.getElementById('crew-body');
+        if (!body) return;
+        if (sessions.length === 0) {
+            body.innerHTML = '<div class="panel-empty">No active sessions</div>';
+            return;
+        }
+        var html = '<table class="panel-table"><thead><tr><th>Session</th><th>Template</th><th>State</th></tr></thead><tbody>';
+        sessions.forEach(function(s) {
+            html += '<tr><td>' + escapeHtml(s.title || s.id) + '</td><td>' + escapeHtml(s.template || '') + '</td><td>' + escapeHtml(s.state || '') + '</td></tr>';
+        });
+        html += '</tbody></table>';
+        body.innerHTML = html;
+    }
+
+    function renderMailPanel(messages) {
+        var body = document.getElementById('mail-body');
+        if (!body) return;
+        if (messages.length === 0) {
+            body.innerHTML = '<div class="panel-empty">No mail</div>';
+            return;
+        }
+        var html = '<table class="panel-table"><thead><tr><th>From</th><th>Subject</th><th>Status</th></tr></thead><tbody>';
+        messages.forEach(function(m) {
+            html += '<tr><td>' + escapeHtml(m.from || '') + '</td><td>' + escapeHtml(m.subject || '') + '</td><td>' + escapeHtml(m.status || '') + '</td></tr>';
+        });
+        html += '</tbody></table>';
+        body.innerHTML = html;
+    }
+
+    function renderIssuesPanel(issues) {
+        var body = document.getElementById('issues-body');
+        if (!body) return;
+        if (issues.length === 0) {
+            body.innerHTML = '<div class="panel-empty">No open issues</div>';
+            return;
+        }
+        var html = '<table class="panel-table"><thead><tr><th>ID</th><th>Title</th><th>Assignee</th></tr></thead><tbody>';
+        issues.forEach(function(b) {
+            html += '<tr><td>' + escapeHtml(b.id || '') + '</td><td>' + escapeHtml(b.title || '') + '</td><td>' + escapeHtml(b.assignee || '') + '</td></tr>';
+        });
+        html += '</tbody></table>';
+        body.innerHTML = html;
+    }
+
+    function renderActivityPanel(events) {
+        var body = document.getElementById('activity-body');
+        if (!body) return;
+        if (events.length === 0) {
+            body.innerHTML = '<div class="panel-empty">No recent activity</div>';
+            return;
+        }
+        var html = '<div class="activity-list">';
+        events.forEach(function(e) {
+            html += '<div class="activity-item"><span class="activity-type">' + escapeHtml(e.type || '') + '</span> <span class="activity-actor">' + escapeHtml(e.actor || '') + '</span></div>';
+        });
+        html += '</div>';
+        body.innerHTML = html;
+    }
+
+    function _handleWSEvent(msg) {
+        // Track cursor for reconnect.
+        if (msg.cursor) _lastEventId = msg.cursor;
+        else if (msg.index) _lastEventId = String(msg.index);
+
+        if (window.pauseRefresh) return;
+        var eventType = msg.event_type || '';
+
+        _scheduleActivityRefresh();
+        if (eventType && _observationTypes[eventType]) return;
+        _scheduleFullRefresh();
     }
 
     function updateConnectionStatus(state) {
@@ -162,7 +429,7 @@
     }
 
     // Start SSE connection
-    connectSSE();
+    connectWebSocket();
 
     // ============================================
     // EXPAND BUTTON HANDLER
@@ -379,25 +646,43 @@
         });
     };
 
-    // Load commands once
-    fetch('/api/commands')
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-            allCommands = data.commands || [];
+    // Commands are built from WS capabilities after hello.
+    // The command palette maps user-friendly names to WS actions.
+    var _wsCapabilities = [];
+    function _buildCommandsFromCapabilities(caps) {
+        _wsCapabilities = caps || [];
+        allCommands = [
+            {name: 'status', desc: 'Show city status'},
+            {name: 'mail inbox', desc: 'Show mail inbox'},
+            {name: 'mail send', desc: 'Send mail'},
+            {name: 'convoy list', desc: 'List convoys'},
+            {name: 'convoy create', desc: 'Create convoy'},
+            {name: 'rig list', desc: 'List rigs'},
+            {name: 'agent list', desc: 'List agents'},
+            {name: 'sling', desc: 'Sling a bead to a rig'},
+            {name: 'unsling', desc: 'Unassign a bead'},
+        ];
+    }
+
+    // Fetch dynamic options via WS (rigs, sessions, beads, mail)
+    function fetchOptions() {
+        return Promise.all([
+            wsRequest('rigs.list').catch(function() { return {items: []}; }),
+            wsRequest('sessions.list', {state: 'active'}).catch(function() { return {items: []}; }),
+            wsRequest('beads.list', {status: 'open'}).catch(function() { return {items: []}; }),
+            wsRequest('mail.list').catch(function() { return {items: []}; })
+        ])
+        .then(function(results) {
+            cachedOptions = {
+                rigs: (results[0].items || []).map(function(r) { return r.name || r.Name; }),
+                agents: (results[1].items || []).map(function(s) { return s.template || s.id; }),
+                hooks: (results[2].items || []).filter(function(b) { return b.type === 'hook'; }).map(function(b) { return b.id; }),
+                messages: (results[3].items || []).map(function(m) { return m.id; }),
+                convoys: []
+            };
+            return cachedOptions;
         })
         .catch(function() {
-            console.error('Failed to load commands');
-        });
-
-    // Fetch dynamic options (rigs, polecats, convoys, agents, hooks)
-    function fetchOptions() {
-        return fetch('/api/options')
-            .then(function(r) { return r.json(); })
-            .then(function(data) {
-                cachedOptions = data;
-                return data;
-            })
-            .catch(function() {
                 console.error('Failed to load options');
                 return null;
             });
@@ -776,23 +1061,12 @@
 
         showToast('info', 'Running...', 'gt ' + cmdName);
 
-        var payload = { command: cmdName };
-        // Include confirmed flag if the command requires server-side confirmation
-        if (matchedCmd && matchedCmd.confirm) {
-            payload.confirmed = true;
-        }
-
-        fetch('/api/run', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        })
-        .then(function(r) { return r.json(); })
+        // Map CLI command to WS action.
+        dispatchCommandAsWSAction(cmdName)
         .then(function(data) {
-            if (data.success) {
-                showToast('success', 'Success', 'gt ' + cmdName);
-                if (data.output && data.output.trim()) {
-                    showOutput(cmdName, data.output);
+            showToast('success', 'Success', 'gt ' + cmdName);
+            if (data && typeof data === 'string' && data.trim()) {
+                showOutput(cmdName, data);
                 }
             } else {
                 showToast('error', 'Failed', data.error || 'Unknown error');
@@ -984,9 +1258,10 @@
 
         if (!loading || !threadsContainer) return;
 
-        fetch('/api/mail/threads')
-            .then(function(r) { return r.json(); })
+        wsRequest('mail.list')
             .then(function(data) {
+                // Adapt: mail.list returns {items:[...]}, simulate thread grouping.
+                data = {threads: groupMailIntoThreads(data.items || [])};
                 loading.style.display = 'none';
 
                 if (data.threads && data.threads.length > 0) {
@@ -1120,9 +1395,9 @@
 
         if (!loading || !table || !tbody) return;
 
-        fetch('/api/crew')
-            .then(function(r) { return r.json(); })
+        wsRequest('sessions.list', {state: 'active', peek: true})
             .then(function(data) {
+                data = {crew: data.items || []};
                 loading.style.display = 'none';
 
                 if (data.crew && data.crew.length > 0) {
@@ -1294,26 +1569,15 @@
         btn.disabled = true;
         btn.textContent = '...';
 
-        fetch('/api/run', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ command: 'unsling ' + beadId, confirmed: true })
-        })
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-            if (data.success) {
-                showToast('success', 'Unassigned', beadId + ' unassigned');
-                if (typeof htmx !== 'undefined') {
-                    htmx.trigger(document.body, 'htmx:load');
-                }
-            } else {
-                showToast('error', 'Failed', data.error || 'Failed to unassign');
-                btn.disabled = false;
-                btn.textContent = 'Unassign';
+        wsRequest('bead.assign', {id: beadId, assignee: ''})
+        .then(function() {
+            showToast('success', 'Unassigned', beadId + ' unassigned');
+            if (typeof htmx !== 'undefined') {
+                htmx.trigger(document.body, 'htmx:load');
             }
         })
         .catch(function(err) {
-            showToast('error', 'Error', err.message);
+            showToast('error', 'Failed', err.message);
             btn.disabled = false;
             btn.textContent = 'Unassign';
         });
@@ -1356,25 +1620,16 @@
             submitBtn.textContent = '...';
         }
 
-        fetch('/api/run', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ command: 'sling ' + beadId, confirmed: true })
-        })
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-            if (data.success) {
-                showToast('success', 'Assigned', beadId + ' assigned');
-                closeAssignForm();
-                if (typeof htmx !== 'undefined') {
-                    htmx.trigger(document.body, 'htmx:load');
-                }
-            } else {
-                showToast('error', 'Failed', data.error || 'Failed to assign');
+        wsRequest('sling.run', {bead_id: beadId})
+        .then(function() {
+            showToast('success', 'Assigned', beadId + ' assigned');
+            closeAssignForm();
+            if (typeof htmx !== 'undefined') {
+                htmx.trigger(document.body, 'htmx:load');
             }
         })
         .catch(function(err) {
-            showToast('error', 'Error', err.message);
+            showToast('error', 'Failed', err.message);
         })
         .finally(function() {
             if (submitBtn) {
@@ -1404,18 +1659,9 @@
         var errors = 0;
 
         beadIds.forEach(function(beadId) {
-            fetch('/api/run', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ command: 'unsling ' + beadId, confirmed: true })
-            })
-            .then(function(r) { return r.json(); })
-            .then(function(data) {
-                if (data.success) {
-                    completed++;
-                } else {
-                    errors++;
-                }
+            wsRequest('bead.assign', {id: beadId, assignee: ''})
+            .then(function() {
+                completed++;
             })
             .catch(function() {
                 errors++;
@@ -1502,15 +1748,9 @@
             payload.description = description;
         }
 
-        fetch('/api/issues/create', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        })
-        .then(function(r) { return r.json(); })
+        wsRequest('bead.create', payload)
         .then(function(data) {
-            if (data.success) {
-                showToast('success', 'Created', 'Issue ' + (data.id || '') + ' created');
+            showToast('success', 'Created', 'Issue ' + (data.id || '') + ' created');
                 closeIssueModal();
                 // Trigger a page refresh to show the new issue
                 if (typeof htmx !== 'undefined') {
@@ -1608,8 +1848,7 @@
 
         if (!loading || !table || !tbody) return;
 
-        fetch('/api/ready')
-            .then(function(r) { return r.json(); })
+        wsRequest('beads.ready')
             .then(function(data) {
                 loading.style.display = 'none';
 
@@ -1699,23 +1938,12 @@
         convoyCreateForm.style.display = 'none';
         convoyDetail.style.display = 'block';
 
-        // Fetch convoy status via /api/run
-        fetch('/api/run', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ command: 'convoy status ' + convoyId })
-        })
-        .then(function(r) { return r.json(); })
+        // Fetch convoy detail via WS
+        wsRequest('convoy.get', {id: convoyId})
         .then(function(data) {
             document.getElementById('convoy-issues-loading').style.display = 'none';
 
-            if (!data.success) {
-                document.getElementById('convoy-issues-empty').style.display = 'block';
-                document.getElementById('convoy-issues-empty').querySelector('p').textContent = data.error || 'Failed to load convoy';
-                return;
-            }
-
-            var issues = parseConvoyStatusOutput(data.output || '');
+            var issues = (data && data.children) || [];
             if (issues.length === 0) {
                 document.getElementById('convoy-issues-empty').style.display = 'block';
                 return;
@@ -1877,22 +2105,12 @@
         btn.disabled = true;
         btn.textContent = 'Creating...';
 
-        // Build command: convoy create <name> [issue1 issue2 ...]
-        var cmd = 'convoy create ' + name;
-        if (issuesStr) {
-            cmd += ' ' + issuesStr;
-        }
-
-        fetch('/api/run', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ command: cmd, confirmed: true })
-        })
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-            if (data.success) {
-                showToast('success', 'Created', 'Convoy "' + name + '" created');
-                cancelConvoyCreate();
+        // Create convoy via WS
+        var items = issuesStr ? issuesStr.split(/\s+/).filter(Boolean) : [];
+        wsRequest('convoy.create', {title: name, items: items})
+        .then(function() {
+            showToast('success', 'Created', 'Convoy "' + name + '" created');
+            cancelConvoyCreate();
                 if (data.output && data.output.trim()) {
                     showOutput(cmd, data.output);
                 }
@@ -1949,20 +2167,11 @@
         btn.disabled = true;
         btn.textContent = 'Adding...';
 
-        var cmd = 'convoy add ' + currentConvoyId + ' ' + issueId;
-
-        fetch('/api/run', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ command: cmd, confirmed: true })
-        })
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-            if (data.success) {
-                showToast('success', 'Added', 'Issue ' + issueId + ' added to convoy');
-                document.getElementById('convoy-add-issue-form').style.display = 'none';
-                // Refresh the convoy detail view
-                openConvoyDetail(currentConvoyId);
+        wsRequest('convoy.add', {id: currentConvoyId, items: [issueId]})
+        .then(function() {
+            showToast('success', 'Added', 'Issue ' + issueId + ' added to convoy');
+            document.getElementById('convoy-add-issue-form').style.display = 'none';
+            openConvoyDetail(currentConvoyId);
             } else {
                 showToast('error', 'Failed', data.error || 'Unknown error');
             }
@@ -2044,8 +2253,7 @@
         mailDetail.style.display = 'block';
 
         // Fetch message content
-        fetch('/api/mail/read?id=' + encodeURIComponent(msgId))
-            .then(function(r) { return r.json(); })
+        wsRequest('mail.get', {id: msgId})
             .then(function(msg) {
                 document.getElementById('mail-detail-subject').textContent = msg.subject || '(no subject)';
                 document.getElementById('mail-detail-from').textContent = msg.from || from;
@@ -2154,20 +2362,14 @@
         btn.textContent = 'Sending...';
         btn.disabled = true;
 
-        fetch('/api/mail/send', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                to: to,
-                subject: subject,
-                body: body,
-                reply_to: replyTo || undefined
-            })
+        wsRequest(replyTo ? 'mail.reply' : 'mail.send', {
+            to: to,
+            subject: subject,
+            body: body,
+            id: replyTo || undefined
         })
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-            if (data.success) {
-                showToast('success', 'Sent', 'Message sent to ' + to);
+        .then(function() {
+            showToast('success', 'Sent', 'Message sent to ' + to);
                 mailCompose.style.display = 'none';
                 mailList.style.display = 'block';
                 currentMessageId = null;
@@ -2209,8 +2411,7 @@
         }
 
         // Fetch agents from options API
-        return fetch('/api/options')
-            .then(function(r) { return r.json(); })
+        return fetchOptions()
             .then(function(data) {
                 // Clear loading state, rebuild options
                 select.innerHTML = '<option value="">Select recipient...</option>';
@@ -2308,8 +2509,7 @@
         issueDetail.style.display = 'block';
 
         // Fetch issue details
-        fetch('/api/issues/show?id=' + encodeURIComponent(issueId))
-            .then(function(r) { return r.json(); })
+        wsRequest('bead.get', {id: issueId})
             .then(function(data) {
                 if (data.error) {
                     document.getElementById('issue-detail-title-text').textContent = 'Error loading issue';
@@ -2446,8 +2646,7 @@
         var select = document.getElementById('issue-action-assignee');
         if (!select) return;
 
-        fetch('/api/options')
-            .then(function(r) { return r.json(); })
+        fetchOptions()
             .then(function(data) {
                 // Rebuild dropdown
                 var html = '<option value="">Unassigned</option>';
@@ -2491,15 +2690,9 @@
 
         showToast('info', 'Closing...', issueId);
 
-        fetch('/api/issues/close', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: issueId })
-        })
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-            if (data.success) {
-                showToast('success', 'Closed', issueId + ' closed');
+        wsRequest('bead.close', {id: issueId})
+        .then(function() {
+            showToast('success', 'Closed', issueId + ' closed');
                 // Re-fetch to update the detail view
                 openIssueDetail(issueId);
             } else {
@@ -2516,15 +2709,9 @@
     function reopenIssue(issueId) {
         showToast('info', 'Reopening...', issueId);
 
-        fetch('/api/issues/update', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: issueId, status: 'open' })
-        })
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-            if (data.success) {
-                showToast('success', 'Reopened', issueId + ' reopened');
+        wsRequest('bead.reopen', {id: issueId})
+        .then(function() {
+            showToast('success', 'Reopened', issueId + ' reopened');
                 openIssueDetail(issueId);
             } else {
                 showToast('error', 'Failed', data.error || 'Unknown error');
@@ -2543,15 +2730,9 @@
 
         showToast('info', 'Updating...', 'Setting priority to P' + priNum);
 
-        fetch('/api/issues/update', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: issueId, priority: priNum })
-        })
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-            if (data.success) {
-                showToast('success', 'Updated', 'Priority set to P' + priNum);
+        wsRequest('bead.update', {id: issueId, priority: priNum})
+        .then(function() {
+            showToast('success', 'Updated', 'Priority set to P' + priNum);
                 openIssueDetail(issueId);
             } else {
                 showToast('error', 'Failed', data.error || 'Unknown error');
@@ -2569,15 +2750,9 @@
 
         showToast('info', 'Assigning...', 'Assigning to ' + assignee);
 
-        fetch('/api/issues/update', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: issueId, assignee: assignee })
-        })
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-            if (data.success) {
-                showToast('success', 'Assigned', 'Assigned to ' + assignee);
+        wsRequest('bead.assign', {id: issueId, assignee: assignee})
+        .then(function() {
+            showToast('success', 'Assigned', 'Assigned to ' + assignee);
                 openIssueDetail(issueId);
             } else {
                 showToast('error', 'Failed', data.error || 'Unknown error');
@@ -2635,15 +2810,12 @@
         prList.style.display = 'none';
         prDetail.style.display = 'block';
 
-        // Fetch PR details
-        fetch('/api/pr/show?url=' + encodeURIComponent(prUrl))
-            .then(function(r) { return r.json(); })
+        // PR viewing is not available via the supervisor API.
+        Promise.resolve({})
             .then(function(data) {
-                if (data.error) {
-                    document.getElementById('pr-detail-title-text').textContent = 'Error loading PR';
-                    document.getElementById('pr-detail-body').textContent = data.error;
-                    return;
-                }
+                document.getElementById('pr-detail-title-text').textContent = 'PR viewing not available';
+                document.getElementById('pr-detail-body').textContent = 'PR details are not available through the dashboard. Use the GitHub CLI or web interface directly.';
+                if (false) { // PR data no longer fetched
 
                 document.getElementById('pr-detail-number').textContent = '#' + data.number;
                 document.getElementById('pr-detail-title-text').textContent = data.title || '(no title)';
@@ -2751,8 +2923,7 @@
         activeSlingDropdown = dropdown;
 
         // Fetch rig options
-        fetch('/api/options?type=rigs')
-            .then(function(r) { return r.json(); })
+        wsRequest('rigs.list')
             .then(function(data) {
                 var rigs = data.rigs || [];
                 if (rigs.length === 0) {
@@ -2780,24 +2951,15 @@
     }
 
     function executeSling(beadId, rig) {
-        var cmd = 'sling ' + beadId + ' ' + rig;
         showToast('info', 'Slinging...', beadId + ' → ' + rig);
 
-        fetch('/api/run', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ command: cmd, confirmed: true })
+        wsRequest('sling.run', {bead_id: beadId, rig: rig})
+        .then(function() {
+            showToast('success', 'Slung', beadId + ' → ' + rig);
         })
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-            if (data.success) {
-                showToast('success', 'Slung', beadId + ' → ' + rig);
-                if (data.output && data.output.trim()) {
-                    showOutput(cmd, data.output);
-                }
-            } else {
-                showToast('error', 'Sling failed', data.error || 'Unknown error');
-                if (data.output) {
+        .catch(function(err) {
+            showToast('error', 'Sling failed', err.message);
+            if (err.message) {
                     showOutput(cmd, data.output);
                 }
             }
@@ -2852,17 +3014,12 @@
     });
 
     function runEscalationAction(cmdName, btn, action) {
-        showToast('info', 'Running...', 'gt ' + cmdName);
+        showToast('info', 'Running...', cmdName);
 
-        fetch('/api/run', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ command: cmdName, confirmed: true })
-        })
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-            if (data.success) {
-                showToast('success', 'Success', 'gt ' + cmdName);
+        // Map escalation commands to bead WS actions.
+        dispatchCommandAsWSAction(cmdName)
+        .then(function() {
+            showToast('success', 'Success', cmdName);
                 // Remove ack button or fade row on resolve
                 var row = btn.closest('.escalation-row');
                 if (action === 'resolve' && row) {
@@ -2906,8 +3063,7 @@
         window.pauseRefresh = true;
 
         // Load agents
-        fetch('/api/options')
-            .then(function(r) { return r.json(); })
+        fetchOptions()
             .then(function(data) {
                 select.innerHTML = '<option value="">Select agent...</option>';
                 var agents = data.agents || [];
@@ -2938,25 +3094,16 @@
             btn.disabled = true;
             btn.textContent = 'Reassigning...';
 
-            showToast('info', 'Running...', 'gt ' + cmdName);
+            showToast('info', 'Reassigning...', cmdName);
 
-            fetch('/api/run', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ command: cmdName, confirmed: true })
-            })
-            .then(function(r) { return r.json(); })
-            .then(function(data) {
-                if (data.success) {
-                    showToast('success', 'Reassigned', 'Escalation reassigned to ' + agent);
-                    var row = btn.closest('.escalation-row');
-                    if (row) {
-                        // Update the "From" cell to show new assignee
-                        var fromCell = row.querySelectorAll('td')[2];
-                        if (fromCell) fromCell.textContent = '→ ' + agent;
-                    }
-                } else {
-                    showToast('error', 'Failed', data.error || 'Unknown error');
+            // Reassign escalation: update the bead's assignee.
+            wsRequest('bead.assign', {id: escalationId, assignee: agent})
+            .then(function() {
+                showToast('success', 'Reassigned', 'Escalation reassigned to ' + agent);
+                var row = btn.closest('.escalation-row');
+                if (row) {
+                    var fromCell = row.querySelectorAll('td')[2];
+                    if (fromCell) fromCell.textContent = '→ ' + agent;
                 }
                 btn.disabled = false;
                 btn.textContent = '↻ Reassign';
@@ -3168,8 +3315,7 @@
     }
 
     function fetchSessionPreview(sessionName, contentEl, statusEl) {
-        fetch('/api/session/preview?session=' + encodeURIComponent(sessionName))
-            .then(function(r) { return r.json(); })
+        wsRequest('session.transcript', {id: sessionName, turns: 1})
             .then(function(data) {
                 if (data.error) {
                     contentEl.textContent = 'Error: ' + data.error;
@@ -3261,25 +3407,11 @@
             return;
         }
 
-        // Fetch via /api/run
-        fetch('/api/run', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ command: 'convoy status ' + convoyId + ' --json' })
-        })
-        .then(function(r) { return r.json(); })
+        // Fetch convoy detail via WS
+        wsRequest('convoy.get', {id: convoyId})
         .then(function(data) {
-            if (!data.success) {
-                detailCell.innerHTML = '<div class="tracked-issues"><div class="tracked-issues-error">Failed to load: ' + escapeHtml(data.error || 'Unknown error') + '</div></div>';
-                return;
-            }
-            try {
-                var parsed = JSON.parse(data.output);
-                convoyCache[convoyId] = parsed;
-                renderConvoyIssues(detailCell, parsed);
-            } catch (err) {
-                detailCell.innerHTML = '<div class="tracked-issues"><div class="tracked-issues-error">Failed to parse response</div></div>';
-            }
+            convoyCache[convoyId] = data;
+            renderConvoyIssues(detailCell, data);
         })
         .catch(function(err) {
             detailCell.innerHTML = '<div class="tracked-issues"><div class="tracked-issues-error">Request failed: ' + escapeHtml(err.message) + '</div></div>';

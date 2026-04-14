@@ -113,19 +113,46 @@ components:
             - config.validate
             - status.get
             - sessions.list
+            - session.get
+            - session.suspend
+            - session.close
+            - session.wake
+            - session.rename
+            - session.respond
+            - session.kill
+            - session.pending
+            - session.submit
+            - session.transcript
             - beads.list
             - beads.ready
+            - beads.graph
             - bead.get
+            - bead.deps
             - bead.create
             - bead.close
             - bead.update
+            - bead.reopen
+            - bead.assign
+            - bead.delete
             - mail.list
             - mail.get
+            - mail.count
+            - mail.thread
             - mail.read
+            - mail.mark_unread
+            - mail.archive
             - mail.reply
             - mail.send
             - events.list
+            - agents.list
+            - agent.get
+            - agent.suspend
+            - agent.resume
             - rigs.list
+            - rig.get
+            - rig.suspend
+            - rig.resume
+            - rig.restart
             - convoys.list
             - convoy.get
             - sling.run
@@ -135,15 +162,43 @@ components:
             - packs.list
             - providers.list
             - provider.get
-            - agent.suspend
-            - agent.resume
-            - rig.suspend
-            - rig.resume
-            - rig.restart
-            - session.kill
-            - session.pending
-            - session.submit
-            - session.transcript
+            - formulas.list
+            - formulas.feed
+            - formula.get
+            - formula.runs
+            - orders.list
+            - orders.check
+            - orders.history
+            - order.get
+            - order.enable
+            - order.disable
+            - order.history.detail
+            - extmsg.inbound
+            - extmsg.outbound
+            - extmsg.bindings.list
+            - extmsg.bind
+            - extmsg.unbind
+            - extmsg.groups.lookup
+            - extmsg.groups.ensure
+            - extmsg.participant.upsert
+            - extmsg.participant.remove
+            - extmsg.transcript.list
+            - extmsg.transcript.ack
+            - extmsg.adapters.list
+            - extmsg.adapters.register
+            - extmsg.adapters.unregister
+            - patches.agents.list
+            - patches.agent.get
+            - patches.agents.set
+            - patches.agent.delete
+            - patches.rigs.list
+            - patches.rig.get
+            - patches.rigs.set
+            - patches.rig.delete
+            - patches.providers.list
+            - patches.provider.get
+            - patches.providers.set
+            - patches.provider.delete
             - subscription.start
             - subscription.stop
         idempotency_key:
@@ -152,6 +207,19 @@ components:
           $ref: '#/components/schemas/Scope'
         payload:
           $ref: '#/components/schemas/RequestPayload'
+        watch:
+          type: object
+          description: >
+            Blocking query semantics. When present, the server waits until the
+            event index exceeds watch.index (or timeout) before responding.
+            Equivalent to HTTP ?index=X&wait=Y.
+          properties:
+            index:
+              type: integer
+              minimum: 0
+            wait:
+              type: string
+              description: Duration string, e.g. "30s". Max 5m.
 
     ResponseEnvelope:
       type: object
@@ -265,6 +333,11 @@ components:
           type: string
         peek:
           type: boolean
+        limit:
+          type: integer
+          minimum: 0
+        cursor:
+          type: string
 
     BeadsListRequest:
       type: object
@@ -280,6 +353,11 @@ components:
           type: string
         rig:
           type: string
+        limit:
+          type: integer
+          minimum: 0
+        cursor:
+          type: string
 
     MailListRequest:
       type: object
@@ -290,6 +368,11 @@ components:
         status:
           type: string
         rig:
+          type: string
+        limit:
+          type: integer
+          minimum: 0
+        cursor:
           type: string
 
     MailGetRequest:
@@ -350,6 +433,11 @@ components:
         actor:
           type: string
         since:
+          type: string
+        limit:
+          type: integer
+          minimum: 0
+        cursor:
           type: string
 
     NameRequest:
@@ -420,10 +508,20 @@ components:
           enum:
             - events
             - session.stream
-        id:
+        target:
           type: string
-        cursor:
+          description: Session ID or name (required for session.stream)
+        after_seq:
+          type: integer
+          minimum: 0
+          description: Resume city events after this sequence number
+        after_cursor:
           type: string
+          description: Resume global events from this composite cursor
+        turns:
+          type: integer
+          minimum: 0
+          description: Most recent N turns (0=all, 1=latest turn, N=latest N turns). Used for both session.transcript and session.stream subscriptions.
         format:
           type: string
           enum: [raw]

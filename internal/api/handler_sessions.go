@@ -709,6 +709,54 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, presp)
 }
 
+// patchSession applies a partial update (title and/or alias) to a session.
+func (s *Server) patchSession(target string, title, alias *string) (any, error) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return nil, httpError{status: 503, code: "unavailable", message: "no bead store configured"}
+	}
+	id, err := s.resolveSessionIDWithConfig(store, target)
+	if err != nil {
+		return nil, err
+	}
+	if title == nil && alias == nil {
+		return nil, httpError{status: 400, code: "invalid", message: "at least one of 'title' or 'alias' is required"}
+	}
+	b, err := store.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	if !session.IsSessionBeadOrRepairable(b) {
+		return nil, httpError{status: 400, code: "invalid", message: id + " is not a session"}
+	}
+	session.RepairEmptyType(store, &b)
+	mgr := s.sessionManager(store)
+	updateFn := func() error {
+		return mgr.UpdatePresentation(id, title, alias)
+	}
+	if alias != nil {
+		if strings.TrimSpace(b.Metadata["agent_name"]) != "" {
+			return nil, httpError{status: 403, code: "forbidden", message: "alias is controller-managed for this session"}
+		}
+		if err := session.WithCitySessionAliasLock(s.state.CityPath(), *alias, func() error {
+			if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), *alias, id); err != nil {
+				return err
+			}
+			return updateFn()
+		}); err != nil {
+			return nil, err
+		}
+	} else if err := updateFn(); err != nil {
+		return nil, err
+	}
+	info, err := mgr.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	updated, _ := store.Get(id)
+	return sessionResponseWithReason(info, &updated, s.state.Config(), strings.TrimSpace(s.state.CityPath()) != ""), nil
+}
+
 // resolveProviderForTemplate resolves the provider for an agent template,
 // returning the full ResolvedProvider with EffectiveDefaults and OptionsSchema.
 func resolveProviderForTemplate(template string, cfg *config.City) (*config.ResolvedProvider, error) {

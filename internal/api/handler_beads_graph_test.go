@@ -2,11 +2,10 @@ package api
 
 import (
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gorilla/websocket"
 )
 
 // beadGraphResponse mirrors the handler's response struct for test decoding.
@@ -34,24 +33,63 @@ func createBeadWithMeta(t *testing.T, store beads.Store, title string, meta map[
 	return b
 }
 
-func getGraph(t *testing.T, srv http.Handler, rootID string) (*httptest.ResponseRecorder, beadGraphResponse) {
+// getGraphWS sends a beads.graph request over WebSocket and returns the response.
+func getGraphWS(t *testing.T, conn *websocket.Conn, rootID string) (bool, beadGraphResponse) {
 	t.Helper()
-	req := httptest.NewRequest("GET", "/v0/beads/graph/"+rootID, nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-	var resp beadGraphResponse
-	if rec.Code == http.StatusOK {
-		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-			t.Fatalf("decode graph response: %v", err)
-		}
+	raw := wsRoundTripRaw(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "graph-" + rootID,
+		Action: "beads.graph",
+		Payload: map[string]any{
+			"root_id": rootID,
+		},
+	})
+
+	var envelope struct {
+		Type string `json:"type"`
 	}
-	return rec, resp
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+
+	if envelope.Type == "error" {
+		return false, beadGraphResponse{}
+	}
+
+	var resp wsResponseEnvelope
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	var graph beadGraphResponse
+	if err := json.Unmarshal(resp.Result, &graph); err != nil {
+		t.Fatalf("decode graph response: %v", err)
+	}
+	return true, graph
+}
+
+// getGraphWSError sends a beads.graph request and returns the error envelope.
+func getGraphWSError(t *testing.T, conn *websocket.Conn, rootID string) wsErrorEnvelope {
+	t.Helper()
+	raw := wsRoundTripRaw(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "graph-err-" + rootID,
+		Action: "beads.graph",
+		Payload: map[string]any{
+			"root_id": rootID,
+		},
+	})
+	var errResp wsErrorEnvelope
+	if err := json.Unmarshal(raw, &errResp); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	return errResp
 }
 
 func TestBeadGraphReturnsRootAndChildren(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
-	srv := New(state)
+	conn := connectWS(t, state)
 
 	root := createBeadWithMeta(t, store, "Workflow Root", map[string]string{
 		"gc.kind": "workflow",
@@ -69,10 +107,10 @@ func TestBeadGraphReturnsRootAndChildren(t *testing.T) {
 		"gc.kind":         "scope",
 	})
 
-	rec, resp := getGraph(t, srv, root.ID)
+	ok, resp := getGraphWS(t, conn, root.ID)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	if !ok {
+		t.Fatal("expected success, got error")
 	}
 	if resp.Root.ID != root.ID {
 		t.Errorf("root.ID = %q, want %q", resp.Root.ID, root.ID)
@@ -95,7 +133,7 @@ func TestBeadGraphReturnsRootAndChildren(t *testing.T) {
 func TestBeadGraphReturnsDeps(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
-	srv := New(state)
+	conn := connectWS(t, state)
 
 	root := createBeadWithMeta(t, store, "Root", map[string]string{
 		"gc.kind": "workflow",
@@ -112,10 +150,10 @@ func TestBeadGraphReturnsDeps(t *testing.T) {
 		t.Fatalf("dep add: %v", err)
 	}
 
-	rec, resp := getGraph(t, srv, root.ID)
+	ok, resp := getGraphWS(t, conn, root.ID)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	if !ok {
+		t.Fatal("expected success, got error")
 	}
 	if len(resp.Deps) != 1 {
 		t.Fatalf("len(deps) = %d, want 1", len(resp.Deps))
@@ -134,7 +172,7 @@ func TestBeadGraphReturnsDeps(t *testing.T) {
 func TestBeadGraphReturnsRawStatus(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
-	srv := New(state)
+	conn := connectWS(t, state)
 
 	root := createBeadWithMeta(t, store, "Root", map[string]string{
 		"gc.kind": "workflow",
@@ -148,10 +186,10 @@ func TestBeadGraphReturnsRawStatus(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	rec, resp := getGraph(t, srv, root.ID)
+	ok, resp := getGraphWS(t, conn, root.ID)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	if !ok {
+		t.Fatal("expected success, got error")
 	}
 
 	// The key assertion: status must be raw "closed", NOT mapped "completed"
@@ -169,7 +207,7 @@ func TestBeadGraphReturnsRawStatus(t *testing.T) {
 func TestBeadGraphReturnsRawMetadata(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
-	srv := New(state)
+	conn := connectWS(t, state)
 
 	root := createBeadWithMeta(t, store, "Root", map[string]string{
 		"gc.kind": "workflow",
@@ -183,10 +221,10 @@ func TestBeadGraphReturnsRawMetadata(t *testing.T) {
 		"gc.logical_bead_id": "logical-1",
 	})
 
-	rec, resp := getGraph(t, srv, root.ID)
+	ok, resp := getGraphWS(t, conn, root.ID)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	if !ok {
+		t.Fatal("expected success, got error")
 	}
 
 	// Find the child and verify metadata is raw/unprocessed
@@ -217,43 +255,43 @@ func TestBeadGraphReturnsRawMetadata(t *testing.T) {
 
 func TestBeadGraphRootNotFound(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	conn := connectWS(t, state)
 
-	rec, _ := getGraph(t, srv, "nonexistent-id")
+	errResp := getGraphWSError(t, conn, "nonexistent-id")
 
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want %d, body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	if errResp.Type != "error" {
+		t.Errorf("type = %q, want error", errResp.Type)
+	}
+	if errResp.Code != "not_found" {
+		t.Errorf("code = %q, want not_found", errResp.Code)
 	}
 }
 
 func TestBeadGraphEmptyRootID(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	conn := connectWS(t, state)
 
-	// Request with empty rootID path segment
-	req := httptest.NewRequest("GET", "/v0/beads/graph/", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	// Request with empty rootID
+	errResp := getGraphWSError(t, conn, "")
 
-	// Should get 400 or 404, not 200
-	if rec.Code == http.StatusOK {
-		t.Errorf("status = %d, want non-200 for empty rootID", rec.Code)
+	if errResp.Type != "error" {
+		t.Errorf("type = %q, want error", errResp.Type)
 	}
 }
 
 func TestBeadGraphNoChildren(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
-	srv := New(state)
+	conn := connectWS(t, state)
 
 	root := createBeadWithMeta(t, store, "Lonely Root", map[string]string{
 		"gc.kind": "workflow",
 	})
 
-	rec, resp := getGraph(t, srv, root.ID)
+	ok, resp := getGraphWS(t, conn, root.ID)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	if !ok {
+		t.Fatal("expected success, got error")
 	}
 	if resp.Root.ID != root.ID {
 		t.Errorf("root.ID = %q, want %q", resp.Root.ID, root.ID)
@@ -270,7 +308,7 @@ func TestBeadGraphNoChildren(t *testing.T) {
 func TestBeadGraphExcludesUnrelatedBeads(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
-	srv := New(state)
+	conn := connectWS(t, state)
 
 	root := createBeadWithMeta(t, store, "Root", map[string]string{
 		"gc.kind": "workflow",
@@ -278,17 +316,17 @@ func TestBeadGraphExcludesUnrelatedBeads(t *testing.T) {
 	child := createBeadWithMeta(t, store, "Child", map[string]string{
 		"gc.root_bead_id": root.ID,
 	})
-	// Unrelated bead — different root
+	// Unrelated bead -- different root
 	createBeadWithMeta(t, store, "Other Workflow Step", map[string]string{
 		"gc.root_bead_id": "some-other-root",
 	})
-	// Unrelated bead — no root at all
+	// Unrelated bead -- no root at all
 	createBeadWithMeta(t, store, "Standalone", nil)
 
-	rec, resp := getGraph(t, srv, root.ID)
+	ok, resp := getGraphWS(t, conn, root.ID)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	if !ok {
+		t.Fatal("expected success, got error")
 	}
 	if len(resp.Beads) != 2 {
 		t.Errorf("len(beads) = %d, want 2 (root + 1 child)", len(resp.Beads))
@@ -308,7 +346,7 @@ func TestBeadGraphExcludesUnrelatedBeads(t *testing.T) {
 func TestBeadGraphDepsFilteredToGraphBeads(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
-	srv := New(state)
+	conn := connectWS(t, state)
 
 	root := createBeadWithMeta(t, store, "Root", map[string]string{
 		"gc.kind": "workflow",
@@ -320,13 +358,13 @@ func TestBeadGraphDepsFilteredToGraphBeads(t *testing.T) {
 
 	// Dep within graph
 	store.DepAdd(child.ID, root.ID, "blocks") //nolint:errcheck
-	// Dep pointing outside graph — should be excluded
+	// Dep pointing outside graph -- should be excluded
 	store.DepAdd(child.ID, outsider.ID, "relates-to") //nolint:errcheck
 
-	rec, resp := getGraph(t, srv, root.ID)
+	ok, resp := getGraphWS(t, conn, root.ID)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	if !ok {
+		t.Fatal("expected success, got error")
 	}
 	if len(resp.Deps) != 1 {
 		t.Errorf("len(deps) = %d, want 1 (only in-graph dep)", len(resp.Deps))
@@ -345,7 +383,7 @@ func TestBeadGraphMultipleStores(t *testing.T) {
 	store1 := state.stores["myrig"]
 	store2 := beads.NewMemStore()
 	state.stores["otherrig"] = store2
-	srv := New(state)
+	conn := connectWS(t, state)
 
 	// Root in store1
 	root := createBeadWithMeta(t, store1, "Root", map[string]string{
@@ -356,10 +394,10 @@ func TestBeadGraphMultipleStores(t *testing.T) {
 		"gc.root_bead_id": root.ID,
 	})
 
-	rec, resp := getGraph(t, srv, root.ID)
+	ok, resp := getGraphWS(t, conn, root.ID)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	if !ok {
+		t.Fatal("expected success, got error")
 	}
 	if resp.Root.ID != root.ID {
 		t.Errorf("root.ID = %q, want %q", resp.Root.ID, root.ID)
@@ -372,7 +410,7 @@ func TestBeadGraphMultipleStores(t *testing.T) {
 func TestBeadGraphDedupsDeps(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
-	srv := New(state)
+	conn := connectWS(t, state)
 
 	root := createBeadWithMeta(t, store, "Root", map[string]string{
 		"gc.kind": "workflow",
@@ -385,10 +423,10 @@ func TestBeadGraphDedupsDeps(t *testing.T) {
 	store.DepAdd(child.ID, root.ID, "blocks") //nolint:errcheck
 	store.DepAdd(child.ID, root.ID, "blocks") //nolint:errcheck
 
-	rec, resp := getGraph(t, srv, root.ID)
+	ok, resp := getGraphWS(t, conn, root.ID)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	if !ok {
+		t.Fatal("expected success, got error")
 	}
 	if len(resp.Deps) != 1 {
 		t.Errorf("len(deps) = %d, want 1 (deduplicated)", len(resp.Deps))

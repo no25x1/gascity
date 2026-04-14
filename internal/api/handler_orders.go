@@ -126,7 +126,7 @@ func resolveOrder(aa []orders.Order, name string) (*orders.Order, error) {
 	}
 	switch len(matches) {
 	case 0:
-		return nil, fmt.Errorf("order %s not found", name)
+		return nil, &httpError{status: 404, code: "not_found", message: fmt.Sprintf("order %s not found", name)}
 	case 1:
 		return &aa[matches[0]], nil
 	default:
@@ -134,7 +134,7 @@ func resolveOrder(aa []orders.Order, name string) (*orders.Order, error) {
 		for _, idx := range matches {
 			scoped = append(scoped, aa[idx].ScopedName())
 		}
-		return nil, fmt.Errorf("ambiguous order name %q; use scoped name: %s", name, strings.Join(scoped, ", "))
+		return nil, &httpError{status: 409, code: "ambiguous", message: fmt.Sprintf("ambiguous order name %q; use scoped name: %s", name, strings.Join(scoped, ", "))}
 	}
 }
 
@@ -437,6 +437,167 @@ func beadLastRunFunc(store beads.Store) orders.LastRunFunc {
 		}
 		return results[0].CreatedAt, nil
 	}
+}
+
+// getOrderHistory returns the run history for the given scoped order name.
+func (s *Server) getOrderHistory(scopedName string, limit int, before string) (any, error) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return nil, &httpError{status: 503, code: "unavailable", message: "no bead store configured"}
+	}
+	if scopedName == "" {
+		return nil, &httpError{status: 400, code: "invalid", message: "scoped_name is required"}
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	var beforeTime time.Time
+	if before != "" {
+		if t, err := time.Parse(time.RFC3339, before); err == nil {
+			beforeTime = t
+		}
+	}
+	aa := s.state.Orders()
+	var auto *orders.Order
+	for i, a := range aa {
+		if a.ScopedName() == scopedName {
+			auto = &aa[i]
+			break
+		}
+	}
+	label := "order-run:" + scopedName
+	fetchLimit := limit
+	if !beforeTime.IsZero() {
+		fetchLimit = limit * 3
+	}
+	results, err := store.List(beads.ListQuery{
+		Label:         label,
+		Limit:         fetchLimit,
+		IncludeClosed: true,
+		Sort:          beads.SortCreatedDesc,
+	})
+	if err != nil {
+		return nil, err
+	}
+	type historyEntry struct {
+		BeadID        string   `json:"bead_id"`
+		Name          string   `json:"name"`
+		ScopedName    string   `json:"scoped_name"`
+		Rig           string   `json:"rig,omitempty"`
+		CreatedAt     string   `json:"created_at"`
+		Labels        []string `json:"labels"`
+		DurationMs    *string  `json:"duration_ms,omitempty"`
+		ExitCode      *string  `json:"exit_code,omitempty"`
+		CaptureOutput bool     `json:"capture_output"`
+		HasOutput     bool     `json:"has_output"`
+	}
+	entries := make([]historyEntry, 0, len(results))
+	for _, b := range results {
+		if !beforeTime.IsZero() && !b.CreatedAt.Before(beforeTime) {
+			continue
+		}
+		name := scopedName
+		rig := ""
+		if auto != nil {
+			name = auto.Name
+			rig = auto.Rig
+		}
+		entry := historyEntry{
+			BeadID:        b.ID,
+			Name:          name,
+			ScopedName:    scopedName,
+			Rig:           rig,
+			CreatedAt:     b.CreatedAt.Format(time.RFC3339),
+			Labels:        b.Labels,
+			CaptureOutput: auto != nil && auto.IsExec(),
+		}
+		if b.Metadata != nil {
+			if v, ok := b.Metadata["convergence.gate_duration_ms"]; ok && v != "" {
+				entry.DurationMs = &v
+			}
+			if v, ok := b.Metadata["convergence.gate_exit_code"]; ok && v != "" {
+				entry.ExitCode = &v
+			}
+		}
+		entry.HasOutput = entry.CaptureOutput
+		entries = append(entries, entry)
+		if len(entries) >= limit {
+			break
+		}
+	}
+	return entries, nil
+}
+
+// checkOrders evaluates gate conditions for all orders and returns the result.
+func (s *Server) checkOrders() map[string]any {
+	aa := s.state.Orders()
+	if aa == nil {
+		return map[string]any{"checks": []any{}}
+	}
+	store := s.state.CityBeadStore()
+	lastRunFn := beadLastRunFunc(store)
+	ep := s.state.EventProvider()
+	var cursorFn orders.CursorFunc
+	if store != nil {
+		cursorFn = func(name string) uint64 {
+			label := "order-run:" + name
+			results, err := store.List(beads.ListQuery{
+				Label:         label,
+				Limit:         10,
+				IncludeClosed: true,
+				Sort:          beads.SortCreatedDesc,
+			})
+			if err != nil || len(results) == 0 {
+				return 0
+			}
+			var labelSets [][]string
+			for _, b := range results {
+				labelSets = append(labelSets, b.Labels)
+			}
+			return orders.MaxSeqFromLabels(labelSets)
+		}
+	}
+	now := time.Now()
+	type checkResponse struct {
+		Name           string  `json:"name"`
+		ScopedName     string  `json:"scoped_name"`
+		Rig            string  `json:"rig,omitempty"`
+		Due            bool    `json:"due"`
+		Reason         string  `json:"reason"`
+		LastRun        *string `json:"last_run,omitempty"`
+		LastRunOutcome *string `json:"last_run_outcome,omitempty"`
+	}
+	checks := make([]checkResponse, 0, len(aa))
+	for _, a := range aa {
+		result := orders.CheckGate(a, now, lastRunFn, ep, cursorFn)
+		cr := checkResponse{
+			Name:       a.Name,
+			ScopedName: a.ScopedName(),
+			Rig:        a.Rig,
+			Due:        result.Due,
+			Reason:     result.Reason,
+		}
+		if !result.LastRun.IsZero() {
+			ts := result.LastRun.Format(time.RFC3339)
+			cr.LastRun = &ts
+		}
+		if store != nil {
+			label := "order-run:" + a.ScopedName()
+			if results, err := store.List(beads.ListQuery{
+				Label:         label,
+				Limit:         1,
+				IncludeClosed: true,
+				Sort:          beads.SortCreatedDesc,
+			}); err == nil && len(results) > 0 {
+				outcome := lastRunOutcomeFromLabels(results[0].Labels)
+				if outcome != "" {
+					cr.LastRunOutcome = &outcome
+				}
+			}
+		}
+		checks = append(checks, cr)
+	}
+	return map[string]any{"checks": checks}
 }
 
 // lastRunOutcomeFromLabels extracts the run outcome from bead labels.

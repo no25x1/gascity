@@ -87,7 +87,7 @@ type ProviderSpec struct {
 	// PermissionModes maps permission mode names to CLI flags.
 	// Example: {"unrestricted": "--dangerously-skip-permissions", "plan": "--permission-mode plan"}
 	// This is a config-only lookup table consumed by external clients
-	// (e.g., Mission Control) to populate permission mode dropdowns.
+	// to populate permission mode dropdowns.
 	// Launch-time flag substitution is planned for a follow-up PR —
 	// currently no runtime code reads this field.
 	PermissionModes map[string]string `toml:"permission_modes,omitempty"`

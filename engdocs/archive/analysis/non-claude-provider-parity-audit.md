@@ -69,7 +69,7 @@ if (firstStart || forceFresh) && rp.SessionIDFlag != "" {
 
 Without `SessionIDFlag`, Gas City can't pre-assign a session key and has to
 discover it after the fact. This matters whenever the reconciler or external
-client (Mission Control) needs to address a session by a key it minted.
+client needs to address a session by a key it minted.
 
 **To fix:** add `SessionIDFlag` for Codex at minimum; document which
 providers genuinely lack this capability and use a fallback discovery

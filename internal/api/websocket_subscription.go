@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gorilla/websocket"
 )
@@ -23,6 +25,7 @@ type socketSubscriptionStartPayload struct {
 	AfterCursor string `json:"after_cursor,omitempty"`
 	Target      string `json:"target,omitempty"`
 	Format      string `json:"format,omitempty"`
+	Turns int `json:"turns,omitempty"` // most recent N turns (0=all, N=latest N turns)
 }
 
 type socketSubscriptionStopPayload struct {
@@ -122,6 +125,13 @@ func (sc *socketConn) writePing() error {
 }
 
 func (s *Server) startSocketSubscription(ctx context.Context, sess *socketSession, req *socketRequestEnvelope) (socketActionResult, *socketErrorEnvelope) {
+	// Validate city scope on per-city servers.
+	if req.Scope != nil && req.Scope.City != "" {
+		if cityName := s.state.CityName(); req.Scope.City != cityName {
+			return socketActionResult{}, newSocketError(req.ID, "invalid",
+				"scope.city "+req.Scope.City+" does not match this city "+cityName)
+		}
+	}
 	var payload socketSubscriptionStartPayload
 	if err := decodeSocketPayload(req.Payload, &payload); err != nil {
 		return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
@@ -170,7 +180,11 @@ func (sm *SupervisorMux) startSocketSubscription(ctx context.Context, sess *sock
 			cityReq := *req
 			cityReq.Scope = nil
 			srv := sm.getCityServer(cityName, state)
-			return srv.startSocketSubscription(ctx, sess, &cityReq)
+			result, apiErr := srv.startSocketSubscription(ctx, sess, &cityReq)
+			if apiErr == nil {
+				result.AfterWrite = sm.wrapAfterWriteWithCityWatch(ctx, cityName, sess, result)
+			}
+			return result, apiErr
 		}
 		return sm.startGlobalEventSubscription(ctx, sess, req, payload)
 	case "session.stream":
@@ -186,7 +200,11 @@ func (sm *SupervisorMux) startSocketSubscription(ctx context.Context, sess *sock
 		cityReq := *req
 		cityReq.Scope = nil
 		srv := sm.getCityServer(cityName, state)
-		return srv.startSocketSubscription(ctx, sess, &cityReq)
+		result, apiErr := srv.startSocketSubscription(ctx, sess, &cityReq)
+		if apiErr == nil {
+			result.AfterWrite = sm.wrapAfterWriteWithCityWatch(ctx, cityName, sess, result)
+		}
+		return result, apiErr
 	default:
 		return socketActionResult{}, newSocketError(req.ID, "not_found", "unknown subscription kind: "+payload.Kind)
 	}
@@ -219,6 +237,8 @@ func (s *Server) startEventSubscription(parent context.Context, sess *socketSess
 		return socketActionResult{}, newSocketError(req.ID, "internal", "failed to start event watcher: "+err.Error())
 	}
 	sess.registerSubscription(subID, cancel)
+	log.Printf("api: ws subscription started id=%s kind=%s", subID, payload.Kind)
+	telemetry.RecordWebSocketSubscription(context.Background(), 1)
 	return socketActionResult{
 		Result: map[string]string{"subscription_id": subID, "kind": payload.Kind},
 		AfterWrite: func() {
@@ -226,6 +246,8 @@ func (s *Server) startEventSubscription(parent context.Context, sess *socketSess
 				defer watcher.Close() //nolint:errcheck
 				defer cancel()
 				defer sess.unregisterSubscription(subID)
+				defer log.Printf("api: ws subscription ended id=%s kind=%s", subID, payload.Kind)
+				defer telemetry.RecordWebSocketSubscription(context.Background(), -1)
 				for {
 					event, err := watcher.Next()
 					if err != nil {
@@ -259,6 +281,8 @@ func (sm *SupervisorMux) startGlobalEventSubscription(parent context.Context, se
 		return socketActionResult{}, newSocketError(req.ID, "internal", "failed to start global event watcher: "+err.Error())
 	}
 	sess.registerSubscription(subID, cancel)
+	log.Printf("api: ws subscription started id=%s kind=global-events", subID)
+	telemetry.RecordWebSocketSubscription(context.Background(), 1)
 	cursors := events.ParseCursor(payload.AfterCursor)
 	if cursors == nil {
 		cursors = make(map[string]uint64)
@@ -270,6 +294,8 @@ func (sm *SupervisorMux) startGlobalEventSubscription(parent context.Context, se
 				defer mw.Close() //nolint:errcheck
 				defer cancel()
 				defer sess.unregisterSubscription(subID)
+				defer log.Printf("api: ws subscription ended id=%s kind=global-events", subID)
+				defer telemetry.RecordWebSocketSubscription(context.Background(), -1)
 				for {
 					tagged, err := mw.Next()
 					if err != nil {
@@ -331,11 +357,15 @@ func (s *Server) startSessionStreamSubscription(parent context.Context, sess *so
 	subID := sess.newSubscriptionID()
 	subCtx, cancel := context.WithCancel(parent)
 	sess.registerSubscription(subID, cancel)
+	log.Printf("api: ws subscription started id=%s kind=session.stream target=%s", subID, payload.Target)
+	telemetry.RecordWebSocketSubscription(context.Background(), 1)
 
 	start := func() {
 		go func() {
 			defer cancel()
 			defer sess.unregisterSubscription(subID)
+			defer log.Printf("api: ws subscription ended id=%s kind=session.stream target=%s", subID, payload.Target)
+			defer telemetry.RecordWebSocketSubscription(context.Background(), -1)
 			emitter := newSocketSessionStreamEmitter(sess, subID)
 			if info.Closed {
 				if format == "raw" {
@@ -379,4 +409,46 @@ func (s *Server) startSessionStreamSubscription(parent context.Context, sess *so
 func encodeSocketJSON(v any) json.RawMessage {
 	data, _ := json.Marshal(v)
 	return data
+}
+
+// watchCityAvailability polls the resolver for city availability. When the
+// city becomes unavailable, it emits a terminal event and cancels the subscription.
+func (sm *SupervisorMux) watchCityAvailability(ctx context.Context, cityName string, sess *socketSession, subID string) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if sm.resolver.CityState(cityName) == nil {
+				log.Printf("api: ws subscription id=%s city %s became unavailable", subID, cityName)
+				_ = sess.conn.writeJSON(socketEventEnvelope{
+					Type:           "event",
+					SubscriptionID: subID,
+					EventType:      "city.unavailable",
+					Payload:        map[string]string{"city": cityName, "reason": "city stopped or unavailable"},
+				})
+				sess.stopSubscription(subID)
+				return
+			}
+		}
+	}
+}
+
+// wrapAfterWriteWithCityWatch composes the original AfterWrite with a city
+// availability watcher for supervisor-scoped city subscriptions.
+func (sm *SupervisorMux) wrapAfterWriteWithCityWatch(ctx context.Context, cityName string, sess *socketSession, result socketActionResult) func() {
+	origAfterWrite := result.AfterWrite
+	return func() {
+		if origAfterWrite != nil {
+			origAfterWrite()
+		}
+		// Extract subscription ID from result.
+		if m, ok := result.Result.(map[string]string); ok {
+			if subID := m["subscription_id"]; subID != "" {
+				go sm.watchCityAvailability(ctx, cityName, sess, subID)
+			}
+		}
+	}
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -48,17 +47,32 @@ func TestWorkflowGetSelectsScopedRootMatch(t *testing.T) {
 		t.Fatalf("Create(rigRoot): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/wf_shared?scope_kind=rig&scope_ref=alpha", nil)
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t",
+		Action: "workflow.get",
+		Payload: map[string]any{
+			"id":         "wf_shared",
+			"scope_kind": "rig",
+			"scope_ref":  "alpha",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("response type = %q, want response", resp.Type)
 	}
 
 	var snapshot workflowSnapshotResponse
-	if err := json.NewDecoder(rec.Body).Decode(&snapshot); err != nil {
+	if err := json.Unmarshal(resp.Result, &snapshot); err != nil {
 		t.Fatalf("Decode(snapshot): %v", err)
 	}
 
@@ -96,17 +110,29 @@ func TestWorkflowGetPreservesRequestedScopeForUniqueCrossStoreWorkflow(t *testin
 		t.Fatalf("Create(root): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/wf_city_scope?scope_kind=city&scope_ref=gascity", nil)
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t",
+		Action: "workflow.get",
+		Payload: map[string]any{
+			"id":         "wf_city_scope",
+			"scope_kind": "city",
+			"scope_ref":  "gascity",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
 
 	var snapshot workflowSnapshotResponse
-	if err := json.NewDecoder(rec.Body).Decode(&snapshot); err != nil {
+	if err := json.Unmarshal(resp.Result, &snapshot); err != nil {
 		t.Fatalf("Decode(snapshot): %v", err)
 	}
 
@@ -140,13 +166,28 @@ func TestWorkflowGetRejectsMismatchedCityScopeForUniqueCrossStoreWorkflow(t *tes
 		t.Fatalf("Create(root): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/wf_wrong_city_scope?scope_kind=city&scope_ref=other-city", nil)
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t",
+		Action: "workflow.get",
+		Payload: map[string]any{
+			"id":         "wf_wrong_city_scope",
+			"scope_kind": "city",
+			"scope_ref":  "other-city",
+		},
+	})
+
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Code != "not_found" {
+		t.Fatalf("error code = %q, want not_found", errResp.Code)
 	}
 }
 
@@ -167,13 +208,28 @@ func TestWorkflowGetRejectsInvalidScopeKind(t *testing.T) {
 		t.Fatalf("Create(root): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/wf_invalid_scope?scope_kind=workspace&scope_ref=test-city", nil)
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t",
+		Action: "workflow.get",
+		Payload: map[string]any{
+			"id":         "wf_invalid_scope",
+			"scope_kind": "workspace",
+			"scope_ref":  "test-city",
+		},
+	})
+
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Code != "invalid" {
+		t.Fatalf("error code = %q, want invalid", errResp.Code)
 	}
 }
 
@@ -196,13 +252,28 @@ func TestWorkflowGetRejectsMismatchedRigScopeForUniqueCrossStoreWorkflow(t *test
 		t.Fatalf("Create(root): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/wf_rig_only?scope_kind=rig&scope_ref=beta", nil)
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t",
+		Action: "workflow.get",
+		Payload: map[string]any{
+			"id":         "wf_rig_only",
+			"scope_kind": "rig",
+			"scope_ref":  "beta",
+		},
+	})
+
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Code != "not_found" {
+		t.Fatalf("error code = %q, want not_found", errResp.Code)
 	}
 }
 
@@ -235,17 +306,29 @@ func TestWorkflowGetMarksSnapshotPartialWhenDepListFails(t *testing.T) {
 		t.Fatalf("Create(child): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/wf_partial?scope_kind=city&scope_ref=test-city", nil)
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t",
+		Action: "workflow.get",
+		Payload: map[string]any{
+			"id":         "wf_partial",
+			"scope_kind": "city",
+			"scope_ref":  "test-city",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
 
 	var snapshot workflowSnapshotResponse
-	if err := json.NewDecoder(rec.Body).Decode(&snapshot); err != nil {
+	if err := json.Unmarshal(resp.Result, &snapshot); err != nil {
 		t.Fatalf("Decode(snapshot): %v", err)
 	}
 	if !snapshot.Partial {
@@ -285,17 +368,29 @@ func TestWorkflowGetHistoricalSnapshotIncludesClosedFallbackChildren(t *testing.
 		t.Fatalf("Create(child): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/wf_closed_history?scope_kind=city&scope_ref=test-city", nil)
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t",
+		Action: "workflow.get",
+		Payload: map[string]any{
+			"id":         "wf_closed_history",
+			"scope_kind": "city",
+			"scope_ref":  "test-city",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
 
 	var snapshot workflowSnapshotResponse
-	if err := json.NewDecoder(rec.Body).Decode(&snapshot); err != nil {
+	if err := json.Unmarshal(resp.Result, &snapshot); err != nil {
 		t.Fatalf("Decode(snapshot): %v", err)
 	}
 
@@ -345,17 +440,29 @@ func TestWorkflowGetOpenSnapshotIncludesClosedFallbackChildren(t *testing.T) {
 		t.Fatalf("Create(child): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/wf_open_history?scope_kind=city&scope_ref=test-city", nil)
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t",
+		Action: "workflow.get",
+		Payload: map[string]any{
+			"id":         "wf_open_history",
+			"scope_kind": "city",
+			"scope_ref":  "test-city",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
 
 	var snapshot workflowSnapshotResponse
-	if err := json.NewDecoder(rec.Body).Decode(&snapshot); err != nil {
+	if err := json.Unmarshal(resp.Result, &snapshot); err != nil {
 		t.Fatalf("Decode(snapshot): %v", err)
 	}
 
@@ -406,24 +513,39 @@ func TestWorkflowDeleteIncludesClosedDescendantsAndDeletesBeads(t *testing.T) {
 		t.Fatalf("Create(child): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodDelete, "/v0/workflow/"+root.ID+"?scope_kind=city&scope_ref=test-city&delete=true", nil)
-	req.Header.Set("X-GC-Request", "test")
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t",
+		Action: "workflow.delete",
+		Payload: map[string]any{
+			"id":         root.ID,
+			"scope_kind": "city",
+			"scope_ref":  "test-city",
+			"delete":     true,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("response type = %q, want response", resp.Type)
 	}
 
-	var resp struct {
+	var result struct {
 		Deleted int `json:"deleted"`
 	}
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
 		t.Fatalf("Decode(response): %v", err)
 	}
-	if resp.Deleted != 2 {
-		t.Fatalf("deleted = %d, want 2", resp.Deleted)
+	if result.Deleted != 2 {
+		t.Fatalf("deleted = %d, want 2", result.Deleted)
 	}
 	if _, err := memStore.Get(root.ID); !errors.Is(err, beads.ErrNotFound) {
 		t.Fatalf("Get(root) err = %v, want ErrNotFound", err)
@@ -465,14 +587,29 @@ func TestWorkflowDeleteResolvesLogicalWorkflowID(t *testing.T) {
 		t.Fatalf("Create(child): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodDelete, "/v0/workflow/wf_delete_logical?scope_kind=city&scope_ref=test-city&delete=true", nil)
-	req.Header.Set("X-GC-Request", "test")
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t",
+		Action: "workflow.delete",
+		Payload: map[string]any{
+			"id":         "wf_delete_logical",
+			"scope_kind": "city",
+			"scope_ref":  "test-city",
+			"delete":     true,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("response type = %q, want response", resp.Type)
 	}
 
 	if _, err := memStore.Get(root.ID); !errors.Is(err, beads.ErrNotFound) {
@@ -502,17 +639,27 @@ func TestWorkflowGetAllowsMissingScopeFields(t *testing.T) {
 		t.Fatalf("Create(root): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/wf_missing_scope", nil)
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t",
+		Action: "workflow.get",
+		Payload: map[string]any{
+			"id": "wf_missing_scope",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
 
 	var snapshot workflowSnapshotResponse
-	if err := json.NewDecoder(rec.Body).Decode(&snapshot); err != nil {
+	if err := json.Unmarshal(resp.Result, &snapshot); err != nil {
 		t.Fatalf("Decode(snapshot): %v", err)
 	}
 	if snapshot.RootBeadID != root.ID {
@@ -541,17 +688,29 @@ func TestWorkflowGetScopedRequestSurvivesUnrelatedStoreListFailure(t *testing.T)
 		t.Fatalf("Create(root): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/wf_city_partial?scope_kind=city&scope_ref=test-city", nil)
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t",
+		Action: "workflow.get",
+		Payload: map[string]any{
+			"id":         "wf_city_partial",
+			"scope_kind": "city",
+			"scope_ref":  "test-city",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
 
 	var snapshot workflowSnapshotResponse
-	if err := json.NewDecoder(rec.Body).Decode(&snapshot); err != nil {
+	if err := json.Unmarshal(resp.Result, &snapshot); err != nil {
 		t.Fatalf("Decode(snapshot): %v", err)
 	}
 	if snapshot.RootStoreRef != "city:test-city" {
@@ -580,22 +739,34 @@ func TestWorkflowGetUsesSingleSnapshotIndexForHeaderAndBody(t *testing.T) {
 		t.Fatalf("Create(root): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/wf_index?scope_kind=city&scope_ref=test-city", nil)
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t",
+		Action: "workflow.get",
+		Payload: map[string]any{
+			"id":         "wf_index",
+			"scope_kind": "city",
+			"scope_ref":  "test-city",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
 
 	var snapshot workflowSnapshotResponse
-	if err := json.NewDecoder(rec.Body).Decode(&snapshot); err != nil {
+	if err := json.Unmarshal(resp.Result, &snapshot); err != nil {
 		t.Fatalf("Decode(snapshot): %v", err)
 	}
 
-	if got := rec.Header().Get("X-GC-Index"); got != "1" {
-		t.Fatalf("X-GC-Index = %q, want 1", got)
+	if resp.Index != 1 {
+		t.Fatalf("response index = %d, want 1", resp.Index)
 	}
 	if snapshot.SnapshotVersion != 1 {
 		t.Fatalf("snapshot_version = %d, want 1", snapshot.SnapshotVersion)
@@ -837,17 +1008,29 @@ func TestWorkflowGetNormalizesShortScopeRefs(t *testing.T) {
 		t.Fatalf("Create(member): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/"+root.ID+"?scope_kind=city&scope_ref=test-city", nil)
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t",
+		Action: "workflow.get",
+		Payload: map[string]any{
+			"id":         root.ID,
+			"scope_kind": "city",
+			"scope_ref":  "test-city",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
 
 	var snapshot workflowSnapshotResponse
-	if err := json.NewDecoder(rec.Body).Decode(&snapshot); err != nil {
+	if err := json.Unmarshal(resp.Result, &snapshot); err != nil {
 		t.Fatalf("Decode(snapshot): %v", err)
 	}
 
@@ -929,7 +1112,7 @@ func TestWorkflowGetRejectsNonWorkflowRoot(t *testing.T) {
 	cityStore := beads.NewMemStore()
 	state.cityBeadStore = cityStore
 
-	bead, err := cityStore.Create(beads.Bead{
+	b, err := cityStore.Create(beads.Bead{
 		Title: "Not a workflow",
 		Type:  "task",
 	})
@@ -937,13 +1120,28 @@ func TestWorkflowGetRejectsNonWorkflowRoot(t *testing.T) {
 		t.Fatalf("Create(bead): %v", err)
 	}
 
-	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/workflow/"+bead.ID+"?scope_kind=city&scope_ref=test-city", nil)
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t",
+		Action: "workflow.get",
+		Payload: map[string]any{
+			"id":         b.ID,
+			"scope_kind": "city",
+			"scope_ref":  "test-city",
+		},
+	})
+
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Code != "not_found" {
+		t.Fatalf("error code = %q, want not_found", errResp.Code)
 	}
 }
 

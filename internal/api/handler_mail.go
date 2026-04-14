@@ -369,19 +369,25 @@ func (s *Server) replyMail(id, rig string, body mailReplyRequest) (mail.Message,
 	return msg, nil
 }
 
+func (s *Server) deleteMail(id, rig string) error {
+	mp, resolvedRig, err := s.findMailProviderForMessage(id, rig)
+	if err != nil {
+		return err
+	}
+	if mp == nil {
+		return mail.ErrNotFound
+	}
+	if err := mp.Delete(id); err != nil {
+		return err
+	}
+	s.recordMailEvent(events.MailDeleted, "api", id, resolvedRig, nil)
+	return nil
+}
+
 func (s *Server) handleMailDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	rig := r.URL.Query().Get("rig")
-	mp, resolvedRig, err := s.findMailProviderForMessage(id, rig)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	if mp == nil {
-		writeError(w, http.StatusNotFound, "not_found", "message "+id+" not found")
-		return
-	}
-	if err := mp.Delete(id); err != nil {
+	if err := s.deleteMail(id, rig); err != nil {
 		if errors.Is(err, mail.ErrNotFound) || errors.Is(err, beads.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "not_found", "message "+id+" not found")
 			return
@@ -389,7 +395,6 @@ func (s *Server) handleMailDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	s.recordMailEvent(events.MailDeleted, "api", id, resolvedRig, nil)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 

@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/telemetry"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/session"
@@ -19,13 +21,24 @@ import (
 
 const wsProtocolVersion = "gc.v1alpha1"
 
+// maxWSMessageSize is the maximum allowed inbound WebSocket message (10 MB).
+const maxWSMessageSize = 10 << 20
+
 type socketRequestEnvelope struct {
-	Type           string          `json:"type"`
-	ID             string          `json:"id"`
-	Action         string          `json:"action"`
-	IdempotencyKey string          `json:"idempotency_key,omitempty"`
-	Scope          *socketScope    `json:"scope,omitempty"`
-	Payload        json.RawMessage `json:"payload,omitempty"`
+	Type           string             `json:"type"`
+	ID             string             `json:"id"`
+	Action         string             `json:"action"`
+	IdempotencyKey string             `json:"idempotency_key,omitempty"`
+	Scope          *socketScope       `json:"scope,omitempty"`
+	Payload        json.RawMessage    `json:"payload,omitempty"`
+	Watch          *socketWatchParams `json:"watch,omitempty"`
+}
+
+// socketWatchParams provides blocking query semantics over WebSocket,
+// equivalent to HTTP ?index=X&wait=Y.
+type socketWatchParams struct {
+	Index uint64 `json:"index"`
+	Wait  string `json:"wait,omitempty"` // duration string, e.g., "30s"
 }
 
 type socketScope struct {
@@ -135,7 +148,8 @@ type socketBeadGraphPayload struct {
 }
 
 type socketSessionTargetPayload struct {
-	ID string `json:"id"`
+	ID   string `json:"id"`
+	Peek bool   `json:"peek,omitempty"`
 }
 
 type socketSessionSubmitPayload struct {
@@ -146,7 +160,7 @@ type socketSessionSubmitPayload struct {
 
 type socketSessionTranscriptPayload struct {
 	ID     string `json:"id"`
-	Tail   int    `json:"tail,omitempty"`
+	Turns  int    `json:"turns,omitempty"` // most recent N turns (0=all)
 	Before string `json:"before,omitempty"`
 	Format string `json:"format,omitempty"`
 }
@@ -234,9 +248,32 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, handler socketHandle
 	}
 	defer conn.Close()
 
+	conn.SetReadLimit(maxWSMessageSize)
+
+	hello := handler.socketHello()
+	log.Printf("api: ws connected remote=%s role=%s read_only=%v", r.RemoteAddr, hello.ServerRole, hello.ReadOnly)
+	telemetry.RecordWebSocketConnection(r.Context(), 1)
+
 	sc := &socketConn{conn: conn}
 	ss := newSocketSession(r.Context(), sc)
 	defer ss.close()
+
+	// Send appropriate close frame when the handler exits.
+	// Default to normal closure; detect shutdown via request context.
+	closeCode := websocket.CloseNormalClosure
+	closeText := ""
+	defer func() {
+		_ = sc.writeClose(closeCode, closeText)
+		log.Printf("api: ws disconnected remote=%s close_code=%d", r.RemoteAddr, closeCode)
+		telemetry.RecordWebSocketConnection(r.Context(), -1)
+	}()
+
+	// Detect server shutdown via the request context and send close 1001.
+	go func() {
+		<-r.Context().Done()
+		_ = sc.writeClose(websocket.CloseGoingAway, "server shutting down")
+		ss.cancel()
+	}()
 
 	if err := conn.SetReadDeadline(time.Now().Add(socketPongWait)); err != nil {
 		return
@@ -246,7 +283,7 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, handler socketHandle
 	})
 	go ss.runPingLoop()
 
-	if err := sc.writeJSON(handler.socketHello()); err != nil {
+	if err := sc.writeJSON(hello); err != nil {
 		return
 	}
 
@@ -268,42 +305,127 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, handler socketHandle
 			continue
 		}
 
-		var (
-			result socketActionResult
-			apiErr *socketErrorEnvelope
-		)
+		// Dispatch concurrently so the read loop can process the next
+		// request immediately. The single-writer pattern (socketConn.mu)
+		// serializes all outbound writes. Subscription start/stop must
+		// still run synchronously to avoid races on the subscription map.
+		reqCopy := req
 		switch req.Action {
 		case "subscription.start":
-			result, apiErr = handler.startSocketSubscription(ss.ctx, ss, &req)
-		case "subscription.stop":
-			result, apiErr = handler.stopSocketSubscription(ss, &req)
-		default:
-			result, apiErr = handler.handleSocketRequest(&req)
-		}
-		if apiErr != nil {
-			if err := sc.writeJSON(apiErr); err != nil {
+			start := time.Now()
+			result, apiErr := handler.startSocketSubscription(ss.ctx, ss, &reqCopy)
+			dur := time.Since(start)
+			if apiErr != nil {
+				log.Printf("api: ws req id=%s action=%s latency=%s err=%s/%s", reqCopy.ID, reqCopy.Action, dur.Round(time.Microsecond), apiErr.Code, apiErr.Message)
+				if err := sc.writeJSON(apiErr); err != nil {
+					return
+				}
+				continue
+			}
+			log.Printf("api: ws req id=%s action=%s latency=%s ok", reqCopy.ID, reqCopy.Action, dur.Round(time.Microsecond))
+			if err := sc.writeJSON(socketResponseEnvelope{
+				Type:   "response",
+				ID:     reqCopy.ID,
+				Index:  result.Index,
+				Result: result.Result,
+			}); err != nil {
 				return
 			}
-			continue
-		}
-		if err := sc.writeJSON(socketResponseEnvelope{
-			Type:   "response",
-			ID:     req.ID,
-			Index:  result.Index,
-			Result: result.Result,
-		}); err != nil {
-			return
-		}
-		if result.AfterWrite != nil {
-			result.AfterWrite()
+			if result.AfterWrite != nil {
+				result.AfterWrite()
+			}
+		case "subscription.stop":
+			start := time.Now()
+			result, apiErr := handler.stopSocketSubscription(ss, &reqCopy)
+			dur := time.Since(start)
+			if apiErr != nil {
+				log.Printf("api: ws req id=%s action=%s latency=%s err=%s/%s", reqCopy.ID, reqCopy.Action, dur.Round(time.Microsecond), apiErr.Code, apiErr.Message)
+				if err := sc.writeJSON(apiErr); err != nil {
+					return
+				}
+				continue
+			}
+			log.Printf("api: ws req id=%s action=%s latency=%s ok", reqCopy.ID, reqCopy.Action, dur.Round(time.Microsecond))
+			if err := sc.writeJSON(socketResponseEnvelope{
+				Type:   "response",
+				ID:     reqCopy.ID,
+				Index:  result.Index,
+				Result: result.Result,
+			}); err != nil {
+				return
+			}
+		default:
+			go func() {
+				start := time.Now()
+				result, apiErr := handler.handleSocketRequest(&reqCopy)
+
+				dur := time.Since(start)
+				if apiErr != nil {
+					log.Printf("api: ws req id=%s action=%s latency=%s err=%s/%s", reqCopy.ID, reqCopy.Action, dur.Round(time.Microsecond), apiErr.Code, apiErr.Message)
+					telemetry.RecordWebSocketRequest(context.Background(), reqCopy.Action, apiErr.Code, float64(dur.Milliseconds()))
+					if err := sc.writeJSON(apiErr); err != nil {
+						ss.cancel() // A3: cancel session on write error
+					}
+					return
+				}
+				log.Printf("api: ws req id=%s action=%s latency=%s ok", reqCopy.ID, reqCopy.Action, dur.Round(time.Microsecond))
+				telemetry.RecordWebSocketRequest(context.Background(), reqCopy.Action, "", float64(dur.Milliseconds()))
+				if err := sc.writeResponseChecked(reqCopy.ID, socketResponseEnvelope{
+					Type:   "response",
+					ID:     reqCopy.ID,
+					Index:  result.Index,
+					Result: result.Result,
+				}); err != nil {
+					ss.cancel() // A3: cancel session on write error
+					return
+				}
+				if result.AfterWrite != nil {
+					result.AfterWrite()
+				}
+			}()
 		}
 	}
 }
+
+// maxWSOutboundSize is the maximum allowed outbound WebSocket message (10 MB).
+// Responses exceeding this are replaced with an error envelope.
+const maxWSOutboundSize = 10 << 20
 
 func (sc *socketConn) writeJSON(v any) error {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 	return sc.conn.WriteJSON(v)
+}
+
+// writeResponseChecked writes a response envelope, replacing it with a
+// size-correlated error if the marshaled payload exceeds the outbound limit.
+// The error envelope preserves the request ID so concurrent clients can
+// correlate the failure.
+func (sc *socketConn) writeResponseChecked(reqID string, resp socketResponseEnvelope) error {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	data, err := json.Marshal(resp)
+	if err != nil {
+		return err
+	}
+	if len(data) > maxWSOutboundSize {
+		log.Printf("api: ws outbound message too large (%d bytes) for req %s, sending error", len(data), reqID)
+		return sc.conn.WriteJSON(socketErrorEnvelope{
+			Type:    "error",
+			ID:      reqID,
+			Code:    "message_too_large",
+			Message: "response exceeds maximum message size",
+		})
+	}
+	return sc.conn.WriteMessage(websocket.TextMessage, data)
+}
+
+// writeClose sends a WebSocket close frame with the given code and text.
+func (sc *socketConn) writeClose(code int, text string) error {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	msg := websocket.FormatCloseMessage(code, text)
+	return sc.conn.WriteControl(websocket.CloseMessage, msg, time.Now().Add(5*time.Second))
 }
 
 func (s *Server) socketHello() socketHelloEnvelope {
@@ -328,6 +450,7 @@ func (s *Server) socketHello() socketHelloEnvelope {
 			"beads.ready",
 			"bead.get",
 			"bead.deps",
+			"bead.delete",
 			"mail.list",
 			"mail.get",
 			"mail.count",
@@ -366,6 +489,69 @@ func (s *Server) socketHello() socketHelloEnvelope {
 			"session.pending",
 			"session.submit",
 			"session.transcript",
+			"formulas.list",
+			"formulas.feed",
+			"formula.get",
+			"formula.runs",
+			"orders.list",
+			"orders.check",
+			"order.get",
+			"order.enable",
+			"order.disable",
+			"orders.history",
+			"order.history.detail",
+			"extmsg.inbound",
+			"extmsg.outbound",
+			"extmsg.bindings.list",
+			"extmsg.bind",
+			"extmsg.unbind",
+			"extmsg.groups.lookup",
+			"extmsg.groups.ensure",
+			"extmsg.participant.upsert",
+			"extmsg.participant.remove",
+			"extmsg.transcript.list",
+			"extmsg.transcript.ack",
+			"extmsg.adapters.list",
+			"extmsg.adapters.register",
+			"extmsg.adapters.unregister",
+			"patches.agents.list",
+			"patches.agent.get",
+			"patches.agents.set",
+			"patches.agent.delete",
+			"patches.rigs.list",
+			"patches.rig.get",
+			"patches.rigs.set",
+			"patches.rig.delete",
+			"patches.providers.list",
+			"patches.provider.get",
+			"patches.providers.set",
+			"patches.provider.delete",
+			"agent.create",
+			"agent.update",
+			"agent.delete",
+			"rig.create",
+			"rig.update",
+			"rig.delete",
+			"provider.create",
+			"provider.update",
+			"provider.delete",
+			"event.emit",
+			"mail.delete",
+			"convoy.create",
+			"convoy.add",
+			"convoy.remove",
+			"convoy.check",
+			"convoy.close",
+			"convoy.delete",
+			"session.stop",
+			"session.messages",
+			"session.agents.list",
+			"session.agent.get",
+			"session.create",
+			"session.patch",
+			"workflow.get",
+			"workflow.delete",
+			"orders.feed",
 		},
 	}
 }
@@ -393,6 +579,7 @@ func (sm *SupervisorMux) socketHello() socketHelloEnvelope {
 			"beads.ready",
 			"bead.get",
 			"bead.deps",
+			"bead.delete",
 			"mail.list",
 			"mail.get",
 			"mail.count",
@@ -431,16 +618,99 @@ func (sm *SupervisorMux) socketHello() socketHelloEnvelope {
 			"session.pending",
 			"session.submit",
 			"session.transcript",
+			"formulas.list",
+			"formulas.feed",
+			"formula.get",
+			"formula.runs",
+			"orders.list",
+			"orders.check",
+			"order.get",
+			"order.enable",
+			"order.disable",
+			"orders.history",
+			"order.history.detail",
+			"extmsg.inbound",
+			"extmsg.outbound",
+			"extmsg.bindings.list",
+			"extmsg.bind",
+			"extmsg.unbind",
+			"extmsg.groups.lookup",
+			"extmsg.groups.ensure",
+			"extmsg.participant.upsert",
+			"extmsg.participant.remove",
+			"extmsg.transcript.list",
+			"extmsg.transcript.ack",
+			"extmsg.adapters.list",
+			"extmsg.adapters.register",
+			"extmsg.adapters.unregister",
+			"patches.agents.list",
+			"patches.agent.get",
+			"patches.agents.set",
+			"patches.agent.delete",
+			"patches.rigs.list",
+			"patches.rig.get",
+			"patches.rigs.set",
+			"patches.rig.delete",
+			"patches.providers.list",
+			"patches.provider.get",
+			"patches.providers.set",
+			"patches.provider.delete",
+			"agent.create",
+			"agent.update",
+			"agent.delete",
+			"rig.create",
+			"rig.update",
+			"rig.delete",
+			"provider.create",
+			"provider.update",
+			"provider.delete",
+			"event.emit",
+			"mail.delete",
+			"convoy.create",
+			"convoy.add",
+			"convoy.remove",
+			"convoy.check",
+			"convoy.close",
+			"convoy.delete",
+			"session.stop",
+			"session.messages",
+			"session.agents.list",
+			"session.agent.get",
+			"session.create",
+			"session.patch",
+			"workflow.get",
+			"workflow.delete",
+			"orders.feed",
 		},
 	}
 }
 
-func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (socketActionResult, *socketErrorEnvelope) {
+func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (result socketActionResult, apiErr *socketErrorEnvelope) {
+	// Apply blocking watch semantics after the handler returns.
+	defer func() {
+		if apiErr == nil && req.Watch != nil && socketActionSupportsWatch(req.Action) {
+			if ep := s.state.EventProvider(); ep != nil {
+				bp := socketBlockingParams(req.Watch)
+				if bp.HasIndex {
+					idx := waitForChange(context.Background(), ep, bp)
+					result.Index = idx
+				}
+			}
+		}
+	}()
+
+	// On per-city servers, validate that scope.city matches (or is absent).
+	if req.Scope != nil && req.Scope.City != "" {
+		if cityName := s.state.CityName(); req.Scope.City != cityName {
+			return socketActionResult{}, newSocketError(req.ID, "invalid",
+				"scope.city "+req.Scope.City+" does not match this city "+cityName)
+		}
+	}
 	switch req.Action {
 	case "health.get":
 		return socketActionResult{Result: s.healthResponse()}, nil
 	case "status.get":
-		return socketActionResult{Result: s.statusSnapshot()}, nil
+		return socketActionResult{Result: s.statusSnapshot(), Index: s.latestIndex()}, nil
 	case "city.get":
 		return socketActionResult{Result: s.cityGet(), Index: s.latestIndex()}, nil
 	case "city.patch":
@@ -590,9 +860,31 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (socketActionRe
 		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
 			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 		}
+		// Idempotency check.
+		if req.IdempotencyKey != "" {
+			idemKey := socketScopedIdemKey(s.state.CityName(), req.Action, req.IdempotencyKey)
+			bodyHash := hashBody(payload)
+			cached, handled, idemErr := s.idem.checkIdempotent(idemKey, bodyHash)
+			if idemErr != nil {
+				idemErr.ID = req.ID
+				return socketActionResult{}, idemErr
+			}
+			if handled {
+				return socketActionResult{Result: cached}, nil
+			}
+			defer func() {
+				// Store result on success for replay.
+			}()
+		}
 		bead, err := s.createBead(payload)
 		if err != nil {
+			if req.IdempotencyKey != "" {
+				s.idem.unreserve(socketScopedIdemKey(s.state.CityName(), req.Action, req.IdempotencyKey))
+			}
 			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		if req.IdempotencyKey != "" {
+			s.idem.storeResponse(socketScopedIdemKey(s.state.CityName(), req.Action, req.IdempotencyKey), hashBody(payload), 201, bead)
 		}
 		return socketActionResult{Result: bead}, nil
 	case "bead.close":
@@ -647,6 +939,18 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (socketActionRe
 			return socketActionResult{}, socketErrorFor(req.ID, err)
 		}
 		return socketActionResult{Result: result}, nil
+	case "bead.delete":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		var payload socketIDPayload
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if err := s.deleteBead(payload.ID); err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: map[string]string{"status": "deleted"}}, nil
 	case "mail.list":
 		var payload socketMailListPayload
 		if err := decodeOptionalSocketPayload(req.Payload, &payload); err != nil {
@@ -769,9 +1073,27 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (socketActionRe
 		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
 			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 		}
+		if req.IdempotencyKey != "" {
+			idemKey := socketScopedIdemKey(s.state.CityName(), req.Action, req.IdempotencyKey)
+			bodyHash := hashBody(payload)
+			cached, handled, idemErr := s.idem.checkIdempotent(idemKey, bodyHash)
+			if idemErr != nil {
+				idemErr.ID = req.ID
+				return socketActionResult{}, idemErr
+			}
+			if handled {
+				return socketActionResult{Result: cached}, nil
+			}
+		}
 		result, err := s.sendMail(payload)
 		if err != nil {
+			if req.IdempotencyKey != "" {
+				s.idem.unreserve(socketScopedIdemKey(s.state.CityName(), req.Action, req.IdempotencyKey))
+			}
 			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		if req.IdempotencyKey != "" {
+			s.idem.storeResponse(socketScopedIdemKey(s.state.CityName(), req.Action, req.IdempotencyKey), hashBody(payload), 201, result)
 		}
 		return socketActionResult{Result: result}, nil
 	case "events.list":
@@ -877,6 +1199,142 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (socketActionRe
 			return socketActionResult{}, socketErrorFor(req.ID, err)
 		}
 		return socketActionResult{Result: provider, Index: s.latestIndex()}, nil
+	case "formulas.list":
+		var payload struct {
+			ScopeKind string `json:"scope_kind"`
+			ScopeRef  string `json:"scope_ref"`
+		}
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		result, err := s.listFormulas(payload.ScopeKind, payload.ScopeRef)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result, Index: s.latestIndex()}, nil
+	case "formulas.feed":
+		var payload struct {
+			ScopeKind string `json:"scope_kind"`
+			ScopeRef  string `json:"scope_ref"`
+			Limit     int    `json:"limit,omitempty"`
+		}
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		result, err := s.getFormulaFeed(payload.ScopeKind, payload.ScopeRef, payload.Limit)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result, Index: s.latestIndex()}, nil
+	case "formula.get":
+		var payload struct {
+			Name      string            `json:"name"`
+			ScopeKind string            `json:"scope_kind"`
+			ScopeRef  string            `json:"scope_ref"`
+			Target    string            `json:"target"`
+			Vars      map[string]string `json:"vars,omitempty"`
+		}
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		result, err := s.getFormulaDetail(context.Background(), payload.Name, payload.ScopeKind, payload.ScopeRef, payload.Target, payload.Vars)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result, Index: s.latestIndex()}, nil
+	case "formula.runs":
+		var payload struct {
+			Name      string `json:"name"`
+			ScopeKind string `json:"scope_kind"`
+			ScopeRef  string `json:"scope_ref"`
+			Limit     int    `json:"limit,omitempty"`
+		}
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		result, err := s.getFormulaRuns(payload.Name, payload.ScopeKind, payload.ScopeRef, payload.Limit)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result, Index: s.latestIndex()}, nil
+	case "orders.list":
+		aa := s.state.Orders()
+		resp := make([]orderResponse, len(aa))
+		for i, a := range aa {
+			resp[i] = toOrderResponse(a)
+		}
+		return socketActionResult{Result: map[string]any{"orders": resp}, Index: s.latestIndex()}, nil
+	case "order.get":
+		var payload socketNamePayload
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		a, err := resolveOrder(s.state.Orders(), payload.Name)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: toOrderResponse(*a), Index: s.latestIndex()}, nil
+	case "order.enable", "order.disable":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		sm, ok := s.state.(StateMutator)
+		if !ok {
+			return socketActionResult{}, newSocketError(req.ID, "internal", "mutations not supported")
+		}
+		var payload socketNamePayload
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		a, err := resolveOrder(s.state.Orders(), payload.Name)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		enabled := req.Action == "order.enable"
+		if enabled {
+			err = sm.EnableOrder(a.Name, a.Rig)
+		} else {
+			err = sm.DisableOrder(a.Name, a.Rig)
+		}
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		action := "enabled"
+		if !enabled {
+			action = "disabled"
+		}
+		return socketActionResult{Result: map[string]string{"status": action, "order": a.Name}}, nil
+	case "orders.check":
+		result := s.checkOrders()
+		return socketActionResult{Result: result, Index: s.latestIndex()}, nil
+	case "orders.history":
+		var payload struct {
+			ScopedName string `json:"scoped_name"`
+			Limit      int    `json:"limit,omitempty"`
+			Before     string `json:"before,omitempty"`
+		}
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		result, err := s.getOrderHistory(payload.ScopedName, payload.Limit, payload.Before)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result, Index: s.latestIndex()}, nil
+	case "order.history.detail":
+		var payload socketIDPayload
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		store := s.state.CityBeadStore()
+		if store == nil {
+			return socketActionResult{}, newSocketError(req.ID, "unavailable", "no bead store configured")
+		}
+		bead, err := store.Get(payload.ID)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: bead, Index: s.latestIndex()}, nil
 	case "agent.suspend", "agent.resume":
 		if s.readOnly {
 			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
@@ -922,7 +1380,7 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (socketActionRe
 		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
 			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 		}
-		result, err := s.getSessionResponse(payload.ID, false)
+		result, err := s.getSessionResponse(payload.ID, payload.Peek)
 		if err != nil {
 			return socketActionResult{}, socketErrorFor(req.ID, err)
 		}
@@ -1027,7 +1485,7 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (socketActionRe
 			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 		}
 		result, err := s.getSessionTranscript(payload.ID, sessionTranscriptQuery{
-			Tail:   payload.Tail,
+			Tail:   payload.Turns,
 			Before: payload.Before,
 			Raw:    payload.Format == "raw",
 		})
@@ -1035,12 +1493,830 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (socketActionRe
 			return socketActionResult{}, socketErrorFor(req.ID, err)
 		}
 		return socketActionResult{Result: result}, nil
+	case "patches.agents.list":
+		cfg := s.state.Config()
+		patches := cfg.Patches.Agents
+		if patches == nil {
+			patches = []config.AgentPatch{}
+		}
+		return socketActionResult{Result: listResponse{Items: patches, Total: len(patches)}, Index: s.latestIndex()}, nil
+	case "patches.agent.get":
+		var payload socketNamePayload
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		cfg := s.state.Config()
+		dir, base := config.ParseQualifiedName(payload.Name)
+		for _, p := range cfg.Patches.Agents {
+			if p.Dir == dir && p.Name == base {
+				return socketActionResult{Result: p, Index: s.latestIndex()}, nil
+			}
+		}
+		return socketActionResult{}, newSocketError(req.ID, "not_found", "agent patch "+payload.Name+" not found")
+	case "patches.agents.set":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		sm, ok := s.state.(StateMutator)
+		if !ok {
+			return socketActionResult{}, newSocketError(req.ID, "internal", "mutations not supported")
+		}
+		var patch config.AgentPatch
+		if err := decodeSocketPayload(req.Payload, &patch); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if patch.Name == "" {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", "name is required")
+		}
+		if err := sm.SetAgentPatch(patch); err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		qn := patch.Name
+		if patch.Dir != "" {
+			qn = patch.Dir + "/" + patch.Name
+		}
+		return socketActionResult{Result: map[string]string{"status": "ok", "agent_patch": qn}}, nil
+	case "patches.agent.delete":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		sm, ok := s.state.(StateMutator)
+		if !ok {
+			return socketActionResult{}, newSocketError(req.ID, "internal", "mutations not supported")
+		}
+		var payload socketNamePayload
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if err := sm.DeleteAgentPatch(payload.Name); err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: map[string]string{"status": "deleted", "agent_patch": payload.Name}}, nil
+	case "patches.rigs.list":
+		cfg := s.state.Config()
+		patches := cfg.Patches.Rigs
+		if patches == nil {
+			patches = []config.RigPatch{}
+		}
+		return socketActionResult{Result: listResponse{Items: patches, Total: len(patches)}, Index: s.latestIndex()}, nil
+	case "patches.rig.get":
+		var payload socketNamePayload
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		cfg := s.state.Config()
+		for _, p := range cfg.Patches.Rigs {
+			if p.Name == payload.Name {
+				return socketActionResult{Result: p, Index: s.latestIndex()}, nil
+			}
+		}
+		return socketActionResult{}, newSocketError(req.ID, "not_found", "rig patch "+payload.Name+" not found")
+	case "patches.rigs.set":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		sm, ok := s.state.(StateMutator)
+		if !ok {
+			return socketActionResult{}, newSocketError(req.ID, "internal", "mutations not supported")
+		}
+		var patch config.RigPatch
+		if err := decodeSocketPayload(req.Payload, &patch); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if patch.Name == "" {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", "name is required")
+		}
+		if err := sm.SetRigPatch(patch); err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: map[string]string{"status": "ok", "rig_patch": patch.Name}}, nil
+	case "patches.rig.delete":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		sm, ok := s.state.(StateMutator)
+		if !ok {
+			return socketActionResult{}, newSocketError(req.ID, "internal", "mutations not supported")
+		}
+		var payload socketNamePayload
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if err := sm.DeleteRigPatch(payload.Name); err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: map[string]string{"status": "deleted", "rig_patch": payload.Name}}, nil
+	case "patches.providers.list":
+		cfg := s.state.Config()
+		patches := cfg.Patches.Providers
+		if patches == nil {
+			patches = []config.ProviderPatch{}
+		}
+		return socketActionResult{Result: listResponse{Items: patches, Total: len(patches)}, Index: s.latestIndex()}, nil
+	case "patches.provider.get":
+		var payload socketNamePayload
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		cfg := s.state.Config()
+		for _, p := range cfg.Patches.Providers {
+			if p.Name == payload.Name {
+				return socketActionResult{Result: p, Index: s.latestIndex()}, nil
+			}
+		}
+		return socketActionResult{}, newSocketError(req.ID, "not_found", "provider patch "+payload.Name+" not found")
+	case "patches.providers.set":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		sm, ok := s.state.(StateMutator)
+		if !ok {
+			return socketActionResult{}, newSocketError(req.ID, "internal", "mutations not supported")
+		}
+		var patch config.ProviderPatch
+		if err := decodeSocketPayload(req.Payload, &patch); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if patch.Name == "" {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", "name is required")
+		}
+		if err := sm.SetProviderPatch(patch); err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: map[string]string{"status": "ok", "provider_patch": patch.Name}}, nil
+	case "patches.provider.delete":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		sm, ok := s.state.(StateMutator)
+		if !ok {
+			return socketActionResult{}, newSocketError(req.ID, "internal", "mutations not supported")
+		}
+		var payload socketNamePayload
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if err := sm.DeleteProviderPatch(payload.Name); err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: map[string]string{"status": "deleted", "provider_patch": payload.Name}}, nil
+	case "extmsg.inbound":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		var payload extmsgInboundRequest
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		result, err := s.processExtMsgInbound(context.Background(), payload)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result}, nil
+	case "extmsg.outbound":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		var payload extmsgOutboundRequest
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		result, err := s.processExtMsgOutbound(context.Background(), payload)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result}, nil
+	case "extmsg.bindings.list":
+		var payload struct {
+			SessionID string `json:"session_id"`
+		}
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		result, err := s.listExtMsgBindings(context.Background(), payload.SessionID)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result, Index: s.latestIndex()}, nil
+	case "extmsg.bind":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		var payload extmsgBindRequest
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		result, err := s.processExtMsgBind(context.Background(), payload)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result}, nil
+	case "extmsg.unbind":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		var payload extmsgUnbindRequest
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		result, err := s.processExtMsgUnbind(context.Background(), payload)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result}, nil
+	case "extmsg.groups.lookup":
+		var payload extmsgGroupLookupRequest
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		result, err := s.lookupExtMsgGroup(context.Background(), payload)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result, Index: s.latestIndex()}, nil
+	case "extmsg.groups.ensure":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		var payload extmsgGroupEnsureRequest
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		result, err := s.ensureExtMsgGroup(context.Background(), payload)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result}, nil
+	case "extmsg.participant.upsert":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		var payload extmsgParticipantUpsertRequest
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		result, err := s.upsertExtMsgParticipant(context.Background(), payload)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result}, nil
+	case "extmsg.participant.remove":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		var payload extmsgParticipantRemoveRequest
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		result, err := s.removeExtMsgParticipant(context.Background(), payload)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result}, nil
+	case "extmsg.transcript.list":
+		var payload extmsgTranscriptListRequest
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		result, err := s.listExtMsgTranscript(context.Background(), payload)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result, Index: s.latestIndex()}, nil
+	case "extmsg.transcript.ack":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		var payload extmsgTranscriptAckRequest
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		result, err := s.ackExtMsgTranscript(context.Background(), payload)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result}, nil
+	case "extmsg.adapters.list":
+		result, err := s.listExtMsgAdapters()
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result, Index: s.latestIndex()}, nil
+	case "extmsg.adapters.register":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		var payload extmsgAdapterRegisterRequest
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		result, err := s.registerExtMsgAdapter(payload)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result}, nil
+	case "extmsg.adapters.unregister":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		var payload extmsgAdapterUnregisterRequest
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		result, err := s.unregisterExtMsgAdapter(payload)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result}, nil
+	case "workflow.get":
+		var payload struct {
+			ID        string `json:"id"`
+			ScopeKind string `json:"scope_kind,omitempty"`
+			ScopeRef  string `json:"scope_ref,omitempty"`
+		}
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if payload.ID == "" {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", "id is required")
+		}
+		// Validate optional scope params.
+		if (payload.ScopeKind != "" || payload.ScopeRef != "") && (payload.ScopeKind == "" || payload.ScopeRef == "") {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", "scope_kind and scope_ref must be provided together")
+		}
+		if payload.ScopeKind != "" && payload.ScopeKind != "city" && payload.ScopeKind != "rig" {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", "scope_kind must be 'city' or 'rig'")
+		}
+		index := s.latestIndex()
+		snapshot, err := s.buildWorkflowSnapshot(payload.ID, payload.ScopeKind, payload.ScopeRef, index)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: snapshot, Index: index}, nil
+	case "workflow.delete":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		var payload struct {
+			ID        string `json:"id"`
+			ScopeKind string `json:"scope_kind,omitempty"`
+			ScopeRef  string `json:"scope_ref,omitempty"`
+			Delete    bool   `json:"delete,omitempty"`
+		}
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if payload.ID == "" {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", "id is required")
+		}
+		result, err := s.deleteWorkflow(payload.ID, payload.ScopeKind, payload.ScopeRef, payload.Delete)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result}, nil
+	case "orders.feed":
+		var payload struct {
+			ScopeKind string `json:"scope_kind"`
+			ScopeRef  string `json:"scope_ref"`
+			Limit     int    `json:"limit,omitempty"`
+		}
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		result, err := s.getOrdersFeed(payload.ScopeKind, payload.ScopeRef, payload.Limit)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result, Index: s.latestIndex()}, nil
+	// --- Session operations ---
+	case "session.patch":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		var payload struct {
+			ID    string  `json:"id"`
+			Title *string `json:"title,omitempty"`
+			Alias *string `json:"alias,omitempty"`
+		}
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		result, err := s.patchSession(payload.ID, payload.Title, payload.Alias)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result}, nil
+	case "session.create":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		var payload sessionCreateRequest
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if payload.Name == "" {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", "name is required")
+		}
+		if payload.Kind != "agent" && payload.Kind != "provider" {
+			return socketActionResult{}, newSocketError(req.ID, "invalid_kind", "kind must be 'agent' or 'provider'")
+		}
+		// Delegate to HTTP handler via internal round-trip for now.
+		// This preserves all complex session lifecycle logic identically.
+		result, statusCode, err := s.createSessionInternal(context.Background(), payload, req.IdempotencyKey)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		_ = statusCode
+		return socketActionResult{Result: result}, nil
+	case "session.agents.list":
+		var payload socketSessionTargetPayload
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		result, err := s.listSessionAgents(payload.ID)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result, Index: s.latestIndex()}, nil
+	case "session.agent.get":
+		var payload struct {
+			ID      string `json:"id"`
+			AgentID string `json:"agent_id"`
+		}
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		result, err := s.getSessionAgent(payload.ID, payload.AgentID)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result, Index: s.latestIndex()}, nil
+	case "session.stop":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		var payload socketSessionTargetPayload
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		store := s.state.CityBeadStore()
+		if store == nil {
+			return socketActionResult{}, newSocketError(req.ID, "unavailable", "no bead store configured")
+		}
+		id, err := s.resolveSessionIDWithConfig(store, payload.ID)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		mgr := s.sessionManager(store)
+		if err := mgr.StopTurn(id); err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: map[string]string{"status": "ok", "id": id}}, nil
+	case "session.messages":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		var payload struct {
+			ID      string `json:"id"`
+			Message string `json:"message"`
+		}
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if strings.TrimSpace(payload.Message) == "" {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", "message is required")
+		}
+		store := s.state.CityBeadStore()
+		if store == nil {
+			return socketActionResult{}, newSocketError(req.ID, "unavailable", "no bead store configured")
+		}
+		id, err := s.resolveSessionIDMaterializingNamedWithContext(context.Background(), store, payload.ID)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		if err := s.sendUserMessageToSession(context.Background(), store, id, payload.Message); err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: map[string]string{"status": "accepted", "id": id}}, nil
+	// --- Convoy mutations ---
+	case "convoy.create":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		var payload convoyCreateRequest
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		result, err := s.createConvoy(payload)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result}, nil
+	case "convoy.add":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		var payload struct {
+			ID    string   `json:"id"`
+			Items []string `json:"items"`
+		}
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if err := s.convoyAddItems(payload.ID, payload.Items); err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: map[string]string{"status": "updated"}}, nil
+	case "convoy.remove":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		var payload struct {
+			ID    string   `json:"id"`
+			Items []string `json:"items"`
+		}
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if err := s.convoyRemoveItems(payload.ID, payload.Items); err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: map[string]string{"status": "updated"}}, nil
+	case "convoy.check":
+		var payload socketIDPayload
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		result, err := s.convoyCheck(payload.ID)
+		if err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: result, Index: s.latestIndex()}, nil
+	case "convoy.close":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		var payload socketIDPayload
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if err := s.convoyClose(payload.ID); err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: map[string]string{"status": "closed"}}, nil
+	case "convoy.delete":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		var payload socketIDPayload
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if err := s.convoyDelete(payload.ID); err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: map[string]string{"status": "deleted"}}, nil
+	// --- Agent CRUD ---
+	case "agent.create":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		sm, ok := s.state.(StateMutator)
+		if !ok {
+			return socketActionResult{}, newSocketError(req.ID, "internal", "mutations not supported")
+		}
+		var payload agentCreateRequest
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if payload.Name == "" {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", "name is required")
+		}
+		if payload.Provider == "" {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", "provider is required")
+		}
+		a := config.Agent{Name: payload.Name, Dir: payload.Dir, Provider: payload.Provider, Scope: payload.Scope}
+		if err := sm.CreateAgent(a); err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: map[string]string{"status": "created", "agent": a.QualifiedName()}}, nil
+	case "agent.update":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		sm, ok := s.state.(StateMutator)
+		if !ok {
+			return socketActionResult{}, newSocketError(req.ID, "internal", "mutations not supported")
+		}
+		var payload struct {
+			Name      string `json:"name"`
+			Provider  string `json:"provider,omitempty"`
+			Scope     string `json:"scope,omitempty"`
+			Suspended *bool  `json:"suspended,omitempty"`
+		}
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if err := sm.UpdateAgent(payload.Name, AgentUpdate(agentUpdateRequest{Provider: payload.Provider, Scope: payload.Scope, Suspended: payload.Suspended})); err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: map[string]string{"status": "updated", "agent": payload.Name}}, nil
+	case "agent.delete":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		sm, ok := s.state.(StateMutator)
+		if !ok {
+			return socketActionResult{}, newSocketError(req.ID, "internal", "mutations not supported")
+		}
+		var payload socketNamePayload
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if err := sm.DeleteAgent(payload.Name); err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: map[string]string{"status": "deleted", "agent": payload.Name}}, nil
+	// --- Rig CRUD ---
+	case "rig.create":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		sm, ok := s.state.(StateMutator)
+		if !ok {
+			return socketActionResult{}, newSocketError(req.ID, "internal", "mutations not supported")
+		}
+		var payload struct {
+			Name string `json:"name"`
+			Path string `json:"path,omitempty"`
+		}
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if payload.Name == "" {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", "name is required")
+		}
+		if err := sm.CreateRig(config.Rig{Name: payload.Name, Path: payload.Path}); err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: map[string]string{"status": "created", "rig": payload.Name}}, nil
+	case "rig.update":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		sm, ok := s.state.(StateMutator)
+		if !ok {
+			return socketActionResult{}, newSocketError(req.ID, "internal", "mutations not supported")
+		}
+		var payload struct {
+			Name      string `json:"name"`
+			Path      string `json:"path,omitempty"`
+			Prefix    string `json:"prefix,omitempty"`
+			Suspended *bool  `json:"suspended,omitempty"`
+		}
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if err := sm.UpdateRig(payload.Name, RigUpdate{Path: payload.Path, Prefix: payload.Prefix, Suspended: payload.Suspended}); err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: map[string]string{"status": "updated", "rig": payload.Name}}, nil
+	case "rig.delete":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		sm, ok := s.state.(StateMutator)
+		if !ok {
+			return socketActionResult{}, newSocketError(req.ID, "internal", "mutations not supported")
+		}
+		var payload socketNamePayload
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if err := sm.DeleteRig(payload.Name); err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: map[string]string{"status": "deleted", "rig": payload.Name}}, nil
+	// --- Provider CRUD ---
+	case "provider.create":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		sm, ok := s.state.(StateMutator)
+		if !ok {
+			return socketActionResult{}, newSocketError(req.ID, "internal", "mutations not supported")
+		}
+		var payload struct {
+			Name string             `json:"name"`
+			Spec config.ProviderSpec `json:"spec"`
+		}
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if payload.Name == "" {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", "name is required")
+		}
+		if err := sm.CreateProvider(payload.Name, payload.Spec); err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: map[string]string{"status": "created", "provider": payload.Name}}, nil
+	case "provider.update":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		sm, ok := s.state.(StateMutator)
+		if !ok {
+			return socketActionResult{}, newSocketError(req.ID, "internal", "mutations not supported")
+		}
+		var payload struct {
+			Name   string         `json:"name"`
+			Update ProviderUpdate `json:"update"`
+		}
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if err := sm.UpdateProvider(payload.Name, payload.Update); err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: map[string]string{"status": "updated", "provider": payload.Name}}, nil
+	case "provider.delete":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		sm, ok := s.state.(StateMutator)
+		if !ok {
+			return socketActionResult{}, newSocketError(req.ID, "internal", "mutations not supported")
+		}
+		var payload socketNamePayload
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if err := sm.DeleteProvider(payload.Name); err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: map[string]string{"status": "deleted", "provider": payload.Name}}, nil
+	// --- Event emit ---
+	case "event.emit":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		var payload eventEmitRequest
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if payload.Type == "" {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", "type is required")
+		}
+		if payload.Actor == "" {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", "actor is required")
+		}
+		ep := s.state.EventProvider()
+		if ep == nil {
+			return socketActionResult{}, newSocketError(req.ID, "unavailable", "events not enabled")
+		}
+		ep.Record(events.Event{
+			Type:    payload.Type,
+			Actor:   payload.Actor,
+			Subject: payload.Subject,
+			Message: payload.Message,
+		})
+		return socketActionResult{Result: map[string]string{"status": "recorded"}}, nil
+	case "mail.delete":
+		if s.readOnly {
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
+		}
+		var payload socketMailGetPayload
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if err := s.deleteMail(payload.ID, payload.Rig); err != nil {
+			return socketActionResult{}, socketErrorFor(req.ID, err)
+		}
+		return socketActionResult{Result: map[string]string{"status": "deleted"}}, nil
 	default:
 		return socketActionResult{}, unknownSocketAction(req.ID, req.Action)
 	}
 }
 
 func (sm *SupervisorMux) handleSocketRequest(req *socketRequestEnvelope) (socketActionResult, *socketErrorEnvelope) {
+	// Supervisor-level actions (no city scope required).
+	switch req.Action {
+	case "health.get":
+		return socketActionResult{Result: sm.healthResponse()}, nil
+	case "cities.list":
+		return socketActionResult{Result: sm.citiesList()}, nil
+	case "events.list":
+		// Global events.list without scope aggregates from all cities.
+		if req.Scope == nil || req.Scope.City == "" {
+			result, err := sm.globalEventList(req)
+			if err != nil {
+				return socketActionResult{}, socketErrorFor(req.ID, err)
+			}
+			return socketActionResult{Result: result}, nil
+		}
+	}
+
+	// City-scoped actions.
 	if socketActionRequiresCityScope(req.Action) {
 		cityName, apiErr := sm.resolveSocketCityTarget(req.Scope)
 		if apiErr != nil {
@@ -1056,14 +2332,8 @@ func (sm *SupervisorMux) handleSocketRequest(req *socketRequestEnvelope) (socket
 		srv := sm.getCityServer(cityName, state)
 		return srv.handleSocketRequest(&cityReq)
 	}
-	switch req.Action {
-	case "health.get":
-		return socketActionResult{Result: sm.healthResponse()}, nil
-	case "cities.list":
-		return socketActionResult{Result: sm.citiesList()}, nil
-	default:
-		return socketActionResult{}, unknownSocketAction(req.ID, req.Action)
-	}
+
+	return socketActionResult{}, unknownSocketAction(req.ID, req.Action)
 }
 
 func socketActionRequiresCityScope(action string) bool {
@@ -1087,6 +2357,7 @@ func socketActionRequiresCityScope(action string) bool {
 		"beads.graph",
 		"bead.reopen",
 		"bead.assign",
+		"bead.delete",
 		"mail.list",
 		"mail.get",
 		"mail.count",
@@ -1121,9 +2392,71 @@ func socketActionRequiresCityScope(action string) bool {
 		"session.respond",
 		"session.kill",
 		"session.pending",
-		"session.submit":
-		return true
-	case "session.transcript":
+		"session.submit",
+		"session.transcript",
+		"formulas.list",
+		"formulas.feed",
+		"formula.get",
+		"formula.runs",
+		"orders.list",
+		"orders.check",
+		"order.get",
+		"order.enable",
+		"order.disable",
+		"orders.history",
+		"order.history.detail",
+		"extmsg.inbound",
+		"extmsg.outbound",
+		"extmsg.bindings.list",
+		"extmsg.bind",
+		"extmsg.unbind",
+		"extmsg.groups.lookup",
+		"extmsg.groups.ensure",
+		"extmsg.participant.upsert",
+		"extmsg.participant.remove",
+		"extmsg.transcript.list",
+		"extmsg.transcript.ack",
+		"extmsg.adapters.list",
+		"extmsg.adapters.register",
+		"extmsg.adapters.unregister",
+		"patches.agents.list",
+		"patches.agent.get",
+		"patches.agents.set",
+		"patches.agent.delete",
+		"patches.rigs.list",
+		"patches.rig.get",
+		"patches.rigs.set",
+		"patches.rig.delete",
+		"patches.providers.list",
+		"patches.provider.get",
+		"patches.providers.set",
+		"patches.provider.delete",
+		"agent.create",
+		"agent.update",
+		"agent.delete",
+		"rig.create",
+		"rig.update",
+		"rig.delete",
+		"provider.create",
+		"provider.update",
+		"provider.delete",
+		"event.emit",
+		"mail.delete",
+		"convoy.create",
+		"convoy.add",
+		"convoy.remove",
+		"convoy.check",
+		"convoy.close",
+		"convoy.delete",
+		"session.stop",
+		"session.messages",
+		"session.agents.list",
+		"session.agent.get",
+		"session.create",
+		"session.patch",
+		"workflow.get",
+		"workflow.delete",
+		"orders.feed":
 		return true
 	default:
 		return false
@@ -1151,6 +2484,39 @@ func (sm *SupervisorMux) resolveSocketCityTarget(scope *socketScope) (string, *s
 	}
 }
 
+// socketBlockingParams converts WebSocket watch params into BlockingParams.
+func socketBlockingParams(w *socketWatchParams) BlockingParams {
+	if w == nil {
+		return BlockingParams{}
+	}
+	bp := BlockingParams{Index: w.Index, HasIndex: true, Wait: defaultWait}
+	if w.Wait != "" {
+		if d, err := time.ParseDuration(w.Wait); err == nil && d > 0 {
+			bp.Wait = d
+		}
+	}
+	if bp.Wait > maxWait {
+		bp.Wait = maxWait
+	}
+	return bp
+}
+
+// socketActionSupportsWatch returns true for actions that support blocking query semantics.
+func socketActionSupportsWatch(action string) bool {
+	switch action {
+	case "beads.list", "beads.ready",
+		"agents.list",
+		"mail.list",
+		"events.list",
+		"rigs.list",
+		"convoys.list",
+		"status.get":
+		return true
+	default:
+		return false
+	}
+}
+
 func decodeSocketPayload(payload json.RawMessage, v any) error {
 	if len(payload) == 0 {
 		return errors.New("payload required")
@@ -1167,10 +2533,16 @@ func decodeOptionalSocketPayload(payload json.RawMessage, v any) error {
 
 func socketErrorFor(id string, err error) *socketErrorEnvelope {
 	var herr httpError
+	var herrPtr *httpError
 	if errors.As(err, &herr) {
 		return newSocketErrorWithDetails(id, herr.code, herr.message, herr.details)
 	}
+	if errors.As(err, &herrPtr) {
+		return newSocketErrorWithDetails(id, herrPtr.code, herrPtr.message, herrPtr.details)
+	}
 	switch {
+	case errors.Is(err, beads.ErrNotFound), errors.Is(err, mail.ErrNotFound), errors.Is(err, errWorkflowNotFound):
+		return newSocketError(id, "not_found", err.Error())
 	case errors.Is(err, session.ErrAmbiguous), errors.Is(err, errConfiguredNamedSessionConflict):
 		return newSocketError(id, "ambiguous", err.Error())
 	case errors.Is(err, session.ErrSessionNotFound):

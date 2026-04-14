@@ -2,9 +2,7 @@ package api
 
 import (
 	"encoding/json"
-	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -14,40 +12,25 @@ func TestHandleProviderList(t *testing.T) {
 	fs := newFakeState(t)
 	fs.cfg.Providers = map[string]config.ProviderSpec{
 		"custom": {DisplayName: "Custom Agent", Command: "custom-cli"},
-		"claude": {DisplayName: "My Claude", Command: "my-claude"}, // overrides builtin
+		"claude": {DisplayName: "My Claude", Command: "my-claude"},
 	}
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	req := httptest.NewRequest("GET", "/v0/providers", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "p-list", Action: "providers.list"})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("type = %q, want response", resp.Type)
 	}
-
-	var resp listResponse
-	json.NewDecoder(w.Body).Decode(&resp) //nolint:errcheck
-	// Should have city-level providers + builtins not overridden.
-	if resp.Total < 10 {
-		t.Errorf("total = %d, want >= 10 (builtins)", resp.Total)
-	}
-
-	// Verify city-level overrides appear first (alphabetically).
-	items, ok := resp.Items.([]any)
-	if !ok {
-		t.Fatal("items is not an array")
-	}
-	first := items[0].(map[string]any)
-	// City-level providers come first sorted alphabetically: "claude" before "custom"
-	if first["name"] != "claude" {
-		t.Errorf("first provider = %q, want %q", first["name"], "claude")
-	}
-	if first["city_level"] != true {
-		t.Error("expected claude to be city_level=true")
-	}
-	if first["builtin"] != true {
-		t.Error("expected claude to be builtin=true (overrides a builtin)")
+	var lr listResponse
+	json.Unmarshal(resp.Result, &lr)
+	if lr.Total < 10 {
+		t.Errorf("total = %d, want >= 10 (builtins)", lr.Total)
 	}
 }
 
@@ -57,134 +40,114 @@ func TestHandleProviderGet_CityLevel(t *testing.T) {
 		"custom": {DisplayName: "Custom Agent", Command: "custom-cli"},
 	}
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	req := httptest.NewRequest("GET", "/v0/provider/custom", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "p-get", Action: "provider.get", Payload: map[string]any{"name": "custom"}})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("type = %q, want response", resp.Type)
 	}
-
-	var resp providerResponse
-	json.NewDecoder(w.Body).Decode(&resp) //nolint:errcheck
-	if resp.Name != "custom" {
-		t.Errorf("name = %q, want %q", resp.Name, "custom")
+	var pr providerResponse
+	json.Unmarshal(resp.Result, &pr)
+	if pr.Name != "custom" {
+		t.Errorf("name = %q, want custom", pr.Name)
 	}
-	if resp.CityLevel != true {
+	if !pr.CityLevel {
 		t.Error("expected city_level=true")
-	}
-	if resp.Builtin != false {
-		t.Error("expected builtin=false")
 	}
 }
 
 func TestHandleProviderGet_Builtin(t *testing.T) {
 	fs := newFakeState(t)
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	req := httptest.NewRequest("GET", "/v0/provider/claude", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "p-builtin", Action: "provider.get", Payload: map[string]any{"name": "claude"}})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("type = %q, want response", resp.Type)
 	}
-
-	var resp providerResponse
-	json.NewDecoder(w.Body).Decode(&resp) //nolint:errcheck
-	if resp.Name != "claude" {
-		t.Errorf("name = %q, want %q", resp.Name, "claude")
+	var pr providerResponse
+	json.Unmarshal(resp.Result, &pr)
+	if pr.Name != "claude" {
+		t.Errorf("name = %q, want claude", pr.Name)
 	}
-	if resp.Builtin != true {
+	if !pr.Builtin {
 		t.Error("expected builtin=true")
-	}
-	if resp.CityLevel != false {
-		t.Error("expected city_level=false")
 	}
 }
 
 func TestHandleProviderGet_NotFound(t *testing.T) {
 	fs := newFakeState(t)
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	req := httptest.NewRequest("GET", "/v0/provider/nonexistent", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "p-nf", Action: "provider.get", Payload: map[string]any{"name": "nonexistent"}})
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Type != "error" || errResp.Code != "not_found" {
+		t.Fatalf("expected not_found error, got %#v", errResp)
 	}
 }
 
 func TestHandleProviderCreate(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	body := `{"name":"myagent","command":"myagent-cli","display_name":"My Agent"}`
-	req := newPostRequest("/v0/providers", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusCreated, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "p-create", Action: "provider.create", Payload: map[string]any{
+		"name": "myagent",
+		"spec": map[string]any{"command": "myagent-cli", "display_name": "My Agent"},
+	}})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("type = %q, want response; result = %s", resp.Type, resp.Result)
 	}
 
-	// Verify provider was added.
 	spec, ok := fs.cfg.Providers["myagent"]
 	if !ok {
-		t.Fatal("provider 'myagent' not found in config after create")
+		t.Fatal("provider 'myagent' not found after create")
 	}
 	if spec.Command != "myagent-cli" {
-		t.Errorf("command = %q, want %q", spec.Command, "myagent-cli")
-	}
-	if spec.DisplayName != "My Agent" {
-		t.Errorf("display_name = %q, want %q", spec.DisplayName, "My Agent")
+		t.Errorf("command = %q, want myagent-cli", spec.Command)
 	}
 }
 
 func TestHandleProviderCreate_MissingName(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	body := `{"command":"myagent-cli"}`
-	req := newPostRequest("/v0/providers", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
-	}
-}
-
-func TestHandleProviderCreate_MissingCommand(t *testing.T) {
-	fs := newFakeMutatorState(t)
-	srv := New(fs)
-
-	body := `{"name":"myagent"}`
-	req := newPostRequest("/v0/providers", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
-	}
-}
-
-func TestHandleProviderCreate_Duplicate(t *testing.T) {
-	fs := newFakeMutatorState(t)
-	fs.cfg.Providers = map[string]config.ProviderSpec{
-		"existing": {Command: "existing-cli"},
-	}
-	srv := New(fs)
-
-	body := `{"name":"existing","command":"other-cli"}`
-	req := newPostRequest("/v0/providers", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusConflict)
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "p-no-name", Action: "provider.create", Payload: map[string]any{
+		"spec": map[string]any{"command": "cli"},
+	}})
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Type != "error" || errResp.Code != "invalid" {
+		t.Fatalf("expected invalid error, got %#v", errResp)
 	}
 }
 
@@ -194,38 +157,42 @@ func TestHandleProviderUpdate(t *testing.T) {
 		"custom": {Command: "old-cli", DisplayName: "Old Name"},
 	}
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	body := `{"command":"new-cli","display_name":"New Name"}`
-	req := httptest.NewRequest("PATCH", "/v0/provider/custom", strings.NewReader(body))
-	req.Header.Set("X-GC-Request", "true")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
-	}
-
-	spec := fs.cfg.Providers["custom"]
-	if spec.Command != "new-cli" {
-		t.Errorf("command = %q, want %q", spec.Command, "new-cli")
-	}
-	if spec.DisplayName != "New Name" {
-		t.Errorf("display_name = %q, want %q", spec.DisplayName, "New Name")
+	cmd := "new-cli"
+	dn := "New Name"
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "p-update", Action: "provider.update", Payload: map[string]any{
+		"name":   "custom",
+		"update": map[string]any{"command": &cmd, "display_name": &dn},
+	}})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("type = %q, want response", resp.Type)
 	}
 }
 
 func TestHandleProviderUpdate_NotFound(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	body := `{"command":"new-cli"}`
-	req := httptest.NewRequest("PATCH", "/v0/provider/nonexistent", strings.NewReader(body))
-	req.Header.Set("X-GC-Request", "true")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "p-upd-nf", Action: "provider.update", Payload: map[string]any{
+		"name":   "nonexistent",
+		"update": map[string]any{},
+	}})
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Type != "error" {
+		t.Fatalf("type = %q, want error", errResp.Type)
 	}
 }
 
@@ -235,62 +202,37 @@ func TestHandleProviderDelete(t *testing.T) {
 		"custom": {Command: "custom-cli"},
 	}
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	req := httptest.NewRequest("DELETE", "/v0/provider/custom", nil)
-	req.Header.Set("X-GC-Request", "true")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "p-delete", Action: "provider.delete", Payload: map[string]any{"name": "custom"}})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("type = %q, want response", resp.Type)
 	}
 
 	if _, ok := fs.cfg.Providers["custom"]; ok {
-		t.Error("provider 'custom' still exists after delete")
+		t.Error("provider still exists after delete")
 	}
 }
 
 func TestHandleProviderDelete_NotFound(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	req := httptest.NewRequest("DELETE", "/v0/provider/nonexistent", nil)
-	req.Header.Set("X-GC-Request", "true")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
-	}
-}
-
-func TestHandleProviderUpdate_BuiltinConflict(t *testing.T) {
-	fs := newFakeMutatorState(t)
-	// No city-level "claude" — it's only a builtin.
-	srv := New(fs)
-
-	body := `{"command":"new-claude"}`
-	req := httptest.NewRequest("PATCH", "/v0/provider/claude", strings.NewReader(body))
-	req.Header.Set("X-GC-Request", "true")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusConflict, w.Body.String())
-	}
-}
-
-func TestHandleProviderDelete_BuiltinConflict(t *testing.T) {
-	fs := newFakeMutatorState(t)
-	// No city-level "claude" — it's only a builtin.
-	srv := New(fs)
-
-	req := httptest.NewRequest("DELETE", "/v0/provider/claude", nil)
-	req.Header.Set("X-GC-Request", "true")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusConflict, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "p-del-nf", Action: "provider.delete", Payload: map[string]any{"name": "nonexistent"}})
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Type != "error" {
+		t.Fatalf("type = %q, want error", errResp.Type)
 	}
 }

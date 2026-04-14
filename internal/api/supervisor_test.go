@@ -177,25 +177,32 @@ func TestSupervisorCityNamespacedRoute(t *testing.T) {
 	sm := newTestSupervisorMux(t, map[string]*fakeState{
 		"bright-lights": s,
 	})
+	ts := httptest.NewServer(sm.Handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/city/bright-lights/agents", nil)
-	rec := httptest.NewRecorder()
-	sm.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "city-agents",
+		Action: "agents.list",
+		Scope:  &wsScope{City: "bright-lights"},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "city-agents" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-
-	// Should return the agent list from the city's state.
-	var resp struct {
+	var listResp struct {
 		Items []json.RawMessage `json:"items"`
 		Total int               `json:"total"`
 	}
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Total != 1 {
-		t.Errorf("Total = %d, want 1 (one agent in fakeState)", resp.Total)
+	json.Unmarshal(resp.Result, &listResp)
+	if listResp.Total != 1 {
+		t.Errorf("Total = %d, want 1 (one agent in fakeState)", listResp.Total)
 	}
 }
 
@@ -206,22 +213,29 @@ func TestSupervisorCityDetail(t *testing.T) {
 	sm := newTestSupervisorMux(t, map[string]*fakeState{
 		"bright-lights": s,
 	})
+	ts := httptest.NewServer(sm.Handler())
+	defer ts.Close()
 
-	// /v0/city/{name} with no suffix should return status.
-	req := httptest.NewRequest("GET", "/v0/city/bright-lights", nil)
-	rec := httptest.NewRecorder()
-	sm.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "city-detail",
+		Action: "status.get",
+		Scope:  &wsScope{City: "bright-lights"},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "city-detail" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-
-	var resp statusResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Name != "bright-lights" {
-		t.Errorf("Name = %q, want %q", resp.Name, "bright-lights")
+	var status statusResponse
+	json.Unmarshal(resp.Result, &status)
+	if status.Name != "bright-lights" {
+		t.Errorf("Name = %q, want %q", status.Name, "bright-lights")
 	}
 }
 
@@ -244,22 +258,29 @@ func TestSupervisorBarePathSingleCity(t *testing.T) {
 	sm := newTestSupervisorMux(t, map[string]*fakeState{
 		"sole-city": s,
 	})
+	ts := httptest.NewServer(sm.Handler())
+	defer ts.Close()
 
-	// Bare /v0/status should route to the sole running city.
-	req := httptest.NewRequest("GET", "/v0/status", nil)
-	rec := httptest.NewRecorder()
-	sm.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	// Bare status.get without scope should route to the sole running city.
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "bare-status",
+		Action: "status.get",
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "bare-status" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-
-	var resp statusResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Name != "sole-city" {
-		t.Errorf("Name = %q, want %q", resp.Name, "sole-city")
+	var status statusResponse
+	json.Unmarshal(resp.Result, &status)
+	if status.Name != "sole-city" {
+		t.Errorf("Name = %q, want %q", status.Name, "sole-city")
 	}
 }
 
@@ -465,13 +486,27 @@ func TestSupervisorHandlerReadOnlyStillBlocksPrivateServiceMutation(t *testing.T
 
 func TestSupervisorBarePathNoCities(t *testing.T) {
 	sm := newTestSupervisorMux(t, map[string]*fakeState{})
+	ts := httptest.NewServer(sm.Handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/status", nil)
-	rec := httptest.NewRecorder()
-	sm.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	// status.get with no scope and no cities should return no_cities error.
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "no-cities",
+		Action: "status.get",
+	})
+
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Type != "error" {
+		t.Fatalf("type = %q, want error", errResp.Type)
+	}
+	if errResp.Code != "no_cities" {
+		t.Errorf("code = %q, want no_cities", errResp.Code)
 	}
 }
 
@@ -485,19 +520,27 @@ func TestSupervisorBarePathMultipleCities(t *testing.T) {
 		"alpha": s1,
 		"beta":  s2,
 	})
+	ts := httptest.NewServer(sm.Handler())
+	defer ts.Close()
 
-	// Bare /v0/status with multiple cities should return 400 requiring
-	// explicit city scope.
-	req := httptest.NewRequest("GET", "/v0/status", nil)
-	rec := httptest.NewRecorder()
-	sm.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	// status.get with no scope and multiple cities should return city_required.
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "multi-cities",
+		Action: "status.get",
+	})
+
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Type != "error" {
+		t.Fatalf("type = %q, want error", errResp.Type)
 	}
-	body := rec.Body.String()
-	if !strings.Contains(body, "city_required") {
-		t.Errorf("body = %q, want city_required error", body)
+	if errResp.Code != "city_required" {
+		t.Errorf("code = %q, want city_required", errResp.Code)
 	}
 }
 
@@ -567,40 +610,46 @@ func TestSupervisorEmptyCityName(t *testing.T) {
 	}
 }
 
-// TestSupervisorPerCityEventStream verifies that per-city event stream
-// requests (/v0/city/{name}/events/stream) are correctly routed to the
-// city's event handler. This is a regression test for #287 where the
-// supervisor returned 404 for valid per-city event stream requests.
-func TestSupervisorPerCityEventStream(t *testing.T) {
+// TestSupervisorPerCityEventSubscription verifies that city-scoped event
+// subscriptions work via WS. Regression test for #287.
+func TestSupervisorPerCityEventSubscription(t *testing.T) {
 	s := newFakeState(t)
 	s.cityName = "gc-work"
 
 	sm := newTestSupervisorMux(t, map[string]*fakeState{
 		"gc-work": s,
 	})
+	ts := httptest.NewServer(sm.Handler())
+	defer ts.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	req := httptest.NewRequest("GET", "/v0/city/gc-work/events/stream", nil).WithContext(ctx)
-	rec := httptest.NewRecorder()
+	// Subscribe to city-scoped events.
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "sub-city",
+		Action: "subscription.start",
+		Scope:  &wsScope{City: "gc-work"},
+		Payload: map[string]any{
+			"kind": "events",
+		},
+	})
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		sm.ServeHTTP(rec, req)
-	}()
-
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-	<-done
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "sub-city" {
+		t.Fatalf("subscription response = %#v, want correlated response", resp)
 	}
-	ct := rec.Header().Get("Content-Type")
-	if ct != "text/event-stream" {
-		t.Errorf("Content-Type = %q, want text/event-stream", ct)
+
+	// Record an event and verify it arrives.
+	s.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "tester"})
+
+	var evt wsEventEnvelope
+	readWSJSON(t, conn, &evt)
+	if evt.Type != "event" || evt.EventType != events.SessionWoke {
+		t.Fatalf("event = %#v, want session.woke event", evt)
 	}
 }
 
@@ -610,37 +659,42 @@ func TestSupervisorGlobalEventList(t *testing.T) {
 	s2 := newFakeState(t)
 	s2.cityName = "beta"
 
-	// Record events in each city's event provider.
-	s1.eventProv.(*events.Fake).Record(events.Event{Type: events.SessionWoke, Actor: "a1"})
-	s2.eventProv.(*events.Fake).Record(events.Event{Type: events.SessionStopped, Actor: "b1"})
+	s1.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "a1"})
+	s2.eventProv.Record(events.Event{Type: events.SessionStopped, Actor: "b1"})
 
 	sm := newTestSupervisorMux(t, map[string]*fakeState{
 		"alpha": s1,
 		"beta":  s2,
 	})
+	ts := httptest.NewServer(sm.Handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/events", nil)
-	rec := httptest.NewRecorder()
-	sm.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "global-events",
+		Action: "events.list",
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "global-events" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-
-	var resp struct {
+	var listResp struct {
 		Items []events.TaggedEvent `json:"items"`
 		Total int                  `json:"total"`
 	}
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Total != 2 {
-		t.Errorf("total = %d, want 2", resp.Total)
+	json.Unmarshal(resp.Result, &listResp)
+	if listResp.Total != 2 {
+		t.Errorf("total = %d, want 2", listResp.Total)
 	}
 
-	// Verify events are tagged with city names.
 	cities := make(map[string]bool)
-	for _, e := range resp.Items {
+	for _, e := range listResp.Items {
 		cities[e.City] = true
 	}
 	if !cities["alpha"] || !cities["beta"] {
@@ -651,58 +705,76 @@ func TestSupervisorGlobalEventList(t *testing.T) {
 func TestSupervisorGlobalEventListWithFilter(t *testing.T) {
 	s1 := newFakeState(t)
 	s1.cityName = "alpha"
-	s1.eventProv.(*events.Fake).Record(events.Event{Type: events.SessionWoke, Actor: "a1"})
-	s1.eventProv.(*events.Fake).Record(events.Event{Type: events.SessionStopped, Actor: "a1"})
+	s1.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "a1"})
+	s1.eventProv.Record(events.Event{Type: events.SessionStopped, Actor: "a1"})
 
 	sm := newTestSupervisorMux(t, map[string]*fakeState{"alpha": s1})
+	ts := httptest.NewServer(sm.Handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/events?type=session.woke", nil)
-	rec := httptest.NewRecorder()
-	sm.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "filtered-events",
+		Action: "events.list",
+		Payload: map[string]any{"type": events.SessionWoke},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "filtered-events" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-
-	var resp struct {
+	var listResp struct {
 		Items []events.TaggedEvent `json:"items"`
 		Total int                  `json:"total"`
 	}
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	json.Unmarshal(resp.Result, &listResp)
+	if listResp.Total != 1 {
+		t.Errorf("total = %d, want 1", listResp.Total)
 	}
-	if resp.Total != 1 {
-		t.Errorf("total = %d, want 1", resp.Total)
-	}
-	if resp.Items[0].Type != events.SessionWoke {
-		t.Errorf("type = %q, want %q", resp.Items[0].Type, events.SessionWoke)
+	if len(listResp.Items) > 0 && listResp.Items[0].Type != events.SessionWoke {
+		t.Errorf("type = %q, want %q", listResp.Items[0].Type, events.SessionWoke)
 	}
 }
 
 func TestSupervisorGlobalEventListEmpty(t *testing.T) {
 	sm := newTestSupervisorMux(t, map[string]*fakeState{})
+	ts := httptest.NewServer(sm.Handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/events", nil)
-	rec := httptest.NewRecorder()
-	sm.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "empty-events",
+		Action: "events.list",
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "empty-events" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-
-	var resp struct {
+	var listResp struct {
 		Items []events.TaggedEvent `json:"items"`
 		Total int                  `json:"total"`
 	}
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Total != 0 {
-		t.Errorf("total = %d, want 0", resp.Total)
+	json.Unmarshal(resp.Result, &listResp)
+	if listResp.Total != 0 {
+		t.Errorf("total = %d, want 0", listResp.Total)
 	}
 }
 
-func TestSupervisorGlobalEventStreamCompositeCursor(t *testing.T) {
+// SSE stream tests removed — SSE is eliminated. WS subscription tests in
+// websocket_test.go (TestSupervisorWebSocketGlobalEventSubscription) cover this.
+
+func _removed_TestSupervisorGlobalEventStreamCompositeCursor(t *testing.T) {
 	s1 := newFakeState(t)
 	s1.cityName = "alpha"
 	s2 := newFakeState(t)
@@ -775,7 +847,7 @@ func TestSupervisorGlobalEventStreamCompositeCursor(t *testing.T) {
 	}
 }
 
-func TestSupervisorGlobalEventStreamProjectsWorkflowMetadata(t *testing.T) {
+func _removed_TestSupervisorGlobalEventStreamProjectsWorkflowMetadata(t *testing.T) {
 	s1 := newFakeState(t)
 	s1.cityName = "alpha"
 	store := s1.stores["myrig"]

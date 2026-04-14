@@ -70,43 +70,58 @@ func TestHandleServicesListAndGet(t *testing.T) {
 		}},
 	}
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	listReq := httptest.NewRequest(http.MethodGet, "/v0/services", nil)
-	listRec := httptest.NewRecorder()
-	srv.ServeHTTP(listRec, listReq)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if listRec.Code != http.StatusOK {
-		t.Fatalf("list status = %d, want %d", listRec.Code, http.StatusOK)
-	}
-	var listResp struct {
+	// List services.
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "svc-list",
+		Action: "services.list",
+	})
+	var listResp wsResponseEnvelope
+	readWSJSON(t, conn, &listResp)
+
+	var listResult struct {
 		Items []workspacesvc.Status `json:"items"`
 		Total int                   `json:"total"`
 	}
-	if err := json.NewDecoder(listRec.Body).Decode(&listResp); err != nil {
+	if err := json.Unmarshal(listResp.Result, &listResult); err != nil {
 		t.Fatalf("decode list: %v", err)
 	}
-	if listResp.Total != 1 {
-		t.Fatalf("Total = %d, want 1", listResp.Total)
+	if listResult.Total != 1 {
+		t.Fatalf("Total = %d, want 1", listResult.Total)
 	}
-	if len(listResp.Items) != 1 || listResp.Items[0].ServiceName != "review-intake" {
-		t.Fatalf("Items = %#v, want review-intake", listResp.Items)
+	if len(listResult.Items) != 1 || listResult.Items[0].ServiceName != "review-intake" {
+		t.Fatalf("Items = %#v, want review-intake", listResult.Items)
 	}
 
-	getReq := httptest.NewRequest(http.MethodGet, "/v0/service/review-intake", nil)
-	getRec := httptest.NewRecorder()
-	srv.ServeHTTP(getRec, getReq)
+	// Get single service.
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "svc-get",
+		Action: "service.get",
+		Payload: map[string]any{
+			"name": "review-intake",
+		},
+	})
+	var getResp wsResponseEnvelope
+	readWSJSON(t, conn, &getResp)
 
-	if getRec.Code != http.StatusOK {
-		t.Fatalf("get status = %d, want %d", getRec.Code, http.StatusOK)
-	}
 	var got workspacesvc.Status
-	if err := json.NewDecoder(getRec.Body).Decode(&got); err != nil {
+	if err := json.Unmarshal(getResp.Result, &got); err != nil {
 		t.Fatalf("decode get: %v", err)
 	}
 	if got.ServiceName != "review-intake" {
 		t.Errorf("ServiceName = %q, want review-intake", got.ServiceName)
 	}
 }
+
+// Service proxy tests below remain on HTTP because /svc/ mounts stay on HTTP.
 
 func TestServiceProxyDirectAllowsExternalMutationWithoutCSRF(t *testing.T) {
 	state := newFakeState(t)

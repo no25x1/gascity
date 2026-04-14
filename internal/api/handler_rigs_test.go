@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -14,38 +13,44 @@ import (
 func TestRigList(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/v0/rigs", nil))
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "rig-list", Action: "rigs.list"})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("type = %q, want response", resp.Type)
 	}
-
-	var resp listResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Total != 1 {
-		t.Fatalf("total = %d, want 1", resp.Total)
+	var lr listResponse
+	json.Unmarshal(resp.Result, &lr)
+	if lr.Total != 1 {
+		t.Fatalf("total = %d, want 1", lr.Total)
 	}
 }
 
 func TestRigGet(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/v0/rig/myrig", nil))
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "rig-get", Action: "rig.get", Payload: map[string]any{"name": "myrig"}})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("type = %q, want response", resp.Type)
 	}
-
 	var rig rigResponse
-	if err := json.NewDecoder(rec.Body).Decode(&rig); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	json.Unmarshal(resp.Result, &rig)
 	if rig.Name != "myrig" {
 		t.Fatalf("name = %q, want %q", rig.Name, "myrig")
 	}
@@ -54,12 +59,21 @@ func TestRigGet(t *testing.T) {
 func TestRigGetNotFound(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/v0/rig/nonexistent", nil))
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", rec.Code)
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "rig-nf", Action: "rig.get", Payload: map[string]any{"name": "nonexistent"}})
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Type != "error" {
+		t.Fatalf("type = %q, want error", errResp.Type)
+	}
+	if errResp.Code != "not_found" {
+		t.Fatalf("code = %q, want not_found", errResp.Code)
 	}
 }
 
@@ -71,16 +85,21 @@ func TestRigEnrichment(t *testing.T) {
 	}
 	state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/v0/rig/myrig", nil))
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "rig-enrich", Action: "rig.get", Payload: map[string]any{"name": "myrig"}})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("type = %q, want response", resp.Type)
 	}
-
 	var rig rigResponse
-	json.NewDecoder(rec.Body).Decode(&rig) //nolint:errcheck
+	json.Unmarshal(resp.Result, &rig)
 	if rig.AgentCount != 2 {
 		t.Errorf("AgentCount = %d, want 2", rig.AgentCount)
 	}
@@ -92,67 +111,81 @@ func TestRigEnrichment(t *testing.T) {
 func TestRigSuspendResume(t *testing.T) {
 	state := newFakeMutatorState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	// Suspend rig.
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/rig/myrig/suspend", nil))
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("suspend: status = %d, want 200", rec.Code)
+	// Suspend
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "rig-suspend", Action: "rig.suspend", Payload: map[string]any{"name": "myrig"}})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("suspend: type = %q, want response", resp.Type)
 	}
 
-	// Read-after-write: rig should show as suspended.
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/v0/rig/myrig", nil))
-
+	// Verify suspended
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "rig-check-1", Action: "rig.get", Payload: map[string]any{"name": "myrig"}})
+	readWSJSON(t, conn, &resp)
 	var rig rigResponse
-	if err := json.NewDecoder(rec.Body).Decode(&rig); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	json.Unmarshal(resp.Result, &rig)
 	if !rig.Suspended {
-		t.Fatal("rig should be suspended after suspend action")
+		t.Fatal("rig should be suspended")
 	}
 
-	// Resume rig.
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/rig/myrig/resume", nil))
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("resume: status = %d, want 200", rec.Code)
+	// Resume
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "rig-resume", Action: "rig.resume", Payload: map[string]any{"name": "myrig"}})
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("resume: type = %q, want response", resp.Type)
 	}
 
-	// Read-after-write: rig should show as not suspended.
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/v0/rig/myrig", nil))
-
-	if err := json.NewDecoder(rec.Body).Decode(&rig); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	// Verify not suspended
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "rig-check-2", Action: "rig.get", Payload: map[string]any{"name": "myrig"}})
+	readWSJSON(t, conn, &resp)
+	json.Unmarshal(resp.Result, &rig)
 	if rig.Suspended {
-		t.Fatal("rig should not be suspended after resume action")
+		t.Fatal("rig should not be suspended")
 	}
 }
 
 func TestRigActionNotFound(t *testing.T) {
 	state := newFakeMutatorState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/rig/nonexistent/suspend", nil))
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", rec.Code)
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "rig-nf", Action: "rig.suspend", Payload: map[string]any{"name": "nonexistent"}})
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Type != "error" {
+		t.Fatalf("type = %q, want error", errResp.Type)
 	}
 }
 
 func TestRigActionUnknown(t *testing.T) {
 	state := newFakeMutatorState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/rig/myrig/reboot", nil))
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", rec.Code)
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "rig-unknown", Action: "rig.reboot", Payload: map[string]any{"name": "myrig"}})
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Type != "error" {
+		t.Fatalf("type = %q, want error", errResp.Type)
+	}
+	if errResp.Code != "not_found" {
+		t.Fatalf("code = %q, want not_found", errResp.Code)
 	}
 }

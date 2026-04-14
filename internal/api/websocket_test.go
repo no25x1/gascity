@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1481,6 +1482,412 @@ func TestSupervisorWebSocketSessionStreamUsesImplicitSingleCity(t *testing.T) {
 	}
 	if !strings.Contains(string(evt.Payload), `"hello"`) {
 		t.Fatalf("payload = %s, want session snapshot", evt.Payload)
+	}
+}
+
+func TestServerWebSocketBlockingWatch(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	// Record an event so the index advances past 0.
+	state.eventProv.Record(events.Event{Type: "test.event", Actor: "tester"})
+
+	// Send a blocking watch request with index=0 — should return immediately
+	// since there's already an event at seq > 0.
+	writeWSJSON(t, conn, map[string]any{
+		"type":   "request",
+		"id":     "watch-1",
+		"action": "beads.list",
+		"watch":  map[string]any{"index": 0, "wait": "100ms"},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("type = %q, want response", resp.Type)
+	}
+	if resp.ID != "watch-1" {
+		t.Fatalf("id = %q, want watch-1", resp.ID)
+	}
+	if resp.Index == 0 {
+		t.Fatal("index = 0, want > 0 after blocking watch")
+	}
+}
+
+func TestServerWebSocketBlockingWatchTimeout(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	// Send a blocking watch with a very high index — should timeout.
+	writeWSJSON(t, conn, map[string]any{
+		"type":   "request",
+		"id":     "watch-timeout",
+		"action": "status.get",
+		"watch":  map[string]any{"index": 999999, "wait": "50ms"},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("type = %q, want response", resp.Type)
+	}
+	if resp.ID != "watch-timeout" {
+		t.Fatalf("id = %q, want watch-timeout", resp.ID)
+	}
+	// Response should still come back (with index 0 since no events).
+}
+
+func TestServerWebSocketRejectsMismatchedCityScope(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	// Send a request with a wrong city scope.
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "scope-1",
+		Action: "status.get",
+		Scope:  &wsScope{City: "wrong-city"},
+	})
+
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Type != "error" {
+		t.Fatalf("type = %q, want error", errResp.Type)
+	}
+	if errResp.Code != "invalid" {
+		t.Fatalf("code = %q, want invalid", errResp.Code)
+	}
+	if !strings.Contains(errResp.Message, "scope.city") {
+		t.Fatalf("message = %q, want scope.city mismatch", errResp.Message)
+	}
+}
+
+func TestServerWebSocketAcceptsMatchingCityScope(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	// Send a request with the correct city scope — should succeed.
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "scope-2",
+		Action: "status.get",
+		Scope:  &wsScope{City: state.CityName()},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("type = %q, want response", resp.Type)
+	}
+	if resp.ID != "scope-2" {
+		t.Fatalf("id = %q, want scope-2", resp.ID)
+	}
+}
+
+func TestServerWebSocketOriginRejection(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/v0/ws"
+	header := http.Header{}
+	header.Set("Origin", "http://evil.example.com")
+	_, resp, err := websocket.DefaultDialer.Dial(wsURL, header)
+	if err == nil {
+		t.Fatal("expected dial error for non-localhost origin, got nil")
+	}
+	if resp != nil && resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+}
+
+func TestServerWebSocketSubscriptionStopOK(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	// Start a subscription.
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "sub-start",
+		Action: "subscription.start",
+		Payload: map[string]any{
+			"kind": "events",
+		},
+	})
+	var subResp wsResponseEnvelope
+	readWSJSON(t, conn, &subResp)
+	if subResp.Type != "response" || subResp.ID != "sub-start" {
+		t.Fatalf("subscription start = %#v, want correlated response", subResp)
+	}
+	var result map[string]string
+	if err := json.Unmarshal(subResp.Result, &result); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	subID := result["subscription_id"]
+	if subID == "" {
+		t.Fatal("subscription_id empty")
+	}
+
+	// Stop the subscription.
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "sub-stop",
+		Action: "subscription.stop",
+		Payload: map[string]any{
+			"subscription_id": subID,
+		},
+	})
+	var stopResp wsResponseEnvelope
+	readWSJSON(t, conn, &stopResp)
+	if stopResp.Type != "response" || stopResp.ID != "sub-stop" {
+		t.Fatalf("subscription stop = %#v, want correlated response", stopResp)
+	}
+	var stopResult map[string]string
+	if err := json.Unmarshal(stopResp.Result, &stopResult); err != nil {
+		t.Fatalf("unmarshal stop result: %v", err)
+	}
+	if stopResult["status"] != "ok" {
+		t.Fatalf("stop status = %q, want ok", stopResult["status"])
+	}
+}
+
+func TestServerWebSocketUnsubscribeNonexistentReturnsError(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "unsub-bad",
+		Action: "subscription.stop",
+		Payload: map[string]any{
+			"subscription_id": "nonexistent",
+		},
+	})
+
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Type != "error" {
+		t.Fatalf("type = %q, want error", errResp.Type)
+	}
+	if errResp.Code != "not_found" {
+		t.Fatalf("code = %q, want not_found", errResp.Code)
+	}
+	if !strings.Contains(errResp.Message, "subscription not found") {
+		t.Fatalf("message = %q, want 'subscription not found'", errResp.Message)
+	}
+}
+
+func TestServerWebSocketOversizeMessageRejected(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	// Send a message that exceeds the 10MB read limit.
+	bigPayload := strings.Repeat("x", 11<<20) // 11 MB
+	err := conn.WriteJSON(map[string]string{
+		"type":    "request",
+		"id":      "big-1",
+		"action":  "health.get",
+		"payload": bigPayload,
+	})
+	if err != nil {
+		// Write might fail if the server closes the connection fast.
+		return
+	}
+	// The next read should fail because the server closed the connection.
+	var resp wsResponseEnvelope
+	err = conn.ReadJSON(&resp)
+	if err == nil {
+		t.Fatal("expected read error after oversize message, got nil")
+	}
+}
+
+func TestServerWebSocketCloseCodeNormalClosure(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	// Send a close frame from client side.
+	msg := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "bye")
+	err := conn.WriteControl(websocket.CloseMessage, msg, time.Now().Add(time.Second))
+	if err != nil {
+		t.Fatalf("write close: %v", err)
+	}
+
+	// Read should get a close error with normal closure code.
+	var dummy wsResponseEnvelope
+	err = conn.ReadJSON(&dummy)
+	if err == nil {
+		t.Fatal("expected close error, got nil")
+	}
+	var closeErr *websocket.CloseError
+	if !errors.As(err, &closeErr) {
+		// Connection closed — acceptable even without a structured close error.
+		return
+	}
+	if closeErr.Code != websocket.CloseNormalClosure {
+		t.Fatalf("close code = %d, want %d", closeErr.Code, websocket.CloseNormalClosure)
+	}
+}
+
+func TestServerWebSocketCloseCodeOnShutdown(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	// Shut down the server — should trigger close code 1001 (GoingAway).
+	ts.Close()
+
+	// Read should get a close error.
+	var dummy wsResponseEnvelope
+	err := conn.ReadJSON(&dummy)
+	if err == nil {
+		t.Fatal("expected close error after shutdown, got nil")
+	}
+	// Accept either a CloseGoingAway or a generic connection close, since
+	// the exact behavior depends on timing between the close frame and
+	// the TCP teardown.
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		if closeErr.Code != websocket.CloseGoingAway && closeErr.Code != websocket.CloseNormalClosure {
+			t.Fatalf("close code = %d, want %d or %d", closeErr.Code, websocket.CloseGoingAway, websocket.CloseNormalClosure)
+		}
+	}
+	// If we didn't get a CloseError, a generic EOF/connection-reset is also acceptable.
+}
+
+func TestServerWebSocketConcurrentDispatch(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	// Fire 5 requests in rapid succession without waiting for responses.
+	for i := 0; i < 5; i++ {
+		writeWSJSON(t, conn, wsRequestEnvelope{
+			Type:   "request",
+			ID:     "concurrent-" + strings.Repeat("0", i) + "1",
+			Action: "health.get",
+		})
+	}
+
+	// Read all 5 responses — they may arrive in any order.
+	received := make(map[string]bool)
+	for i := 0; i < 5; i++ {
+		var resp wsResponseEnvelope
+		readWSJSON(t, conn, &resp)
+		if resp.Type != "response" {
+			t.Fatalf("response %d: type = %q, want response", i, resp.Type)
+		}
+		received[resp.ID] = true
+	}
+
+	for i := 0; i < 5; i++ {
+		id := "concurrent-" + strings.Repeat("0", i) + "1"
+		if !received[id] {
+			t.Errorf("missing response for %s", id)
+		}
+	}
+}
+
+func TestServerWebSocketIdempotencyReplay(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	// Send bead.create with idempotency key.
+	writeWSJSON(t, conn, map[string]any{
+		"type":            "request",
+		"id":              "idem-1",
+		"action":          "bead.create",
+		"idempotency_key": "test-key-abc",
+		"payload":         map[string]any{"title": "test bead", "type": "task"},
+	})
+
+	var resp1 wsResponseEnvelope
+	readWSJSON(t, conn, &resp1)
+	if resp1.Type != "response" || resp1.ID != "idem-1" {
+		t.Fatalf("first create: %#v", resp1)
+	}
+
+	// Send same create again with same idempotency key — should replay.
+	writeWSJSON(t, conn, map[string]any{
+		"type":            "request",
+		"id":              "idem-2",
+		"action":          "bead.create",
+		"idempotency_key": "test-key-abc",
+		"payload":         map[string]any{"title": "test bead", "type": "task"},
+	})
+
+	var resp2 wsResponseEnvelope
+	readWSJSON(t, conn, &resp2)
+	if resp2.Type != "response" || resp2.ID != "idem-2" {
+		t.Fatalf("replay: %#v", resp2)
+	}
+
+	// Both should return the same bead data.
+	if string(resp1.Result) != string(resp2.Result) {
+		t.Errorf("idempotency replay mismatch:\n  first:  %s\n  replay: %s", resp1.Result, resp2.Result)
 	}
 }
 

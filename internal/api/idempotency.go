@@ -153,6 +153,50 @@ func scopedIdemKey(r *http.Request, key string) string {
 	return r.Method + ":" + r.URL.Path + ":" + key
 }
 
+// socketScopedIdemKey returns an idempotency cache key for WebSocket actions.
+// Includes city scope so the same key on a supervisor socket doesn't collide
+// across different cities.
+func socketScopedIdemKey(city, action, key string) string {
+	if key == "" {
+		return ""
+	}
+	return "ws:" + city + ":" + action + ":" + key
+}
+
+// checkIdempotent checks whether a WebSocket request with the given key has
+// already been processed. Returns (result, true) if a cached response exists,
+// or (nil, false) if the caller should proceed and later call completeSocket.
+// Returns an error for in-flight or mismatch conditions.
+func (c *idempotencyCache) checkIdempotent(key, bodyHash string) (any, bool, *socketErrorEnvelope) {
+	if key == "" {
+		return nil, false, nil
+	}
+	existing, found := c.reserve(key, bodyHash)
+	if !found {
+		return nil, false, nil
+	}
+	if existing.bodyHash != bodyHash {
+		return nil, true, &socketErrorEnvelope{
+			Type:    "error",
+			Code:    "idempotency_mismatch",
+			Message: "Idempotency-Key reused with different request body",
+		}
+	}
+	if existing.pending {
+		return nil, true, &socketErrorEnvelope{
+			Type:    "error",
+			Code:    "in_flight",
+			Message: "request with this Idempotency-Key is already in progress",
+		}
+	}
+	// Replay cached response.
+	var result json.RawMessage
+	if len(existing.body) > 0 {
+		result = existing.body
+	}
+	return result, true, nil
+}
+
 // hashBody returns a hex-encoded SHA-256 hash of the JSON-marshaled body.
 func hashBody(v any) string {
 	data, err := json.Marshal(v)

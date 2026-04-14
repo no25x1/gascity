@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -12,7 +11,49 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+
 )
+
+// wsFormulaReq sends a WS request and returns the raw result or fails with error info.
+func wsFormulaReq(t *testing.T, srv *Server, action string, payload map[string]any) json.RawMessage {
+	t.Helper()
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "f-1", Action: action, Payload: payload})
+	var raw map[string]json.RawMessage
+	if err := conn.ReadJSON(&raw); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var msgType string
+	json.Unmarshal(raw["type"], &msgType)
+	if msgType == "error" {
+		var errResp wsErrorEnvelope
+		data, _ := json.Marshal(raw)
+		json.Unmarshal(data, &errResp)
+		t.Fatalf("WS error: %s: %s", errResp.Code, errResp.Message)
+	}
+	var resp wsResponseEnvelope
+	data, _ := json.Marshal(raw)
+	json.Unmarshal(data, &resp)
+	return resp.Result
+}
+
+// wsFormulaErr sends a WS request and expects an error envelope.
+func wsFormulaErr(t *testing.T, srv *Server, action string, payload map[string]any) wsErrorEnvelope {
+	t.Helper()
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "f-err", Action: action, Payload: payload})
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	return errResp
+}
 
 func TestFormulaListReturnsCatalogSummaries(t *testing.T) {
 	state := newFakeState(t)
@@ -35,18 +76,12 @@ title = "Review PR"
 `)
 
 	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/formulas?scope_kind=city&scope_ref=test-city&target=worker", nil)
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
+	result := wsFormulaReq(t, server, "formulas.list", map[string]any{"scope_kind": "city", "scope_ref": "test-city"})
 
 	var resp struct {
 		Items []formulaSummaryResponse `json:"items"`
 	}
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+	if err := json.Unmarshal(result, &resp); err != nil {
 		t.Fatalf("Decode(catalog): %v", err)
 	}
 	if len(resp.Items) != 1 {
@@ -88,18 +123,12 @@ title = "Review PR"
 `)
 
 	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/formulas?scope_kind=city&scope_ref=test-city&target=worker", nil)
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
+	result := wsFormulaReq(t, server, "formulas.list", map[string]any{"scope_kind": "city", "scope_ref": "test-city"})
 
 	var resp struct {
 		Items []formulaSummaryResponse `json:"items"`
 	}
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+	if err := json.Unmarshal(result, &resp); err != nil {
 		t.Fatalf("Decode(catalog): %v", err)
 	}
 	if len(resp.Items) != 1 {
@@ -184,16 +213,10 @@ title = "Review PR"
 	}
 
 	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/formulas/mol-adopt-pr-v2/runs?scope_kind=city&scope_ref=test-city&limit=2", nil)
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
+	result := wsFormulaReq(t, server, "formula.runs", map[string]any{"name": "mol-adopt-pr-v2", "scope_kind": "city", "scope_ref": "test-city", "limit": 2})
 
 	var resp formulaRunsResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+	if err := json.Unmarshal(result, &resp); err != nil {
 		t.Fatalf("Decode(runs): %v", err)
 	}
 	if resp.Formula != "mol-adopt-pr-v2" {
@@ -252,16 +275,10 @@ title = "Review PR"
 	}
 
 	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/formulas/mol-adopt-pr-v2/runs?scope_kind=city&scope_ref=test-city", nil)
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
+	result := wsFormulaReq(t, server, "formula.runs", map[string]any{"name": "mol-adopt-pr-v2", "scope_kind": "city", "scope_ref": "test-city"})
 
 	var resp formulaRunsResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+	if err := json.Unmarshal(result, &resp); err != nil {
 		t.Fatalf("Decode(runs): %v", err)
 	}
 	if resp.RunCount != 0 {
@@ -289,12 +306,9 @@ title = "Review PR"
 `)
 
 	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/formulas/mol-adopt-pr-v2/runs?scope_kind=rig&scope_ref=missing", nil)
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
+	errResp := wsFormulaErr(t, server, "formula.runs", map[string]any{"name": "mol-adopt-pr-v2", "scope_kind": "rig", "scope_ref": "missing"})
+	if errResp.Code != "not_found" {
+		t.Fatalf("code = %q, want not_found", errResp.Code)
 	}
 }
 
@@ -334,18 +348,12 @@ func TestFormulaFeedReturnsWorkflowRunsOnly(t *testing.T) {
 	}
 
 	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/formulas/feed?scope_kind=city&scope_ref=test-city", nil)
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
+	result := wsFormulaReq(t, server, "formulas.feed", map[string]any{"scope_kind": "city", "scope_ref": "test-city"})
 
 	var resp struct {
 		Items []monitorFeedItemResponse `json:"items"`
 	}
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+	if err := json.Unmarshal(result, &resp); err != nil {
 		t.Fatalf("Decode(feed): %v", err)
 	}
 	if len(resp.Items) != 1 {
@@ -395,16 +403,10 @@ title = "Review PR"
 	}
 
 	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/formulas/mol-adopt-pr-v2/runs?scope_kind=city&scope_ref=test-city&limit=9999", nil)
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
+	result := wsFormulaReq(t, server, "formula.runs", map[string]any{"name": "mol-adopt-pr-v2", "scope_kind": "city", "scope_ref": "test-city", "limit": 9999})
 
 	var resp formulaRunsResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+	if err := json.Unmarshal(result, &resp); err != nil {
 		t.Fatalf("Decode(runs): %v", err)
 	}
 	if len(resp.RecentRuns) != maxFormulaRunsLimit {
@@ -450,16 +452,10 @@ title = "Review PR"
 	}
 
 	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/formulas/mol-adopt-pr-v2/runs?scope_kind=city&scope_ref=test-city", nil)
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
+	result := wsFormulaReq(t, server, "formula.runs", map[string]any{"name": "mol-adopt-pr-v2", "scope_kind": "city", "scope_ref": "test-city"})
 
 	var resp formulaRunsResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+	if err := json.Unmarshal(result, &resp); err != nil {
 		t.Fatalf("Decode(runs): %v", err)
 	}
 	if resp.RunCount != 1 {
@@ -503,18 +499,12 @@ func TestFormulaFeedUsesRootOnlyProjectionWithoutChildLookup(t *testing.T) {
 	}
 
 	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/formulas/feed?scope_kind=city&scope_ref=test-city", nil)
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
+	result := wsFormulaReq(t, server, "formulas.feed", map[string]any{"scope_kind": "city", "scope_ref": "test-city"})
 
 	var resp struct {
 		Items []monitorFeedItemResponse `json:"items"`
 	}
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+	if err := json.Unmarshal(result, &resp); err != nil {
 		t.Fatalf("Decode(feed): %v", err)
 	}
 	if len(resp.Items) != 1 {
@@ -574,16 +564,13 @@ metadata = { "gc.kind" = "run", "gc.scope_ref" = "body" }
 `)
 
 	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/formulas/mol-preview?scope_kind=city&scope_ref=test-city&target=worker&var.issue=BD-123", nil)
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
+	result := wsFormulaReq(t, server, "formula.get", map[string]any{
+		"name": "mol-preview", "scope_kind": "city", "scope_ref": "test-city",
+		"target": "worker", "vars": map[string]string{"issue": "BD-123"},
+	})
 
 	var detail formulaDetailResponse
-	if err := json.NewDecoder(rec.Body).Decode(&detail); err != nil {
+	if err := json.Unmarshal(result, &detail); err != nil {
 		t.Fatalf("Decode(detail): %v", err)
 	}
 	if detail.Name != "mol-preview" {
@@ -625,12 +612,11 @@ title = "Prep"
 `)
 
 	server := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/formulas/mol-preview?scope_kind=city&scope_ref=test-city", nil)
-	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+	errResp := wsFormulaErr(t, server, "formula.get", map[string]any{
+		"name": "mol-preview", "scope_kind": "city", "scope_ref": "test-city",
+	})
+	if errResp.Code != "invalid" {
+		t.Fatalf("code = %q, want invalid", errResp.Code)
 	}
 }
 

@@ -583,3 +583,92 @@ func includeFormulaPreviewStep(step formula.RecipeStep, rootID string) bool {
 		return true
 	}
 }
+
+// --- Shared methods for WS dispatch ---
+
+// listFormulas returns the formula catalog for the given scope.
+func (s *Server) listFormulas(scopeKind, scopeRef string) (any, error) {
+	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(scopeKind, scopeRef)
+	if scopeErr != "" {
+		return nil, &httpError{status: 400, code: "invalid", message: scopeErr}
+	}
+	paths, status, code, msg := s.formulaSearchPaths(scopeKind, scopeRef)
+	if status != 200 {
+		return nil, &httpError{status: status, code: code, message: msg}
+	}
+	items, err := buildFormulaCatalog(paths)
+	if err != nil {
+		return nil, &httpError{status: 500, code: "internal", message: "formula catalog failed"}
+	}
+	return map[string]any{"items": items, "partial": false}, nil
+}
+
+// getFormulaRuns returns recent runs for a formula.
+func (s *Server) getFormulaRuns(name, scopeKind, scopeRef string, limit int) (any, error) {
+	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(scopeKind, scopeRef)
+	if scopeErr != "" {
+		return nil, &httpError{status: 400, code: "invalid", message: scopeErr}
+	}
+	if _, status, code, msg := s.formulaSearchPaths(scopeKind, scopeRef); status != 200 {
+		return nil, &httpError{status: status, code: code, message: msg}
+	}
+	if limit <= 0 {
+		limit = defaultFormulaRunsLimit
+	}
+	limit = normalizeFormulaRunsLimit(limit)
+	resp, err := buildFormulaRuns(s.state, name, scopeKind, scopeRef, limit)
+	if err != nil {
+		return nil, &httpError{status: 500, code: "internal", message: "formula runs failed"}
+	}
+	return resp, nil
+}
+
+// getFormulaFeed returns the formula feed for the given scope.
+func (s *Server) getFormulaFeed(scopeKind, scopeRef string, limit int) (any, error) {
+	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(scopeKind, scopeRef)
+	if scopeErr != "" {
+		return nil, &httpError{status: 400, code: "invalid", message: scopeErr}
+	}
+	if _, status, code, msg := s.formulaSearchPaths(scopeKind, scopeRef); status != 200 {
+		return nil, &httpError{status: status, code: code, message: msg}
+	}
+	projections, err := buildWorkflowRunProjectionsRootOnly(s.state, scopeKind, scopeRef)
+	if err != nil {
+		return nil, &httpError{status: 500, code: "internal", message: "formula feed failed"}
+	}
+	items := make([]monitorFeedItemResponse, 0, len(projections.Items))
+	for _, run := range projections.Items {
+		items = append(items, workflowRunProjectionFeedItem(run))
+	}
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	resp := map[string]any{"items": items, "partial": projections.Partial}
+	if len(projections.PartialErrors) > 0 {
+		resp["partial_errors"] = projections.PartialErrors
+	}
+	return resp, nil
+}
+
+// getFormulaDetail returns detail for a specific formula.
+func (s *Server) getFormulaDetail(ctx context.Context, name, scopeKind, scopeRef, target string, vars map[string]string) (any, error) {
+	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(scopeKind, scopeRef)
+	if scopeErr != "" {
+		return nil, &httpError{status: 400, code: "invalid", message: scopeErr}
+	}
+	if target == "" {
+		return nil, &httpError{status: 400, code: "invalid", message: "target is required"}
+	}
+	paths, status, code, msg := s.formulaSearchPaths(scopeKind, scopeRef)
+	if status != 200 {
+		return nil, &httpError{status: status, code: code, message: msg}
+	}
+	detail, err := buildFormulaDetail(ctx, name, paths, target, vars)
+	if err != nil {
+		if errors.Is(err, errFormulaNotWorkflow) || strings.Contains(err.Error(), "not found") {
+			return nil, &httpError{status: 404, code: "not_found", message: err.Error()}
+		}
+		return nil, &httpError{status: 400, code: "invalid", message: err.Error()}
+	}
+	return detail, nil
+}

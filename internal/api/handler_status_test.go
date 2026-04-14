@@ -15,35 +15,36 @@ func TestHandleStatus(t *testing.T) {
 	// Start a fake session so Running > 0.
 	state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/status", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
-	}
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "status-1",
+		Action: "status.get",
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
 
-	var resp statusResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+	var sr statusResponse
+	if err := json.Unmarshal(resp.Result, &sr); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp.Name != "test-city" {
-		t.Errorf("Name = %q, want %q", resp.Name, "test-city")
+	if sr.Name != "test-city" {
+		t.Errorf("Name = %q, want %q", sr.Name, "test-city")
 	}
-	if resp.AgentCount != 1 {
-		t.Errorf("AgentCount = %d, want 1", resp.AgentCount)
+	if sr.AgentCount != 1 {
+		t.Errorf("AgentCount = %d, want 1", sr.AgentCount)
 	}
-	if resp.RigCount != 1 {
-		t.Errorf("RigCount = %d, want 1", resp.RigCount)
+	if sr.RigCount != 1 {
+		t.Errorf("RigCount = %d, want 1", sr.RigCount)
 	}
-	if resp.Running != 1 {
-		t.Errorf("Running = %d, want 1", resp.Running)
-	}
-
-	// Check X-GC-Index header is present.
-	if rec.Header().Get("X-GC-Index") == "" {
-		t.Error("missing X-GC-Index header")
+	if sr.Running != 1 {
+		t.Errorf("Running = %d, want 1", sr.Running)
 	}
 }
 
@@ -51,35 +52,45 @@ func TestHandleStatusEnriched(t *testing.T) {
 	state := newFakeState(t)
 	state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/status", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	var resp statusResponse
-	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "status-e",
+		Action: "status.get",
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+
+	var sr statusResponse
+	json.Unmarshal(resp.Result, &sr) //nolint:errcheck
 
 	// Version from fakeState.
-	if resp.Version != "test" {
-		t.Errorf("Version = %q, want %q", resp.Version, "test")
+	if sr.Version != "test" {
+		t.Errorf("Version = %q, want %q", sr.Version, "test")
 	}
 
 	// Uptime should be >= 0.
-	if resp.UptimeSec < 0 {
-		t.Errorf("UptimeSec = %d, want >= 0", resp.UptimeSec)
+	if sr.UptimeSec < 0 {
+		t.Errorf("UptimeSec = %d, want >= 0", sr.UptimeSec)
 	}
 
 	// Agent counts.
-	if resp.Agents.Total != 1 {
-		t.Errorf("Agents.Total = %d, want 1", resp.Agents.Total)
+	if sr.Agents.Total != 1 {
+		t.Errorf("Agents.Total = %d, want 1", sr.Agents.Total)
 	}
-	if resp.Agents.Running != 1 {
-		t.Errorf("Agents.Running = %d, want 1", resp.Agents.Running)
+	if sr.Agents.Running != 1 {
+		t.Errorf("Agents.Running = %d, want 1", sr.Agents.Running)
 	}
 
 	// Rig counts.
-	if resp.Rigs.Total != 1 {
-		t.Errorf("Rigs.Total = %d, want 1", resp.Rigs.Total)
+	if sr.Rigs.Total != 1 {
+		t.Errorf("Rigs.Total = %d, want 1", sr.Rigs.Total)
 	}
 }
 
@@ -87,6 +98,7 @@ func TestHandleHealth(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)
 
+	// /health stays on HTTP — it is not a /v0/* route.
 	req := httptest.NewRequest("GET", "/health", nil)
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
@@ -116,20 +128,26 @@ func TestHandleStatus_Suspended(t *testing.T) {
 	state := newFakeState(t)
 	state.cfg.Workspace.Suspended = true
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/status", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
-	}
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "status-susp",
+		Action: "status.get",
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
 
-	var resp statusResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+	var sr statusResponse
+	if err := json.Unmarshal(resp.Result, &sr); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if !resp.Suspended {
+	if !sr.Suspended {
 		t.Error("expected suspended=true in status response")
 	}
 }

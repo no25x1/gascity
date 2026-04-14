@@ -38,6 +38,7 @@ type ConvoyData struct {
 	Summary       *Summary
 	Expand        string // Panel to show fullscreen (from ?expand=name)
 	CSRFToken     string // Token for CSRF protection on POST requests
+	APIURL        string // API server URL for browser-direct WebSocket connection
 
 	// Supervisor mode: city selector.
 	Cities       []CityTab // all managed cities (empty in standalone mode)

@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -19,34 +18,40 @@ func TestHandleConfigGet(t *testing.T) {
 		"custom": {DisplayName: "Custom", Command: "custom-cli"},
 	}
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/config", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
-	}
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "config-1",
+		Action: "config.get",
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
 
-	var resp configResponse
-	json.NewDecoder(w.Body).Decode(&resp) //nolint:errcheck
+	var cr configResponse
+	json.Unmarshal(resp.Result, &cr) //nolint:errcheck
 
-	if resp.Workspace.Name != "test-city" {
-		t.Errorf("workspace.name = %q, want %q", resp.Workspace.Name, "test-city")
+	if cr.Workspace.Name != "test-city" {
+		t.Errorf("workspace.name = %q, want %q", cr.Workspace.Name, "test-city")
 	}
-	if resp.Workspace.Provider != "claude" {
-		t.Errorf("workspace.provider = %q, want %q", resp.Workspace.Provider, "claude")
+	if cr.Workspace.Provider != "claude" {
+		t.Errorf("workspace.provider = %q, want %q", cr.Workspace.Provider, "claude")
 	}
-	if len(resp.Agents) != 1 {
-		t.Errorf("agents count = %d, want 1", len(resp.Agents))
+	if len(cr.Agents) != 1 {
+		t.Errorf("agents count = %d, want 1", len(cr.Agents))
 	}
-	if !resp.Agents[0].IsPool {
+	if !cr.Agents[0].IsPool {
 		t.Error("expected config agent to expose is_pool=true")
 	}
-	if len(resp.Rigs) != 1 {
-		t.Errorf("rigs count = %d, want 1", len(resp.Rigs))
+	if len(cr.Rigs) != 1 {
+		t.Errorf("rigs count = %d, want 1", len(cr.Rigs))
 	}
-	if _, ok := resp.Providers["custom"]; !ok {
+	if _, ok := cr.Providers["custom"]; !ok {
 		t.Error("expected 'custom' in providers")
 	}
 }
@@ -54,18 +59,24 @@ func TestHandleConfigGet(t *testing.T) {
 func TestHandleConfigGet_NoPatches(t *testing.T) {
 	fs := newFakeState(t)
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/config", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
-	}
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "config-np",
+		Action: "config.get",
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
 
 	// Patches should be omitted when empty.
 	var raw map[string]any
-	json.NewDecoder(w.Body).Decode(&raw) //nolint:errcheck
+	json.Unmarshal(resp.Result, &raw) //nolint:errcheck
 	if _, ok := raw["patches"]; ok {
 		t.Error("expected patches to be omitted when empty")
 	}
@@ -77,22 +88,28 @@ func TestHandleConfigGet_WithPatches(t *testing.T) {
 		{Dir: "rig1", Name: "worker"},
 	}
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/config", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
-	}
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "config-wp",
+		Action: "config.get",
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
 
-	var resp configResponse
-	json.NewDecoder(w.Body).Decode(&resp) //nolint:errcheck
-	if resp.Patches == nil {
+	var cr configResponse
+	json.Unmarshal(resp.Result, &cr) //nolint:errcheck
+	if cr.Patches == nil {
 		t.Fatal("expected patches to be present")
 	}
-	if resp.Patches.AgentCount != 1 {
-		t.Errorf("patches.agent_count = %d, want 1", resp.Patches.AgentCount)
+	if cr.Patches.AgentCount != 1 {
+		t.Errorf("patches.agent_count = %d, want 1", cr.Patches.AgentCount)
 	}
 }
 
@@ -104,20 +121,26 @@ func TestHandleConfigExplain(t *testing.T) {
 		"claude": {DisplayName: "My Claude", Command: "my-claude"},
 	}
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/config/explain", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
-	}
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "explain-1",
+		Action: "config.explain",
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
 
-	var resp map[string]any
-	json.NewDecoder(w.Body).Decode(&resp) //nolint:errcheck
+	var result map[string]any
+	json.Unmarshal(resp.Result, &result) //nolint:errcheck
 
 	// Check agents have origin annotations.
-	agents, ok := resp["agents"].([]any)
+	agents, ok := result["agents"].([]any)
 	if !ok {
 		t.Fatal("expected agents array")
 	}
@@ -133,7 +156,7 @@ func TestHandleConfigExplain(t *testing.T) {
 	}
 
 	// Check providers have origin annotations.
-	providers, ok := resp["providers"].(map[string]any)
+	providers, ok := result["providers"].(map[string]any)
 	if !ok {
 		t.Fatal("expected providers map")
 	}
@@ -151,18 +174,24 @@ func TestHandleConfigExplain(t *testing.T) {
 func TestHandleConfigValidate_Valid(t *testing.T) {
 	fs := newFakeState(t)
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/config/validate", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
-	}
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "validate-1",
+		Action: "config.validate",
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
 
-	var resp map[string]any
-	json.NewDecoder(w.Body).Decode(&resp) //nolint:errcheck
-	if resp["valid"] != true {
+	var result map[string]any
+	json.Unmarshal(resp.Result, &result) //nolint:errcheck
+	if result["valid"] != true {
 		t.Error("expected valid=true for well-formed config")
 	}
 }
@@ -172,24 +201,30 @@ func TestHandleConfigValidate_WithWarnings(t *testing.T) {
 	// Agent references a nonexistent provider — should produce a warning.
 	fs.cfg.Agents[0].Provider = "nonexistent-provider"
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/config/validate", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
-	}
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "validate-warn",
+		Action: "config.validate",
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
 
-	var resp map[string]any
-	json.NewDecoder(w.Body).Decode(&resp) //nolint:errcheck
+	var result map[string]any
+	json.Unmarshal(resp.Result, &result) //nolint:errcheck
 
 	// Config is still valid (warnings are non-fatal).
-	if resp["valid"] != true {
+	if result["valid"] != true {
 		t.Error("expected valid=true (warnings are non-fatal)")
 	}
 
-	warnings, ok := resp["warnings"].([]any)
+	warnings, ok := result["warnings"].([]any)
 	if !ok || len(warnings) == 0 {
 		t.Error("expected at least one warning for unknown provider")
 	}
@@ -202,27 +237,31 @@ func TestHandleConfigValidate_InvalidServiceRuntimeSupport(t *testing.T) {
 		Workflow: config.ServiceWorkflowConfig{Contract: "missing.contract"},
 	}}
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/config/validate", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
-	}
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "validate-svc",
+		Action: "config.validate",
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
 
-	var resp struct {
+	var result struct {
 		Valid  bool     `json:"valid"`
 		Errors []string `json:"errors"`
 	}
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode validate response: %v", err)
-	}
-	if resp.Valid {
+	json.Unmarshal(resp.Result, &result) //nolint:errcheck
+	if result.Valid {
 		t.Fatal("expected valid=false for unsupported service runtime")
 	}
-	if len(resp.Errors) == 0 || !strings.Contains(resp.Errors[0], `unsupported workflow contract`) {
-		t.Fatalf("errors = %#v, want unsupported workflow contract", resp.Errors)
+	if len(result.Errors) == 0 || !strings.Contains(result.Errors[0], `unsupported workflow contract`) {
+		t.Fatalf("errors = %#v, want unsupported workflow contract", result.Errors)
 	}
 }
 
@@ -239,18 +278,24 @@ func TestHandleConfigExplain_PackDerivedAgent(t *testing.T) {
 		},
 	}
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/config/explain", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
-	}
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "explain-pack",
+		Action: "config.explain",
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
 
-	var resp map[string]any
-	json.NewDecoder(w.Body).Decode(&resp) //nolint:errcheck
-	agents := resp["agents"].([]any)
+	var result map[string]any
+	json.Unmarshal(resp.Result, &result) //nolint:errcheck
+	agents := result["agents"].([]any)
 	agent0 := agents[0].(map[string]any)
 	if agent0["origin"] != "pack-derived" {
 		t.Errorf("agent origin = %q, want %q", agent0["origin"], "pack-derived")

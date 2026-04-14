@@ -1100,3 +1100,230 @@ func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter
 func (s *Server) streamSessionPeek(ctx context.Context, w http.ResponseWriter, info session.Info) {
 	s.streamSessionPeekWithEmitter(ctx, newSSESessionStreamEmitter(w), info)
 }
+
+// createSessionInternal implements session creation for the WebSocket transport.
+// Returns the session response or an error. Handles agent and provider kinds.
+func (s *Server) createSessionInternal(ctx context.Context, body sessionCreateRequest, idemKey string) (any, int, error) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return nil, 0, httpError{status: 503, code: "unavailable", message: "no bead store configured"}
+	}
+	if body.LegacySessionName != nil {
+		return nil, 0, httpError{status: 400, code: "invalid", message: "session_name is no longer accepted; use alias"}
+	}
+
+	// WS idempotency is handled at the dispatch layer; we use an empty
+	// idemKey here so the internal helpers don't touch the HTTP cache.
+	_ = idemKey
+
+	alias, err := session.ValidateAlias(body.Alias)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	switch body.Kind {
+	case "agent":
+		return s.createAgentSessionInternal(ctx, store, body, alias)
+	case "provider":
+		return s.createProviderSessionInternal(ctx, store, body, alias)
+	default:
+		return nil, 0, httpError{status: 400, code: "invalid_kind", message: "kind must be 'agent' or 'provider'"}
+	}
+}
+
+func (s *Server) createAgentSessionInternal(ctx context.Context, store beads.Store, body sessionCreateRequest, alias string) (any, int, error) {
+	resolved, workDir, transport, template, err := s.resolveSessionTemplate(body.Name)
+	if err != nil {
+		if errors.Is(err, errSessionTemplateNotFound) {
+			return nil, 0, httpError{status: 404, code: "agent_not_found", message: "agent '" + body.Name + "' not found"}
+		}
+		return nil, 0, err
+	}
+
+	if len(body.Options) > 0 {
+		if len(resolved.OptionsSchema) == 0 {
+			return nil, 0, httpError{status: 400, code: "unknown_option", message: "agent '" + body.Name + "' does not accept options"}
+		}
+		if _, err := config.ResolveExplicitOptions(resolved.OptionsSchema, body.Options); err != nil {
+			if errors.Is(err, config.ErrUnknownOption) {
+				return nil, 0, httpError{status: 400, code: "unknown_option", message: err.Error()}
+			}
+			return nil, 0, httpError{status: 400, code: "invalid_option_value", message: err.Error()}
+		}
+	}
+
+	title := body.Title
+	if title == "" {
+		title = template
+	}
+
+	command := resolved.CommandString()
+	if len(resolved.OptionsSchema) > 0 {
+		mergedOptions := make(map[string]string)
+		for k, v := range resolved.EffectiveDefaults {
+			mergedOptions[k] = v
+		}
+		for k, v := range body.Options {
+			mergedOptions[k] = v
+		}
+		if mergedArgs, mergeErr := config.ResolveExplicitOptions(resolved.OptionsSchema, mergedOptions); mergeErr == nil && len(mergedArgs) > 0 {
+			command = config.ReplaceSchemaFlags(command, resolved.OptionsSchema, mergedArgs)
+		}
+	}
+
+	allOverrides := make(map[string]string)
+	for k, v := range body.Options {
+		allOverrides[k] = v
+	}
+	if msg := strings.TrimSpace(body.Message); msg != "" {
+		allOverrides["initial_message"] = msg
+	}
+	var extraMeta map[string]string
+	if len(allOverrides) > 0 {
+		if overridesJSON, jsonErr := json.Marshal(allOverrides); jsonErr == nil {
+			extraMeta = map[string]string{"template_overrides": string(overridesJSON)}
+		}
+	}
+
+	resume := session.ProviderResume{
+		ResumeFlag:    resolved.ResumeFlag,
+		ResumeStyle:   resolved.ResumeStyle,
+		ResumeCommand: resolved.ResumeCommand,
+		SessionIDFlag: resolved.SessionIDFlag,
+	}
+
+	mgr := s.sessionManager(store)
+	var info session.Info
+	err = session.WithCitySessionAliasLock(s.state.CityPath(), alias, func() error {
+		if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); err != nil {
+			return err
+		}
+		var createErr error
+		info, createErr = mgr.CreateAliasedBeadOnlyNamedWithMetadata(
+			alias, "", template, title, command, workDir,
+			resolved.Name, transport, resume, extraMeta,
+		)
+		return createErr
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+
+	s.persistSessionMeta(store, info.ID, "agent", body.ProjectID, nil)
+	s.state.Poke()
+
+	titleProvider := s.resolveTitleProvider()
+	MaybeGenerateTitleAsync(store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, "session %s: "+format+"\n", append([]any{info.ID}, args...)...)
+	})
+
+	resp := sessionToResponse(info, s.state.Config())
+	resp.Kind = "agent"
+	if caps, capErr := mgr.SubmissionCapabilities(info.ID); capErr == nil {
+		resp.SubmissionCapabilities = caps
+	}
+	s.enrichSessionResponse(&resp, info, s.state.Config(), s.state.SessionProvider(), false)
+	return resp, 202, nil
+}
+
+func (s *Server) createProviderSessionInternal(ctx context.Context, store beads.Store, body sessionCreateRequest, alias string) (any, int, error) {
+	cfg := s.state.Config()
+	if cfg == nil {
+		return nil, 0, httpError{status: 503, code: "unavailable", message: "city config not loaded yet"}
+	}
+	resolved, err := config.ResolveProvider(
+		&config.Agent{Provider: body.Name},
+		&cfg.Workspace,
+		cfg.Providers,
+		exec.LookPath,
+	)
+	if err != nil {
+		if errors.Is(err, config.ErrProviderNotInPATH) {
+			return nil, 0, httpError{status: 503, code: "provider_unavailable", message: err.Error()}
+		}
+		if errors.Is(err, config.ErrProviderNotFound) {
+			return nil, 0, httpError{status: 404, code: "provider_not_found", message: "provider '" + body.Name + "' not found"}
+		}
+		return nil, 0, err
+	}
+
+	var extraArgs []string
+	var optMeta map[string]string
+	if len(body.Options) > 0 && len(resolved.OptionsSchema) == 0 {
+		return nil, 0, httpError{status: 400, code: "unknown_option", message: "provider '" + body.Name + "' does not accept options"}
+	}
+	if len(resolved.OptionsSchema) > 0 {
+		var optErr error
+		extraArgs, optMeta, optErr = config.ResolveOptions(resolved.OptionsSchema, body.Options, resolved.EffectiveDefaults)
+		if optErr != nil {
+			if errors.Is(optErr, config.ErrUnknownOption) {
+				return nil, 0, httpError{status: 400, code: "unknown_option", message: optErr.Error()}
+			}
+			return nil, 0, httpError{status: 400, code: "invalid_option_value", message: optErr.Error()}
+		}
+	}
+
+	template := body.Name
+	title := body.Title
+	if title == "" {
+		title = resolved.Name
+	}
+	if body.Async && strings.TrimSpace(body.Message) != "" {
+		return nil, 0, httpError{status: 400, code: "invalid", message: "message is not supported with async session creation"}
+	}
+	if body.Async {
+		return nil, 0, httpError{status: 400, code: "invalid", message: "async session creation is only supported for configured agent templates"}
+	}
+
+	workDir := s.state.CityPath()
+	command := resolved.CommandString()
+	if len(extraArgs) > 0 {
+		command = command + " " + shellquote.Join(extraArgs)
+	}
+
+	resume := session.ProviderResume{
+		ResumeFlag:    resolved.ResumeFlag,
+		ResumeStyle:   resolved.ResumeStyle,
+		ResumeCommand: resolved.ResumeCommand,
+		SessionIDFlag: resolved.SessionIDFlag,
+	}
+
+	hints := sessionCreateHints(resolved)
+	mgr := s.sessionManager(store)
+	var info session.Info
+	err = session.WithCitySessionAliasLock(s.state.CityPath(), alias, func() error {
+		if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), alias, ""); err != nil {
+			return err
+		}
+		var createErr error
+		info, createErr = mgr.CreateAliasedNamedWithTransport(
+			ctx, alias, "", template, title, command, workDir,
+			resolved.Name, "", resolved.Env, resume, hints,
+		)
+		return createErr
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+
+	s.persistSessionMeta(store, info.ID, "provider", body.ProjectID, optMeta)
+
+	titleProvider := s.resolveTitleProvider()
+	MaybeGenerateTitleAsync(store, info.ID, body.Title, body.Message, titleProvider, info.WorkDir, func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, "session %s: "+format+"\n", append([]any{info.ID}, args...)...)
+	})
+
+	if msg := strings.TrimSpace(body.Message); msg != "" {
+		if _, sendErr := s.submitMessageToSession(ctx, store, info.ID, msg, session.SubmitIntentDefault); sendErr != nil {
+			return nil, 0, httpError{status: 500, code: "message_delivery_failed", message: fmt.Sprintf("session created but initial message failed: %v", sendErr)}
+		}
+	}
+
+	resp := sessionToResponse(info, s.state.Config())
+	resp.Kind = "provider"
+	if caps, capErr := mgr.SubmissionCapabilities(info.ID); capErr == nil {
+		resp.SubmissionCapabilities = caps
+	}
+	s.enrichSessionResponse(&resp, info, s.state.Config(), s.state.SessionProvider(), false)
+	return resp, 201, nil
+}

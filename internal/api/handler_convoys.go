@@ -388,3 +388,134 @@ func (s *Server) handleConvoyClose(w http.ResponseWriter, r *http.Request) {
 	}
 	writeError(w, http.StatusNotFound, "not_found", "convoy "+id+" not found")
 }
+
+// --- Shared methods for WS dispatch ---
+
+type convoyCreateRequest struct {
+	Rig   string   `json:"rig"`
+	Title string   `json:"title"`
+	Items []string `json:"items"`
+}
+
+func (s *Server) createConvoy(body convoyCreateRequest) (any, error) {
+	if body.Title == "" {
+		return nil, httpError{status: 400, code: "invalid", message: "title is required"}
+	}
+	store := s.findStore(body.Rig)
+	if store == nil {
+		return nil, httpError{status: 400, code: "invalid", message: "rig is required when multiple rigs are configured"}
+	}
+	for _, itemID := range body.Items {
+		if _, err := store.Get(itemID); err != nil {
+			return nil, err
+		}
+	}
+	convoy, err := store.Create(beads.Bead{Title: body.Title, Type: "convoy"})
+	if err != nil {
+		return nil, err
+	}
+	for _, itemID := range body.Items {
+		pid := convoy.ID
+		if err := store.Update(itemID, beads.UpdateOpts{ParentID: &pid}); err != nil {
+			return nil, err
+		}
+	}
+	return convoy, nil
+}
+
+func (s *Server) findConvoyStore(id string) (beads.Store, *beads.Bead, error) {
+	stores := s.state.BeadStores()
+	for _, rigName := range sortedRigNames(stores) {
+		store := stores[rigName]
+		b, err := store.Get(id)
+		if err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			return nil, nil, err
+		}
+		if b.Type != "convoy" {
+			return nil, nil, httpError{status: 400, code: "invalid", message: "bead " + id + " is not a convoy"}
+		}
+		return store, &b, nil
+	}
+	return nil, nil, httpError{status: 404, code: "not_found", message: "convoy " + id + " not found"}
+}
+
+func (s *Server) convoyAddItems(id string, items []string) error {
+	store, _, err := s.findConvoyStore(id)
+	if err != nil {
+		return err
+	}
+	for _, itemID := range items {
+		if _, err := store.Get(itemID); err != nil {
+			return err
+		}
+	}
+	for _, itemID := range items {
+		pid := id
+		if err := store.Update(itemID, beads.UpdateOpts{ParentID: &pid}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) convoyRemoveItems(id string, items []string) error {
+	store, _, err := s.findConvoyStore(id)
+	if err != nil {
+		return err
+	}
+	for _, itemID := range items {
+		item, err := store.Get(itemID)
+		if err != nil {
+			return err
+		}
+		if item.ParentID != id {
+			return httpError{status: 400, code: "invalid", message: "item " + itemID + " does not belong to convoy " + id}
+		}
+	}
+	empty := ""
+	for _, itemID := range items {
+		if err := store.Update(itemID, beads.UpdateOpts{ParentID: &empty}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) convoyCheck(id string) (any, error) {
+	store, _, err := s.findConvoyStore(id)
+	if err != nil {
+		return nil, err
+	}
+	_ = store // used for find; check uses list
+	children, err := store.List(beads.ListQuery{ParentID: id, IncludeClosed: true, Sort: beads.SortCreatedAsc})
+	if err != nil {
+		return nil, err
+	}
+	total := len(children)
+	closed := 0
+	for _, c := range children {
+		if c.Status == "closed" {
+			closed++
+		}
+	}
+	return map[string]any{"convoy_id": id, "total": total, "closed": closed, "complete": total > 0 && closed == total}, nil
+}
+
+func (s *Server) convoyClose(id string) error {
+	store, _, err := s.findConvoyStore(id)
+	if err != nil {
+		return err
+	}
+	return store.Close(id)
+}
+
+func (s *Server) convoyDelete(id string) error {
+	store, _, err := s.findConvoyStore(id)
+	if err != nil {
+		return err
+	}
+	return store.Close(id)
+}

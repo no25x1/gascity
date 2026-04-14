@@ -56,6 +56,13 @@ type recorderInstruments struct {
 	// HTTP API request instrumentation
 	httpRequestTotal    metric.Int64Counter
 	httpRequestDuration metric.Float64Histogram
+
+	// WebSocket transport instrumentation
+	wsRequestTotal       metric.Int64Counter
+	wsRequestDuration    metric.Float64Histogram
+	wsActiveConnections  metric.Int64UpDownCounter
+	wsActiveSubscriptions metric.Int64UpDownCounter
+	wsErrorsTotal        metric.Int64Counter
 }
 
 var (
@@ -143,6 +150,24 @@ func initInstruments() {
 		inst.httpRequestDuration, _ = m.Float64Histogram("gc.http.duration_ms",
 			metric.WithDescription("HTTP API request latency in milliseconds"),
 			metric.WithUnit("ms"),
+		)
+
+		// WebSocket transport instrumentation
+		inst.wsRequestTotal, _ = m.Int64Counter("gc.ws.requests.total",
+			metric.WithDescription("Total WebSocket API requests"),
+		)
+		inst.wsRequestDuration, _ = m.Float64Histogram("gc.ws.duration_ms",
+			metric.WithDescription("WebSocket API request latency in milliseconds"),
+			metric.WithUnit("ms"),
+		)
+		inst.wsActiveConnections, _ = m.Int64UpDownCounter("gc.ws.active_connections",
+			metric.WithDescription("Number of active WebSocket connections"),
+		)
+		inst.wsActiveSubscriptions, _ = m.Int64UpDownCounter("gc.ws.active_subscriptions",
+			metric.WithDescription("Number of active WebSocket subscriptions"),
+		)
+		inst.wsErrorsTotal, _ = m.Int64Counter("gc.ws.errors.total",
+			metric.WithDescription("Total WebSocket errors by code"),
 		)
 	})
 }
@@ -504,6 +529,38 @@ func RecordHTTPRequest(ctx context.Context, method, route string, status int, du
 		otellog.String("data_source", dataSource),
 		otellog.String("status_class", statusStr),
 	)
+}
+
+// RecordWebSocketRequest records a WebSocket API action dispatch.
+func RecordWebSocketRequest(ctx context.Context, action string, errCode string, durationMs float64) {
+	initInstruments()
+	status := "ok"
+	if errCode != "" {
+		status = "error"
+	}
+	attrs := metric.WithAttributes(
+		attribute.String("action", action),
+		attribute.String("status", status),
+	)
+	inst.wsRequestTotal.Add(ctx, 1, attrs)
+	inst.wsRequestDuration.Record(ctx, durationMs, attrs)
+	if errCode != "" {
+		inst.wsErrorsTotal.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("code", errCode),
+		))
+	}
+}
+
+// RecordWebSocketConnection increments/decrements the active connections gauge.
+func RecordWebSocketConnection(ctx context.Context, delta int64) {
+	initInstruments()
+	inst.wsActiveConnections.Add(ctx, delta)
+}
+
+// RecordWebSocketSubscription increments/decrements the active subscriptions gauge.
+func RecordWebSocketSubscription(ctx context.Context, delta int64) {
+	initInstruments()
+	inst.wsActiveSubscriptions.Add(ctx, delta)
 }
 
 // RecordDrainTransition records a drain lifecycle transition (metrics + log event).

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -54,18 +55,29 @@ func ShouldFallback(err error) bool {
 	return errors.As(err, &ro)
 }
 
-// Client is an HTTP client for the Gas City API server.
-// It wraps mutation endpoints so CLI commands can route writes
-// through the API when a controller is running.
+// wsClientResult carries either a response or an error from the background
+// reader to the waiting request goroutine.
+type wsClientResult struct {
+	resp socketClientResponseEnvelope
+	err  error
+}
+
+// Client is a WebSocket client for the Gas City API server.
+// All API operations go through the persistent WebSocket connection.
+// The client auto-reconnects with exponential backoff on failure.
 type Client struct {
 	baseURL     string
 	scopePrefix string
 	socketScope *socketScope
-	httpClient  *http.Client
+	httpClient  *http.Client // retained for HTTP-only operational endpoints
 	wsMu        sync.Mutex
 	wsConn      *websocket.Conn
-	wsDisabled  bool
+	wsFailCount int
+	wsBackoff   time.Time // don't attempt WS before this time
 	nextReqID   uint64
+	// Concurrent WebSocket transport.
+	wsReaderDone chan struct{}
+	pending      sync.Map // map[string]chan wsClientResult
 }
 
 // SessionSubmitResponse mirrors POST /v0/session/{id}/submit.
@@ -296,6 +308,17 @@ func escapeName(name string) string {
 	return strings.Join(parts, "/")
 }
 
+func unescapeName(name string) string {
+	parts := strings.Split(name, "/")
+	for i, p := range parts {
+		unescaped, err := url.PathUnescape(p)
+		if err == nil {
+			parts[i] = unescaped
+		}
+	}
+	return strings.Join(parts, "/")
+}
+
 // doMutation sends a mutation request and checks for errors.
 func (c *Client) doMutation(method, path string, body any) error {
 	var bodyReader io.Reader
@@ -504,79 +527,171 @@ type socketClientResponseEnvelope struct {
 	Result json.RawMessage `json:"result,omitempty"`
 }
 
-func (c *Client) doSocketRequest(action string, scope *socketScope, payload any) (socketClientResponseEnvelope, bool, error) {
+// wsBackoffDuration returns the backoff duration for the given failure count.
+func wsBackoffDuration(failCount int) time.Duration {
+	d := time.Second
+	for i := 1; i < failCount && d < 30*time.Second; i++ {
+		d *= 2
+	}
+	if d > 30*time.Second {
+		d = 30 * time.Second
+	}
+	return d
+}
+
+// Close shuts down the WebSocket connection and waits for the reader to exit.
+func (c *Client) Close() {
 	c.wsMu.Lock()
 	defer c.wsMu.Unlock()
+	if c.wsConn != nil {
+		_ = c.wsConn.Close()
+		c.wsConn = nil
+	}
+	if c.wsReaderDone != nil {
+		<-c.wsReaderDone
+	}
+}
 
-	if c.wsDisabled {
-		return socketClientResponseEnvelope{}, false, nil
+func (c *Client) doSocketRequest(action string, scope *socketScope, payload any) (socketClientResponseEnvelope, bool, error) {
+	c.wsMu.Lock()
+
+	// Backoff: if we've failed recently, fall back to HTTP during coexistence.
+	if !c.wsBackoff.IsZero() && time.Now().Before(c.wsBackoff) {
+		c.wsMu.Unlock()
+		return socketClientResponseEnvelope{}, false, nil // not used → caller falls back to HTTP
 	}
+
 	if err := c.ensureWSConnLocked(); err != nil {
-		c.wsDisabled = true
-		return socketClientResponseEnvelope{}, false, nil
+		c.wsFailCount++
+		c.wsBackoff = time.Now().Add(wsBackoffDuration(c.wsFailCount))
+		c.wsMu.Unlock()
+		log.Printf("api: ws connect failed (attempt %d, backoff %s): %v", c.wsFailCount, wsBackoffDuration(c.wsFailCount), err)
+		return socketClientResponseEnvelope{}, false, nil // not used → caller falls back to HTTP
 	}
+	// Successful connection — reset backoff.
+	c.wsFailCount = 0
+	c.wsBackoff = time.Time{}
 
 	c.nextReqID++
+	reqID := fmt.Sprintf("cli-%d", c.nextReqID)
 	req := socketRequestEnvelope{
 		Type:   "request",
-		ID:     fmt.Sprintf("cli-%d", c.nextReqID),
+		ID:     reqID,
 		Action: action,
 		Scope:  scope,
 	}
 	if payload != nil {
 		data, err := json.Marshal(payload)
 		if err != nil {
+			c.wsMu.Unlock()
 			return socketClientResponseEnvelope{}, true, fmt.Errorf("marshal websocket payload: %w", err)
 		}
 		req.Payload = data
 	}
 
+	// Register pending channel before writing so the reader can route the response.
+	ch := make(chan wsClientResult, 1)
+	c.pending.Store(reqID, ch)
+
 	if err := c.wsConn.WriteJSON(req); err != nil {
+		c.pending.Delete(reqID)
 		_ = c.wsConn.Close()
 		c.wsConn = nil
-		return socketClientResponseEnvelope{}, true, &connError{err: fmt.Errorf("websocket request failed: %w", err)}
+		c.wsFailCount++
+		c.wsBackoff = time.Now().Add(wsBackoffDuration(c.wsFailCount))
+		c.wsMu.Unlock()
+		return socketClientResponseEnvelope{}, true, &connError{err: fmt.Errorf("websocket write failed: %w", err)}
 	}
 
-	var raw map[string]json.RawMessage
-	if err := c.wsConn.ReadJSON(&raw); err != nil {
-		_ = c.wsConn.Close()
-		c.wsConn = nil
-		return socketClientResponseEnvelope{}, true, &connError{err: fmt.Errorf("websocket read failed: %w", err)}
-	}
+	// Unlock immediately after write — the background reader will route the response.
+	c.wsMu.Unlock()
 
-	var msgType string
-	if err := json.Unmarshal(raw["type"], &msgType); err != nil {
-		return socketClientResponseEnvelope{}, true, fmt.Errorf("decode websocket type: %w", err)
+	// Wait for correlated response with timeout.
+	select {
+	case result := <-ch:
+		if result.err != nil {
+			return socketClientResponseEnvelope{}, true, result.err
+		}
+		return result.resp, true, nil
+	case <-time.After(30 * time.Second):
+		c.pending.Delete(reqID)
+		return socketClientResponseEnvelope{}, true, &connError{err: fmt.Errorf("websocket request timeout")}
 	}
-	switch msgType {
-	case "response":
-		var resp socketClientResponseEnvelope
-		if err := decodeRawMessage(raw, &resp); err != nil {
-			return socketClientResponseEnvelope{}, true, err
+}
+
+// wsReadLoop is the background reader goroutine. It reads all incoming
+// messages and dispatches responses/errors to the appropriate pending
+// request channel by ID.
+func (c *Client) wsReadLoop() {
+	defer close(c.wsReaderDone)
+	for {
+		var raw map[string]json.RawMessage
+		if err := c.wsConn.ReadJSON(&raw); err != nil {
+			// Connection died — notify all pending requests.
+			connErr := &connError{err: fmt.Errorf("websocket read failed: %w", err)}
+			c.pending.Range(func(key, val any) bool {
+				ch := val.(chan wsClientResult)
+				select {
+				case ch <- wsClientResult{err: connErr}:
+				default:
+				}
+				return true
+			})
+			c.wsMu.Lock()
+			c.wsConn = nil
+			c.wsFailCount++
+			c.wsBackoff = time.Now().Add(wsBackoffDuration(c.wsFailCount))
+			c.wsMu.Unlock()
+			return
 		}
-		return resp, true, nil
-	case "error":
-		var resp socketErrorEnvelope
-		if err := decodeRawMessage(raw, &resp); err != nil {
-			return socketClientResponseEnvelope{}, true, err
+
+		var msgType string
+		if t, ok := raw["type"]; ok {
+			_ = json.Unmarshal(t, &msgType)
 		}
-		if resp.Code == "read_only" {
-			msg := resp.Message
-			if msg == "" {
-				msg = "mutations disabled (read-only server)"
+
+		switch msgType {
+		case "response":
+			var resp socketClientResponseEnvelope
+			if err := decodeRawMessage(raw, &resp); err != nil {
+				continue
 			}
-			return socketClientResponseEnvelope{}, true, &readOnlyError{msg: msg}
+			if val, ok := c.pending.LoadAndDelete(resp.ID); ok {
+				val.(chan wsClientResult) <- wsClientResult{resp: resp}
+			}
+		case "error":
+			var resp socketErrorEnvelope
+			if err := decodeRawMessage(raw, &resp); err != nil {
+				continue
+			}
+			goErr := wsSocketErrorToGoError(resp)
+			if val, ok := c.pending.LoadAndDelete(resp.ID); ok {
+				val.(chan wsClientResult) <- wsClientResult{err: goErr}
+			}
+		case "event":
+			// Future: route to subscription callbacks.
+		default:
+			// Ignore unknown message types (e.g., pings handled by gorilla).
 		}
-		if resp.Message != "" {
-			return socketClientResponseEnvelope{}, true, fmt.Errorf("API error: %s", resp.Message)
-		}
-		if resp.Code != "" {
-			return socketClientResponseEnvelope{}, true, fmt.Errorf("API error: %s", resp.Code)
-		}
-		return socketClientResponseEnvelope{}, true, fmt.Errorf("API error")
-	default:
-		return socketClientResponseEnvelope{}, true, fmt.Errorf("unexpected websocket message type: %s", msgType)
 	}
+}
+
+// wsSocketErrorToGoError converts a WebSocket error envelope to a Go error.
+func wsSocketErrorToGoError(resp socketErrorEnvelope) error {
+	if resp.Code == "read_only" {
+		msg := resp.Message
+		if msg == "" {
+			msg = "mutations disabled (read-only server)"
+		}
+		return &readOnlyError{msg: msg}
+	}
+	if resp.Message != "" {
+		return fmt.Errorf("API error: %s", resp.Message)
+	}
+	if resp.Code != "" {
+		return fmt.Errorf("API error: %s", resp.Code)
+	}
+	return fmt.Errorf("API error")
 }
 
 func (c *Client) ensureWSConnLocked() error {
@@ -606,6 +721,8 @@ func (c *Client) ensureWSConnLocked() error {
 		return fmt.Errorf("unexpected websocket hello type: %s", hello.Type)
 	}
 	c.wsConn = conn
+	c.wsReaderDone = make(chan struct{})
+	go c.wsReadLoop()
 	return nil
 }
 
@@ -977,6 +1094,56 @@ func socketPostAction(path string, payload any) (string, any, bool, error) {
 		}
 		merged, err := mergeSocketPayload(map[string]any{"id": id}, payload)
 		return "session.close", merged, true, err
+	case strings.HasSuffix(u.Path, "/submit") && strings.HasPrefix(u.Path, "/v0/session/"):
+		id := strings.TrimSuffix(strings.TrimPrefix(u.Path, "/v0/session/"), "/submit")
+		if id == "" {
+			return "", nil, false, nil
+		}
+		merged, err := mergeSocketPayload(map[string]any{"id": id}, payload)
+		return "session.submit", merged, true, err
+	case strings.HasSuffix(u.Path, "/kill") && strings.HasPrefix(u.Path, "/v0/session/"):
+		id := strings.TrimSuffix(strings.TrimPrefix(u.Path, "/v0/session/"), "/kill")
+		if id == "" {
+			return "", nil, false, nil
+		}
+		merged, err := mergeSocketPayload(map[string]any{"id": id}, payload)
+		return "session.kill", merged, true, err
+	case strings.HasSuffix(u.Path, "/suspend") && strings.HasPrefix(u.Path, "/v0/agent/"):
+		name := strings.TrimSuffix(strings.TrimPrefix(u.Path, "/v0/agent/"), "/suspend")
+		if name == "" {
+			return "", nil, false, nil
+		}
+		return "agent.suspend", map[string]any{"name": unescapeName(name)}, true, nil
+	case strings.HasSuffix(u.Path, "/resume") && strings.HasPrefix(u.Path, "/v0/agent/"):
+		name := strings.TrimSuffix(strings.TrimPrefix(u.Path, "/v0/agent/"), "/resume")
+		if name == "" {
+			return "", nil, false, nil
+		}
+		return "agent.resume", map[string]any{"name": unescapeName(name)}, true, nil
+	case strings.HasSuffix(u.Path, "/suspend") && strings.HasPrefix(u.Path, "/v0/rig/"):
+		name := strings.TrimSuffix(strings.TrimPrefix(u.Path, "/v0/rig/"), "/suspend")
+		if name == "" {
+			return "", nil, false, nil
+		}
+		return "rig.suspend", map[string]any{"name": unescapeName(name)}, true, nil
+	case strings.HasSuffix(u.Path, "/resume") && strings.HasPrefix(u.Path, "/v0/rig/"):
+		name := strings.TrimSuffix(strings.TrimPrefix(u.Path, "/v0/rig/"), "/resume")
+		if name == "" {
+			return "", nil, false, nil
+		}
+		return "rig.resume", map[string]any{"name": unescapeName(name)}, true, nil
+	case strings.HasSuffix(u.Path, "/restart") && strings.HasPrefix(u.Path, "/v0/rig/"):
+		name := strings.TrimSuffix(strings.TrimPrefix(u.Path, "/v0/rig/"), "/restart")
+		if name == "" {
+			return "", nil, false, nil
+		}
+		return "rig.restart", map[string]any{"name": unescapeName(name)}, true, nil
+	case strings.HasSuffix(u.Path, "/restart") && strings.HasPrefix(u.Path, "/v0/service/"):
+		name := strings.TrimSuffix(strings.TrimPrefix(u.Path, "/v0/service/"), "/restart")
+		if name == "" {
+			return "", nil, false, nil
+		}
+		return "service.restart", map[string]any{"name": name}, true, nil
 	default:
 		return "", nil, false, nil
 	}

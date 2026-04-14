@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net"
 	"net/http"
@@ -132,18 +133,7 @@ func (sm *SupervisorMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		sm.handleHealth(w, r)
 		return
 	}
-	if path == "/v0/events/stream" && r.Method == http.MethodGet {
-		sm.handleGlobalEventStream(w, r)
-		return
-	}
-	if path == "/v0/events" && r.Method == http.MethodGet {
-		sm.handleGlobalEventList(w, r)
-		return
-	}
-
-	// City creation is supervisor-level: it shells out to `gc init` and
-	// doesn't need an existing running city, so handle it before the
-	// per-city and backward-compat routing below.
+	// City creation is supervisor-level.
 	if path == "/v0/city" && r.Method == http.MethodPost {
 		if sm.readOnly {
 			writeError(w, http.StatusForbidden, "read_only", "mutations disabled: server bound to non-localhost address")
@@ -153,38 +143,26 @@ func (sm *SupervisorMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// City-namespaced: /v0/city/{name} or /v0/city/{name}/...
+	// City-namespaced service proxy: /v0/city/{name}/svc/...
 	if strings.HasPrefix(path, "/v0/city/") {
 		rest := strings.TrimPrefix(path, "/v0/city/")
 		idx := strings.IndexByte(rest, '/')
-		var cityName, suffix string
-		if idx < 0 {
-			cityName = rest
-			suffix = ""
-		} else {
-			cityName = rest[:idx]
-			suffix = rest[idx:] // e.g. "/agents"
+		if idx >= 0 {
+			cityName := rest[:idx]
+			suffix := rest[idx:]
+			if strings.HasPrefix(suffix, "/svc/") {
+				sm.serveCityRequest(w, r, cityName, suffix)
+				return
+			}
 		}
-		if cityName == "" {
+		if idx < 0 || rest[:idx] == "" {
 			writeError(w, http.StatusBadRequest, "bad_request", "city name required in URL")
 			return
 		}
-		var targetPath string
-		switch {
-		case suffix == "":
-			targetPath = "/v0/status"
-		case strings.HasPrefix(suffix, "/svc/"):
-			targetPath = suffix
-		default:
-			targetPath = "/v0" + suffix
-		}
-		sm.serveCityRequest(w, r, cityName, targetPath)
-		return
 	}
 
-	// Bare /v0/... and /svc/... — backward compat, route to the sole running
-	// city. When multiple cities are running, require explicit city scope.
-	if strings.HasPrefix(path, "/v0/") || path == "/v0" || strings.HasPrefix(path, "/svc/") {
+	// Bare /svc/... — route to sole running city.
+	if strings.HasPrefix(path, "/svc/") {
 		cities := sm.resolver.ListCities()
 		var running []CityInfo
 		for _, c := range cities {
@@ -199,11 +177,12 @@ func (sm *SupervisorMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			sm.serveCityRequest(w, r, running[0].Name, path)
 		default:
 			writeError(w, http.StatusBadRequest, "city_required",
-				"multiple cities running; use /v0/city/{name}/... to specify which city")
+				"multiple cities running; use /v0/city/{name}/svc/... to specify which city")
 		}
 		return
 	}
 
+	// All other API endpoints are WS-only via GET /v0/ws.
 	http.NotFound(w, r)
 }
 
@@ -357,6 +336,29 @@ func (sm *SupervisorMux) buildMultiplexer() *events.Multiplexer {
 		mux.Add(c.Name, ep)
 	}
 	return mux
+}
+
+// globalEventList returns events aggregated from all running cities.
+func (sm *SupervisorMux) globalEventList(req *socketRequestEnvelope) (any, error) {
+	mux := sm.buildMultiplexer()
+	var payload socketEventsListPayload
+	if len(req.Payload) > 0 {
+		_ = json.Unmarshal(req.Payload, &payload)
+	}
+	filter := events.Filter{Type: payload.Type, Actor: payload.Actor}
+	if payload.Since != "" {
+		if d, err := time.ParseDuration(payload.Since); err == nil {
+			filter.Since = time.Now().Add(-d)
+		}
+	}
+	evts, err := mux.ListAll(filter)
+	if err != nil {
+		return nil, err
+	}
+	if evts == nil {
+		evts = []events.TaggedEvent{}
+	}
+	return listResponse{Items: evts, Total: len(evts)}, nil
 }
 
 func (sm *SupervisorMux) handleHealth(w http.ResponseWriter, _ *http.Request) {

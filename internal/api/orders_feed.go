@@ -127,6 +127,53 @@ func (s *Server) handleOrdersFeed(w http.ResponseWriter, r *http.Request) {
 	writeCachedJSON(w, r, index, body)
 }
 
+// getOrdersFeed returns the orders feed for the given scope.
+func (s *Server) getOrdersFeed(scopeKind, scopeRef string, limit int) (any, error) {
+	scopeKind, scopeRef, scopeErr := parseWorkflowRequestScope(scopeKind, scopeRef)
+	if scopeErr != "" {
+		return nil, &httpError{status: 400, code: "invalid", message: scopeErr}
+	}
+	workflowRuns, err := buildWorkflowRunProjections(s.state, scopeKind, scopeRef, "")
+	if err != nil {
+		return nil, &httpError{status: 500, code: "internal", message: "workflow feed failed"}
+	}
+	orderRuns, err := buildOrderRunFeedItems(s.state, scopeKind, scopeRef)
+	if err != nil {
+		return nil, &httpError{status: 500, code: "internal", message: "order feed failed"}
+	}
+	items := make([]monitorFeedItemResponse, 0, len(workflowRuns.Items)+len(orderRuns))
+	for _, run := range workflowRuns.Items {
+		items = append(items, workflowRunProjectionFeedItem(run))
+	}
+	items = append(items, orderRuns...)
+	sort.SliceStable(items, func(i, j int) bool {
+		iRank := monitorStatusRank(items[i].Status)
+		jRank := monitorStatusRank(items[j].Status)
+		if iRank != jRank {
+			return iRank < jRank
+		}
+		iTypeRank := monitorItemRank(items[i])
+		jTypeRank := monitorItemRank(items[j])
+		if iTypeRank != jTypeRank {
+			return iTypeRank < jTypeRank
+		}
+		iUpdated := parseMonitorTimestamp(items[i].UpdatedAt)
+		jUpdated := parseMonitorTimestamp(items[j].UpdatedAt)
+		if !iUpdated.Equal(jUpdated) {
+			return iUpdated.After(jUpdated)
+		}
+		return items[i].Title < items[j].Title
+	})
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	resp := map[string]any{"items": items, "partial": workflowRuns.Partial}
+	if len(workflowRuns.PartialErrors) > 0 {
+		resp["partial_errors"] = workflowRuns.PartialErrors
+	}
+	return resp, nil
+}
+
 func buildWorkflowRunProjections(state State, requestedScopeKind, requestedScopeRef, formulaNameFilter string) (workflowRunProjectionResult, error) {
 	stores := workflowStores(state)
 	projections := make([]workflowRunProjection, 0)

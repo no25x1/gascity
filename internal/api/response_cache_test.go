@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -46,81 +45,59 @@ func (s *countingStore) ListByAssignee(assignee, status string, limit int) ([]be
 }
 
 func TestHandleStatusCachesUntilIndexChanges(t *testing.T) {
+	// HTTP caching is eliminated. Verify WS status.get returns fresh data
+	// with an Index that tracks event sequence.
 	state := newFakeState(t)
-	store := &countingStore{Store: beads.NewMemStore()}
-	state.stores["myrig"] = store
+	state.eventProv.Record(events.Event{Type: "test", Actor: "t"})
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	req := httptest.NewRequest(http.MethodGet, "/v0/status", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("first status = %d, want 200", rec.Code)
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "s1", Action: "status.get"})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("type = %q, want response", resp.Type)
 	}
+	idx1 := resp.Index
 
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("second status = %d, want 200", rec.Code)
-	}
-
-	if store.listCalls != 1 {
-		t.Fatalf("List calls after cached repeat = %d, want 1", store.listCalls)
-	}
-
+	// Record another event and check index advances.
 	state.eventProv.Record(events.Event{Type: events.BeadCreated, Actor: "human"})
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("third status = %d, want 200", rec.Code)
-	}
-	if store.listCalls != 2 {
-		t.Fatalf("List calls after index change = %d, want 2", store.listCalls)
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "s2", Action: "status.get"})
+	readWSJSON(t, conn, &resp)
+	if resp.Index <= idx1 {
+		t.Fatalf("index after event = %d, want > %d", resp.Index, idx1)
 	}
 }
 
 func TestHandleAgentListCachesUntilIndexChanges(t *testing.T) {
+	// HTTP caching is eliminated. Verify WS agents.list returns with index.
 	state := newFakeState(t)
-	store := &countingStore{Store: beads.NewMemStore()}
-	state.stores["myrig"] = store
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	req := httptest.NewRequest(http.MethodGet, "/v0/agents", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("first agents = %d, want 200", rec.Code)
-	}
-
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("second agents = %d, want 200", rec.Code)
-	}
-
-	if store.listByAssigneeCalls != 1 {
-		t.Fatalf("ListByAssignee calls after cached repeat = %d, want 1", store.listByAssigneeCalls)
-	}
-
-	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("third agents = %d, want 200", rec.Code)
-	}
-	if store.listByAssigneeCalls != 2 {
-		t.Fatalf("ListByAssignee calls after index change = %d, want 2", store.listByAssigneeCalls)
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "a1", Action: "agents.list"})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("type = %q, want response", resp.Type)
 	}
 }
 
 func TestHandleOrdersFeedCachesUntilIndexChanges(t *testing.T) {
+	// HTTP caching eliminated. Verify WS orders.feed returns data.
 	state := newFakeState(t)
-	rigStore := &countingStore{Store: beads.NewMemStore()}
-	cityStore := &countingStore{Store: beads.NewMemStore()}
+	rigStore := beads.NewMemStore()
 	state.stores["myrig"] = rigStore
-	state.cityBeadStore = cityStore
 
-	_, err := rigStore.Create(beads.Bead{
+	rigStore.Create(beads.Bead{ //nolint:errcheck
 		Title: "Adopt PR",
 		Ref:   "mol-adopt-pr-v2",
 		Metadata: map[string]string{
@@ -131,44 +108,23 @@ func TestHandleOrdersFeedCachesUntilIndexChanges(t *testing.T) {
 			"gc.scope_ref":        "myrig",
 		},
 	})
-	if err != nil {
-		t.Fatalf("create workflow root: %v", err)
-	}
 
 	srv := New(state)
-	req := httptest.NewRequest(http.MethodGet, "/v0/orders/feed?scope_kind=rig&scope_ref=myrig", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("first feed = %d, want 200", rec.Code)
-	}
-	var resp map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal first feed: %v", err)
-	}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("second feed = %d, want 200", rec.Code)
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "of1", Action: "orders.feed", Payload: map[string]any{"scope_kind": "rig", "scope_ref": "myrig"}})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("type = %q, want response", resp.Type)
 	}
-	if rigStore.listCalls != 1 {
-		t.Fatalf("rig List calls after cached repeat = %d, want 1", rigStore.listCalls)
-	}
-	if cityStore.listByLabelCalls != 1 {
-		t.Fatalf("city ListByLabel calls after cached repeat = %d, want 1", cityStore.listByLabelCalls)
-	}
-
-	state.eventProv.Record(events.Event{Type: events.BeadCreated, Actor: "human"})
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("third feed = %d, want 200", rec.Code)
-	}
-	if rigStore.listCalls != 2 {
-		t.Fatalf("rig List calls after index change = %d, want 2", rigStore.listCalls)
-	}
-	if cityStore.listByLabelCalls != 2 {
-		t.Fatalf("city ListByLabel calls after index change = %d, want 2", cityStore.listByLabelCalls)
+	var feed map[string]any
+	json.Unmarshal(resp.Result, &feed)
+	if feed["items"] == nil {
+		t.Fatal("feed items missing")
 	}
 }

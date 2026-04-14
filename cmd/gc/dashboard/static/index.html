@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="/static/dashboard.css">
+    <title>Gas City Control Center</title>
+</head>
+<body>
+    <div class="dashboard" id="dashboard-main">
+        <header>
+            <pre class="ascii-title">  __  __    __   _____ __  _   _  __  _    ___ __  __  _ _____ ___  __  _      ______ __  _ _____ ___ ___
+ / _]/  \ /' _| |_   _/__\| | | ||  \| |  / _//__\|  \| |_   _| _ \/__\| |    / _/ __|  \| |_   _| __| _ \
+| [/\ /\ |`._`.   | || \/ | 'V' || | ' | | \_| \/ | | ' | | | | v / \/ | |_  | \_| _|| | ' | | | | _|| v /
+ \__/_||_||___/   |_| \__/!_/ \_!|_|\__|  \__/\__/|_|\__| |_| |_|_\\__/|___|  \__/___|_|\__| |_| |___|_|_\</pre>
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <button class="cmd-btn" id="open-palette-btn">
+                    <span>&#8984;</span> Commands <kbd>&#8984;K</kbd>
+                </button>
+                <span class="refresh-info" id="refresh-info">
+                    <span id="connection-status">Connecting...</span>
+                </span>
+            </div>
+        </header>
+
+        <!-- City tabs (supervisor mode) -->
+        <nav class="city-tabs" id="city-tabs-nav" style="display:none;"></nav>
+
+        <!-- Mayor Status Banner -->
+        <div id="mayor-status-banner"></div>
+
+        <!-- Summary Bar -->
+        <div id="summary-bar"></div>
+
+        <!-- Main Grid -->
+        <div class="main-grid">
+            <div class="left-column">
+                <!-- Convoys Panel -->
+                <div class="panel" id="convoys-panel">
+                    <div class="panel-header">
+                        <h2>Convoys</h2>
+                    </div>
+                    <div class="panel-body" id="convoys-body">
+                        <div class="loading">Loading...</div>
+                    </div>
+                </div>
+
+                <!-- Crew Panel -->
+                <div class="panel" id="crew-panel">
+                    <div class="panel-header">
+                        <h2>Crew</h2>
+                    </div>
+                    <div class="panel-body" id="crew-body">
+                        <div class="loading">Loading...</div>
+                    </div>
+                </div>
+
+                <!-- Mail Panel -->
+                <div class="panel" id="mail-panel">
+                    <div class="panel-header">
+                        <h2>Mail</h2>
+                    </div>
+                    <div class="panel-body" id="mail-body">
+                        <div class="loading">Loading...</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="right-column">
+                <!-- Issues Panel -->
+                <div class="panel" id="issues-panel">
+                    <div class="panel-header">
+                        <h2>Issues</h2>
+                    </div>
+                    <div class="panel-body" id="issues-body">
+                        <div class="loading">Loading...</div>
+                    </div>
+                </div>
+
+                <!-- Escalations Panel -->
+                <div class="panel" id="escalations-panel">
+                    <div class="panel-header">
+                        <h2>Escalations</h2>
+                    </div>
+                    <div class="panel-body" id="escalations-body">
+                        <div class="loading">Loading...</div>
+                    </div>
+                </div>
+
+                <!-- Activity Panel -->
+                <div class="panel" id="activity-panel">
+                    <div class="panel-header">
+                        <h2>Activity</h2>
+                    </div>
+                    <div class="panel-body" id="activity-body">
+                        <div class="loading">Loading...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Command Palette -->
+    <div id="command-palette" class="palette-overlay" style="display:none;">
+        <div class="palette-container">
+            <input type="text" id="cmd-input" class="palette-input" placeholder="Type a command..." autocomplete="off" />
+            <div id="cmd-results" class="palette-results"></div>
+        </div>
+    </div>
+
+    <!-- Output Panel -->
+    <div id="output-panel" class="output-panel" style="display: none;">
+        <div class="output-panel-header">
+            <span id="output-panel-cmd">Command Output</span>
+            <div class="output-panel-actions">
+                <button id="output-copy-btn" class="output-panel-btn">Copy</button>
+                <button id="output-close-btn" class="output-panel-btn">Close</button>
+            </div>
+        </div>
+        <div id="output-panel-content" class="output-panel-content"></div>
+    </div>
+
+    <script src="/static/dashboard.js"></script>
+</body>
+</html>

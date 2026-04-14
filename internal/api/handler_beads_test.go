@@ -1,9 +1,7 @@
 package api
 
 import (
-	"bytes"
 	"encoding/json"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -12,7 +10,65 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gorilla/websocket"
 )
+
+// WS test types and helpers are in websocket_test.go.
+
+// wsRoundTrip sends a request and reads the response, handling both success
+// and error envelopes. Returns the response envelope if type is "response",
+// or fails the test for unexpected types. For error checking use wsRoundTripRaw.
+func wsRoundTrip(t *testing.T, conn *websocket.Conn, req wsRequestEnvelope) wsResponseEnvelope {
+	t.Helper()
+	writeWSJSON(t, conn, req)
+	// Read raw message to determine type.
+	_, msg, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read ws message: %v", err)
+	}
+	var envelope struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(msg, &envelope); err != nil {
+		t.Fatalf("unmarshal envelope type: %v", err)
+	}
+	if envelope.Type == "error" {
+		var errEnv wsErrorEnvelope
+		if err := json.Unmarshal(msg, &errEnv); err != nil {
+			t.Fatalf("unmarshal error envelope: %v", err)
+		}
+		t.Fatalf("expected response, got error: code=%q message=%q", errEnv.Code, errEnv.Message)
+	}
+	var resp wsResponseEnvelope
+	if err := json.Unmarshal(msg, &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	return resp
+}
+
+// wsRoundTripRaw sends a request and returns the raw message bytes.
+func wsRoundTripRaw(t *testing.T, conn *websocket.Conn, req wsRequestEnvelope) []byte {
+	t.Helper()
+	writeWSJSON(t, conn, req)
+	_, msg, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read ws message: %v", err)
+	}
+	return msg
+}
+
+func connectWS(t *testing.T, state *fakeState) *websocket.Conn {
+	t.Helper()
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	t.Cleanup(ts.Close)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	t.Cleanup(func() { conn.Close() })
+	drainWSHello(t, conn)
+	return conn
+}
+
+// --- Prefixed alias store (unchanged) ---
 
 type prefixedAliasStore struct {
 	prefix        string
@@ -294,22 +350,31 @@ func configureBeadRouteState(t *testing.T) (*fakeState, *prefixedAliasStore, *pr
 	return state, alphaStore, betaStore
 }
 
+// --- WS-based bead tests ---
+
 func TestBeadCRUD(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	conn := connectWS(t, state)
 
 	// Create a bead.
-	body := `{"rig":"myrig","title":"Fix login bug","type":"task"}`
-	req := newPostRequest("/v0/beads", bytes.NewBufferString(body))
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create status = %d, want %d, body: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	resp := wsRoundTrip(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "create-1",
+		Action: "bead.create",
+		Payload: map[string]any{
+			"rig":   "myrig",
+			"title": "Fix login bug",
+			"type":  "task",
+		},
+	})
+	if resp.Type != "response" {
+		t.Fatalf("create type = %q, want response", resp.Type)
 	}
 
 	var created beads.Bead
-	json.NewDecoder(rec.Body).Decode(&created) //nolint:errcheck
+	if err := json.Unmarshal(resp.Result, &created); err != nil {
+		t.Fatalf("unmarshal created: %v", err)
+	}
 	if created.Title != "Fix login bug" {
 		t.Errorf("Title = %q, want %q", created.Title, "Fix login bug")
 	}
@@ -318,35 +383,48 @@ func TestBeadCRUD(t *testing.T) {
 	}
 
 	// Get the bead.
-	req = httptest.NewRequest("GET", "/v0/bead/"+created.ID, nil)
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("get status = %d, want %d", rec.Code, http.StatusOK)
-	}
+	resp = wsRoundTrip(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "get-1",
+		Action: "bead.get",
+		Payload: map[string]any{
+			"id": created.ID,
+		},
+	})
 
 	var got beads.Bead
-	json.NewDecoder(rec.Body).Decode(&got) //nolint:errcheck
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("unmarshal got: %v", err)
+	}
 	if got.Title != "Fix login bug" {
 		t.Errorf("Title = %q, want %q", got.Title, "Fix login bug")
 	}
 
 	// Close the bead.
-	req = newPostRequest("/v0/bead/"+created.ID+"/close", nil)
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("close status = %d, want %d", rec.Code, http.StatusOK)
+	resp = wsRoundTrip(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "close-1",
+		Action: "bead.close",
+		Payload: map[string]any{
+			"id": created.ID,
+		},
+	})
+	if resp.Type != "response" {
+		t.Fatalf("close type = %q, want response", resp.Type)
 	}
 
 	// Verify closed.
-	req = httptest.NewRequest("GET", "/v0/bead/"+created.ID, nil)
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	json.NewDecoder(rec.Body).Decode(&got) //nolint:errcheck
+	resp = wsRoundTrip(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "get-2",
+		Action: "bead.get",
+		Payload: map[string]any{
+			"id": created.ID,
+		},
+	})
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("unmarshal got: %v", err)
+	}
 	if got.Status != "closed" {
 		t.Errorf("Status = %q, want %q", got.Status, "closed")
 	}
@@ -358,30 +436,45 @@ func TestBeadListFiltering(t *testing.T) {
 	store.Create(beads.Bead{Title: "Open task", Type: "task"})                           //nolint:errcheck
 	store.Create(beads.Bead{Title: "Message", Type: "message"})                          //nolint:errcheck
 	store.Create(beads.Bead{Title: "Labeled", Type: "task", Labels: []string{"urgent"}}) //nolint:errcheck
-	srv := New(state)
+
+	conn := connectWS(t, state)
 
 	// Filter by type.
-	req := httptest.NewRequest("GET", "/v0/beads?type=message", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	resp := wsRoundTrip(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "list-type",
+		Action: "beads.list",
+		Payload: map[string]any{
+			"type": "message",
+		},
+	})
 
-	var resp struct {
+	var listResp struct {
 		Items []beads.Bead `json:"items"`
 		Total int          `json:"total"`
 	}
-	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
-	if resp.Total != 1 {
-		t.Errorf("type filter: Total = %d, want 1", resp.Total)
+	if err := json.Unmarshal(resp.Result, &listResp); err != nil {
+		t.Fatalf("unmarshal list: %v", err)
+	}
+	if listResp.Total != 1 {
+		t.Errorf("type filter: Total = %d, want 1", listResp.Total)
 	}
 
 	// Filter by label.
-	req = httptest.NewRequest("GET", "/v0/beads?label=urgent", nil)
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	resp = wsRoundTrip(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "list-label",
+		Action: "beads.list",
+		Payload: map[string]any{
+			"label": "urgent",
+		},
+	})
 
-	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
-	if resp.Total != 1 {
-		t.Errorf("label filter: Total = %d, want 1", resp.Total)
+	if err := json.Unmarshal(resp.Result, &listResp); err != nil {
+		t.Fatalf("unmarshal list: %v", err)
+	}
+	if listResp.Total != 1 {
+		t.Errorf("label filter: Total = %d, want 1", listResp.Total)
 	}
 }
 
@@ -392,32 +485,49 @@ func TestBeadListCrossRig(t *testing.T) {
 
 	state.stores["myrig"].Create(beads.Bead{Title: "Bead from rig1"}) //nolint:errcheck
 	store2.Create(beads.Bead{Title: "Bead from rig2"})                //nolint:errcheck
-	srv := New(state)
 
-	req := httptest.NewRequest("GET", "/v0/beads", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := connectWS(t, state)
 
-	var resp struct {
+	resp := wsRoundTrip(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "list-cross",
+		Action: "beads.list",
+	})
+
+	var listResp struct {
 		Items []beads.Bead `json:"items"`
 		Total int          `json:"total"`
 	}
-	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
-	if resp.Total != 2 {
-		t.Errorf("cross-rig: Total = %d, want 2", resp.Total)
+	if err := json.Unmarshal(resp.Result, &listResp); err != nil {
+		t.Fatalf("unmarshal list: %v", err)
+	}
+	if listResp.Total != 2 {
+		t.Errorf("cross-rig: Total = %d, want 2", listResp.Total)
 	}
 }
 
 func TestBeadGetNotFound(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	conn := connectWS(t, state)
 
-	req := httptest.NewRequest("GET", "/v0/bead/nonexistent", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	raw := wsRoundTripRaw(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "get-nf",
+		Action: "bead.get",
+		Payload: map[string]any{
+			"id": "nonexistent",
+		},
+	})
 
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	var errResp wsErrorEnvelope
+	if err := json.Unmarshal(raw, &errResp); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if errResp.Type != "error" {
+		t.Fatalf("type = %q, want error", errResp.Type)
+	}
+	if errResp.Code != "not_found" {
+		t.Errorf("code = %q, want not_found", errResp.Code)
 	}
 }
 
@@ -427,18 +537,20 @@ func TestBeadGetUsesRoutePrefixStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create(beta): %v", err)
 	}
-	srv := New(state)
 
-	req := httptest.NewRequest("GET", "/v0/bead/"+created.ID, nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := connectWS(t, state)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
-	}
+	resp := wsRoundTrip(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "get-route",
+		Action: "bead.get",
+		Payload: map[string]any{
+			"id": created.ID,
+		},
+	})
 
 	var got beads.Bead
-	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
 		t.Fatalf("Decode(): %v", err)
 	}
 	if got.Title != "Routed beta bead" {
@@ -458,19 +570,24 @@ func TestBeadReady(t *testing.T) {
 	store.Create(beads.Bead{Title: "Open"}) //nolint:errcheck
 	b2, _ := store.Create(beads.Bead{Title: "Closed"})
 	store.Close(b2.ID) //nolint:errcheck
-	srv := New(state)
 
-	req := httptest.NewRequest("GET", "/v0/beads/ready", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := connectWS(t, state)
 
-	var resp struct {
+	resp := wsRoundTrip(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "ready-1",
+		Action: "beads.ready",
+	})
+
+	var listResp struct {
 		Items []beads.Bead `json:"items"`
 		Total int          `json:"total"`
 	}
-	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
-	if resp.Total != 1 {
-		t.Errorf("ready: Total = %d, want 1", resp.Total)
+	if err := json.Unmarshal(resp.Result, &listResp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if listResp.Total != 1 {
+		t.Errorf("ready: Total = %d, want 1", listResp.Total)
 	}
 }
 
@@ -478,16 +595,22 @@ func TestBeadUpdate(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
 	b, _ := store.Create(beads.Bead{Title: "Test"})
-	srv := New(state)
+
+	conn := connectWS(t, state)
 
 	desc := "updated description"
-	body := `{"description":"` + desc + `","labels":["new-label"]}`
-	req := newPostRequest("/v0/bead/"+b.ID+"/update", bytes.NewBufferString(body))
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("update status = %d, want %d", rec.Code, http.StatusOK)
+	resp := wsRoundTrip(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "update-1",
+		Action: "bead.update",
+		Payload: map[string]any{
+			"id":          b.ID,
+			"description": desc,
+			"labels":      []string{"new-label"},
+		},
+	})
+	if resp.Type != "response" {
+		t.Fatalf("update type = %q, want response", resp.Type)
 	}
 
 	// Verify update.
@@ -506,15 +629,20 @@ func TestBeadUpdateUsesRoutePrefixStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create(beta): %v", err)
 	}
-	srv := New(state)
 
-	body := `{"description":"updated via route"}`
-	req := newPostRequest("/v0/bead/"+created.ID+"/update", bytes.NewBufferString(body))
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := connectWS(t, state)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	resp := wsRoundTrip(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "update-route",
+		Action: "bead.update",
+		Payload: map[string]any{
+			"id":          created.ID,
+			"description": "updated via route",
+		},
+	})
+	if resp.Type != "response" {
+		t.Fatalf("update type = %q, want response", resp.Type)
 	}
 
 	got, err := betaStore.Get(created.ID)
@@ -542,24 +670,26 @@ func TestBeadDepsUsesRoutePrefixStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create(child): %v", err)
 	}
-	srv := New(state)
 
-	req := httptest.NewRequest("GET", "/v0/bead/"+parent.ID+"/deps", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := connectWS(t, state)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
-	}
+	resp := wsRoundTrip(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "deps-route",
+		Action: "bead.deps",
+		Payload: map[string]any{
+			"id": parent.ID,
+		},
+	})
 
-	var resp struct {
+	var depsResp struct {
 		Children []beads.Bead `json:"children"`
 	}
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+	if err := json.Unmarshal(resp.Result, &depsResp); err != nil {
 		t.Fatalf("Decode(): %v", err)
 	}
-	if len(resp.Children) != 1 || resp.Children[0].ID != child.ID {
-		t.Fatalf("children = %#v, want [%s]", resp.Children, child.ID)
+	if len(depsResp.Children) != 1 || depsResp.Children[0].ID != child.ID {
+		t.Fatalf("children = %#v, want [%s]", depsResp.Children, child.ID)
 	}
 	if alphaStore.childrenCalls != 0 {
 		t.Fatalf("alphaStore.childrenCalls = %d, want 0", alphaStore.childrenCalls)
@@ -582,24 +712,26 @@ func TestBeadDepsIncludesMetadataAttachments(t *testing.T) {
 	if err := betaStore.SetMetadata(parent.ID, "molecule_id", attached.ID); err != nil {
 		t.Fatalf("SetMetadata(molecule_id): %v", err)
 	}
-	srv := New(state)
 
-	req := httptest.NewRequest("GET", "/v0/bead/"+parent.ID+"/deps", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := connectWS(t, state)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
-	}
+	resp := wsRoundTrip(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "deps-meta",
+		Action: "bead.deps",
+		Payload: map[string]any{
+			"id": parent.ID,
+		},
+	})
 
-	var resp struct {
+	var depsResp struct {
 		Children []beads.Bead `json:"children"`
 	}
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+	if err := json.Unmarshal(resp.Result, &depsResp); err != nil {
 		t.Fatalf("Decode(): %v", err)
 	}
-	if len(resp.Children) != 1 || resp.Children[0].ID != attached.ID {
-		t.Fatalf("children = %#v, want [%s]", resp.Children, attached.ID)
+	if len(depsResp.Children) != 1 || depsResp.Children[0].ID != attached.ID {
+		t.Fatalf("children = %#v, want [%s]", depsResp.Children, attached.ID)
 	}
 	if betaStore.getCalls < 2 {
 		t.Fatalf("betaStore.getCalls = %d, want at least 2 (parent + attachment)", betaStore.getCalls)
@@ -610,17 +742,21 @@ func TestBeadPatchAlias(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
 	b, _ := store.Create(beads.Bead{Title: "Test"})
-	srv := New(state)
+
+	conn := connectWS(t, state)
 
 	desc := "patched"
-	body := `{"description":"` + desc + `"}`
-	req := httptest.NewRequest("PATCH", "/v0/bead/"+b.ID, bytes.NewBufferString(body))
-	req.Header.Set("X-GC-Request", "true")
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("PATCH status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	resp := wsRoundTrip(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "patch-1",
+		Action: "bead.update",
+		Payload: map[string]any{
+			"id":          b.ID,
+			"description": desc,
+		},
+	})
+	if resp.Type != "response" {
+		t.Fatalf("PATCH type = %q, want response", resp.Type)
 	}
 
 	got, _ := store.Get(b.ID)
@@ -633,15 +769,20 @@ func TestBeadUpdatePriority(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
 	b, _ := store.Create(beads.Bead{Title: "Test"})
-	srv := New(state)
 
-	body := `{"priority":1}`
-	req := newPostRequest("/v0/bead/"+b.ID+"/update", bytes.NewBufferString(body))
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := connectWS(t, state)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("update status = %d, want %d", rec.Code, http.StatusOK)
+	resp := wsRoundTrip(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "update-pri",
+		Action: "bead.update",
+		Payload: map[string]any{
+			"id":       b.ID,
+			"priority": 1,
+		},
+	})
+	if resp.Type != "response" {
+		t.Fatalf("update type = %q, want response", resp.Type)
 	}
 
 	got, _ := store.Get(b.ID)
@@ -655,15 +796,25 @@ func TestBeadUpdateRejectsNullPriority(t *testing.T) {
 	store := state.stores["myrig"]
 	priority := 1
 	b, _ := store.Create(beads.Bead{Title: "Test", Priority: &priority})
-	srv := New(state)
 
-	body := `{"priority":null}`
-	req := newPostRequest("/v0/bead/"+b.ID+"/update", bytes.NewBufferString(body))
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := connectWS(t, state)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("update status = %d, want %d", rec.Code, http.StatusBadRequest)
+	raw := wsRoundTripRaw(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "update-null-pri",
+		Action: "bead.update",
+		Payload: map[string]any{
+			"id":       b.ID,
+			"priority": nil,
+		},
+	})
+
+	var errResp wsErrorEnvelope
+	if err := json.Unmarshal(raw, &errResp); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if errResp.Type != "error" {
+		t.Fatalf("type = %q, want error", errResp.Type)
 	}
 
 	got, _ := store.Get(b.ID)
@@ -677,15 +828,20 @@ func TestBeadReopen(t *testing.T) {
 	store := state.stores["myrig"]
 	b, _ := store.Create(beads.Bead{Title: "Closed task"})
 	store.Close(b.ID) //nolint:errcheck
-	srv := New(state)
+
+	conn := connectWS(t, state)
 
 	// Reopen the closed bead.
-	req := newPostRequest("/v0/bead/"+b.ID+"/reopen", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("reopen status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	resp := wsRoundTrip(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "reopen-1",
+		Action: "bead.reopen",
+		Payload: map[string]any{
+			"id": b.ID,
+		},
+	})
+	if resp.Type != "response" {
+		t.Fatalf("reopen type = %q, want response", resp.Type)
 	}
 
 	// Verify reopened.
@@ -699,14 +855,27 @@ func TestBeadReopenNotClosed(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
 	b, _ := store.Create(beads.Bead{Title: "Open task"})
-	srv := New(state)
 
-	req := newPostRequest("/v0/bead/"+b.ID+"/reopen", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := connectWS(t, state)
 
-	if rec.Code != http.StatusConflict {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusConflict)
+	raw := wsRoundTripRaw(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "reopen-nc",
+		Action: "bead.reopen",
+		Payload: map[string]any{
+			"id": b.ID,
+		},
+	})
+
+	var errResp wsErrorEnvelope
+	if err := json.Unmarshal(raw, &errResp); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if errResp.Type != "error" {
+		t.Fatalf("type = %q, want error", errResp.Type)
+	}
+	if errResp.Code != "conflict" {
+		t.Errorf("code = %q, want conflict", errResp.Code)
 	}
 }
 
@@ -714,15 +883,20 @@ func TestBeadAssign(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
 	b, _ := store.Create(beads.Bead{Title: "Task"})
-	srv := New(state)
 
-	body := `{"assignee":"worker-1"}`
-	req := newPostRequest("/v0/bead/"+b.ID+"/assign", bytes.NewBufferString(body))
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := connectWS(t, state)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("assign status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	resp := wsRoundTrip(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "assign-1",
+		Action: "bead.assign",
+		Payload: map[string]any{
+			"id":       b.ID,
+			"assignee": "worker-1",
+		},
+	})
+	if resp.Type != "response" {
+		t.Fatalf("assign type = %q, want response", resp.Type)
 	}
 
 	got, _ := store.Get(b.ID)
@@ -735,15 +909,19 @@ func TestBeadDelete(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
 	b, _ := store.Create(beads.Bead{Title: "To delete"})
-	srv := New(state)
 
-	req := httptest.NewRequest("DELETE", "/v0/bead/"+b.ID, nil)
-	req.Header.Set("X-GC-Request", "true")
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := connectWS(t, state)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("delete status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	resp := wsRoundTrip(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "delete-1",
+		Action: "bead.delete",
+		Payload: map[string]any{
+			"id": b.ID,
+		},
+	})
+	if resp.Type != "response" {
+		t.Fatalf("delete type = %q, want response", resp.Type)
 	}
 
 	// Verify closed (soft delete).
@@ -755,29 +933,49 @@ func TestBeadDelete(t *testing.T) {
 
 func TestBeadDeleteNotFound(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	conn := connectWS(t, state)
 
-	req := httptest.NewRequest("DELETE", "/v0/bead/nonexistent", nil)
-	req.Header.Set("X-GC-Request", "true")
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	raw := wsRoundTripRaw(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "delete-nf",
+		Action: "bead.delete",
+		Payload: map[string]any{
+			"id": "nonexistent",
+		},
+	})
 
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	var errResp wsErrorEnvelope
+	if err := json.Unmarshal(raw, &errResp); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if errResp.Type != "error" {
+		t.Fatalf("type = %q, want error", errResp.Type)
+	}
+	if errResp.Code != "not_found" {
+		t.Errorf("code = %q, want not_found", errResp.Code)
 	}
 }
 
 func TestBeadCreateValidation(t *testing.T) {
 	state := newFakeState(t)
-	srv := New(state)
+	conn := connectWS(t, state)
 
 	// Missing title.
-	req := newPostRequest("/v0/beads", bytes.NewBufferString(`{"rig":"myrig"}`))
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	raw := wsRoundTripRaw(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "create-val",
+		Action: "bead.create",
+		Payload: map[string]any{
+			"rig": "myrig",
+		},
+	})
 
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	var errResp wsErrorEnvelope
+	if err := json.Unmarshal(raw, &errResp); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	if errResp.Type != "error" {
+		t.Fatalf("type = %q, want error", errResp.Type)
 	}
 }
 
@@ -791,47 +989,47 @@ func TestPackList(t *testing.T) {
 		},
 	}
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	req := httptest.NewRequest("GET", "/v0/packs", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "pack-list", Action: "packs.list"})
+	var wsResp wsResponseEnvelope
+	readWSJSON(t, conn, &wsResp)
+	if wsResp.Type != "response" {
+		t.Fatalf("type = %q, want response", wsResp.Type)
 	}
-
-	var resp struct {
+	var result struct {
 		Packs []packResponse `json:"packs"`
 	}
-	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
-	if len(resp.Packs) != 1 {
-		t.Fatalf("packs count = %d, want 1", len(resp.Packs))
+	json.Unmarshal(wsResp.Result, &result) //nolint:errcheck
+	if len(result.Packs) != 1 {
+		t.Fatalf("packs count = %d, want 1", len(result.Packs))
 	}
-	if resp.Packs[0].Name != "gastown" {
-		t.Errorf("Name = %q, want %q", resp.Packs[0].Name, "gastown")
-	}
-	if resp.Packs[0].Source != "https://github.com/example/gastown-pack" {
-		t.Errorf("Source = %q", resp.Packs[0].Source)
+	if result.Packs[0].Name != "gastown" {
+		t.Errorf("Name = %q, want %q", result.Packs[0].Name, "gastown")
 	}
 }
 
 func TestPackListEmpty(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	req := httptest.NewRequest("GET", "/v0/packs", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
-	}
-
-	var resp struct {
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "pack-empty", Action: "packs.list"})
+	var wsResp wsResponseEnvelope
+	readWSJSON(t, conn, &wsResp)
+	var result struct {
 		Packs []packResponse `json:"packs"`
 	}
-	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
-	if len(resp.Packs) != 0 {
-		t.Errorf("packs count = %d, want 0", len(resp.Packs))
+	json.Unmarshal(wsResp.Result, &result) //nolint:errcheck
+	if len(result.Packs) != 0 {
+		t.Errorf("packs count = %d, want 0", len(result.Packs))
 	}
 }

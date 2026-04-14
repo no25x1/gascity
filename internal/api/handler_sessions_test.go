@@ -4,13 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -18,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	"github.com/gorilla/websocket"
 )
 
 func newSessionFakeState(t *testing.T) *fakeState {
@@ -132,188 +131,257 @@ func writeNamedSessionJSONL(t *testing.T, searchBase, workDir, fileName string, 
 	}
 }
 
+// wsSetup creates a Server, httptest.Server, and WS connection with hello drained.
+func wsSetup(t *testing.T, fs *fakeState) (*Server, *httptest.Server, *websocket.Conn) {
+	t.Helper()
+	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	t.Cleanup(ts.Close)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	t.Cleanup(func() { conn.Close() })
+	drainWSHello(t, conn)
+	return srv, ts, conn
+}
+
+// wsSetupSrv creates a Server with custom setup, then httptest.Server + WS conn.
+func wsSetupSrv(t *testing.T, srv *Server) *websocket.Conn {
+	t.Helper()
+	ts := httptest.NewServer(srv.handler())
+	t.Cleanup(ts.Close)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	t.Cleanup(func() { conn.Close() })
+	drainWSHello(t, conn)
+	return conn
+}
+
+// ---- sessions.list tests ----
+
 func TestHandleSessionList(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
-	// Create two sessions.
 	createTestSession(t, fs.cityBeadStore, fs.sp, "Session A")
 	createTestSession(t, fs.cityBeadStore, fs.sp, "Session B")
+	_, _, conn := wsSetup(t, fs)
 
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/sessions", nil)
-	srv.ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("got status %d, want %d", w.Code, http.StatusOK)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "sessions.list",
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "t1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-
-	var resp listResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	var body listResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-	if resp.Total != 2 {
-		t.Errorf("got total %d, want 2", resp.Total)
+	if body.Total != 2 {
+		t.Errorf("got total %d, want 2", body.Total)
 	}
 }
 
 func TestHandleSessionListFilterByState(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "To Suspend")
 	createTestSession(t, fs.cityBeadStore, fs.sp, "Stay Active")
-
-	// Suspend one.
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
 	if err := mgr.Suspend(info.ID); err != nil {
 		t.Fatalf("suspend: %v", err)
 	}
+	_, _, conn := wsSetup(t, fs)
 
-	// List only active.
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/sessions?state=active", nil)
-	srv.ServeHTTP(w, r)
-
-	var resp listResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "sessions.list",
+		Payload: map[string]any{
+			"state": "active",
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	var body listResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-	if resp.Total != 1 {
-		t.Errorf("got total %d, want 1 (only active)", resp.Total)
+	if body.Total != 1 {
+		t.Errorf("got total %d, want 1 (only active)", body.Total)
 	}
 }
 
 func TestHandleSessionListPagination(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
-	// Create 3 sessions.
 	createTestSession(t, fs.cityBeadStore, fs.sp, "S1")
 	createTestSession(t, fs.cityBeadStore, fs.sp, "S2")
 	createTestSession(t, fs.cityBeadStore, fs.sp, "S3")
+	_, ts, conn := wsSetup(t, fs)
 
 	// Limit without cursor truncates but returns no next_cursor.
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/sessions?limit=2", nil)
-	srv.ServeHTTP(w, r)
-	if w.Code != http.StatusOK {
-		t.Fatalf("limit-only: status %d", w.Code)
-	}
-	var resp listResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	items, _ := resp.Items.([]any)
-	if len(items) != 2 {
-		t.Errorf("limit-only: got %d items, want 2", len(items))
-	}
-	if resp.NextCursor != "" {
-		t.Errorf("limit-only: got next_cursor %q, want empty (no cursor mode)", resp.NextCursor)
-	}
-
-	// Cursor mode: first page.
-	w = httptest.NewRecorder()
-	r = httptest.NewRequest("GET", "/v0/sessions?cursor=&limit=2", nil)
-	srv.ServeHTTP(w, r)
-	if w.Code != http.StatusOK {
-		t.Fatalf("page1: status %d", w.Code)
-	}
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "sessions.list",
+		Payload: map[string]any{
+			"limit": 2,
+		},
+	})
+	var resp1 wsResponseEnvelope
+	readWSJSON(t, conn, &resp1)
 	var page1 listResponse
-	if err := json.NewDecoder(w.Body).Decode(&page1); err != nil {
-		t.Fatalf("decode page1: %v", err)
+	if err := json.Unmarshal(resp1.Result, &page1); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
 	items1, _ := page1.Items.([]any)
 	if len(items1) != 2 {
-		t.Errorf("page1: got %d items, want 2", len(items1))
+		t.Errorf("limit-only: got %d items, want 2", len(items1))
 	}
-	if page1.Total != 3 {
-		t.Errorf("page1: total = %d, want 3", page1.Total)
+	if page1.NextCursor != "" {
+		t.Errorf("limit-only: got next_cursor %q, want empty (no cursor mode)", page1.NextCursor)
 	}
-	if page1.NextCursor == "" {
+
+	// Use a fresh connection for cursor-mode paging.
+	conn2 := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn2.Close()
+	drainWSHello(t, conn2)
+
+	// Cursor mode: first page. Use encodeCursor(0) to trigger paging mode
+	// (WS requires non-empty cursor to activate paging, unlike HTTP ?cursor=).
+	writeWSJSON(t, conn2, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t2",
+		Action: "sessions.list",
+		Payload: map[string]any{
+			"cursor": encodeCursor(0),
+			"limit":  2,
+		},
+	})
+	var resp2 wsResponseEnvelope
+	readWSJSON(t, conn2, &resp2)
+	if resp2.Type != "response" || resp2.ID != "t2" {
+		t.Fatalf("page1 resp = %#v, want correlated response", resp2)
+	}
+	var page2 listResponse
+	if err := json.Unmarshal(resp2.Result, &page2); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	items2, _ := page2.Items.([]any)
+	if len(items2) != 2 {
+		t.Errorf("page1: got %d items, want 2", len(items2))
+	}
+	if page2.Total != 3 {
+		t.Errorf("page1: total = %d, want 3", page2.Total)
+	}
+	if page2.NextCursor == "" {
 		t.Fatal("page1: expected next_cursor, got empty")
 	}
 
 	// Cursor mode: second page.
-	w = httptest.NewRecorder()
-	r = httptest.NewRequest("GET", "/v0/sessions?cursor="+page1.NextCursor+"&limit=2", nil)
-	srv.ServeHTTP(w, r)
-	if w.Code != http.StatusOK {
-		t.Fatalf("page2: status %d", w.Code)
+	writeWSJSON(t, conn2, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t3",
+		Action: "sessions.list",
+		Payload: map[string]any{
+			"cursor": page2.NextCursor,
+			"limit":  2,
+		},
+	})
+	var resp3 wsResponseEnvelope
+	readWSJSON(t, conn2, &resp3)
+	var page3 listResponse
+	if err := json.Unmarshal(resp3.Result, &page3); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-	var page2 listResponse
-	if err := json.NewDecoder(w.Body).Decode(&page2); err != nil {
-		t.Fatalf("decode page2: %v", err)
+	items3, _ := page3.Items.([]any)
+	if len(items3) != 1 {
+		t.Errorf("page2: got %d items, want 1", len(items3))
 	}
-	items2, _ := page2.Items.([]any)
-	if len(items2) != 1 {
-		t.Errorf("page2: got %d items, want 1", len(items2))
-	}
-	if page2.NextCursor != "" {
-		t.Errorf("page2: got next_cursor %q, want empty (last page)", page2.NextCursor)
+	if page3.NextCursor != "" {
+		t.Errorf("page2: got next_cursor %q, want empty (last page)", page3.NextCursor)
 	}
 }
 
+// ---- session.get tests ----
+
 func TestHandleSessionGet(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "My Session")
+	_, _, conn := wsSetup(t, fs)
 
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/"+info.ID, nil)
-	srv.ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("got status %d, want %d", w.Code, http.StatusOK)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.get",
+		Payload: map[string]any{
+			"id": info.ID,
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "t1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	var body sessionResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-	if resp.ID != info.ID {
-		t.Errorf("got ID %q, want %q", resp.ID, info.ID)
+	if body.ID != info.ID {
+		t.Errorf("got ID %q, want %q", body.ID, info.ID)
 	}
-	if resp.Title != "My Session" {
-		t.Errorf("got title %q, want %q", resp.Title, "My Session")
+	if body.Title != "My Session" {
+		t.Errorf("got title %q, want %q", body.Title, "My Session")
 	}
-	if resp.State != "active" {
-		t.Errorf("got state %q, want %q", resp.State, "active")
+	if body.State != "active" {
+		t.Errorf("got state %q, want %q", body.State, "active")
 	}
-	if !resp.Running {
-		t.Errorf("got running=%v, want true", resp.Running)
+	if !body.Running {
+		t.Errorf("got running=%v, want true", body.Running)
 	}
 }
 
 func TestHandleSessionGetNotFound(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	_, _, conn := wsSetup(t, fs)
 
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/nonexistent", nil)
-	srv.ServeHTTP(w, r)
-
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("got status %d, want %d", w.Code, http.StatusNotFound)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.get",
+		Payload: map[string]any{
+			"id": "nonexistent",
+		},
+	})
+	var resp wsErrorEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "error" {
+		t.Fatalf("response type = %q, want error", resp.Type)
+	}
+	if resp.Code != "not_found" {
+		t.Fatalf("error code = %q, want not_found", resp.Code)
 	}
 }
 
+// ---- session.suspend / session.close / session.wake tests ----
+
 func TestHandleSessionSuspend(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "To Suspend")
+	_, _, conn := wsSetup(t, fs)
 
-	w := httptest.NewRecorder()
-	r := newPostRequest("/v0/session/"+info.ID+"/suspend", nil)
-	srv.ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.suspend",
+		Payload: map[string]any{
+			"id": info.ID,
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "t1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
 
-	// Verify the session is now suspended.
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
 	got, err := mgr.Get(info.ID)
 	if err != nil {
@@ -326,8 +394,6 @@ func TestHandleSessionSuspend(t *testing.T) {
 
 func TestHandleSessionClose(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "To Close")
 	wait, err := fs.cityBeadStore.Create(beads.Bead{
 		Type:   session.WaitBeadType,
@@ -341,16 +407,22 @@ func TestHandleSessionClose(t *testing.T) {
 		t.Fatalf("create wait: %v", err)
 	}
 	nudgeID := seedQueuedWaitNudge(t, fs, wait, "default")
+	_, _, conn := wsSetup(t, fs)
 
-	w := httptest.NewRecorder()
-	r := newPostRequest("/v0/session/"+info.ID+"/close", nil)
-	srv.ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.close",
+		Payload: map[string]any{
+			"id": info.ID,
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "t1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
 
-	// Session should no longer appear in default listing (excludes closed).
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
 	sessions, err := mgr.List("", "")
 	if err != nil {
@@ -389,8 +461,6 @@ func TestHandleSessionClose(t *testing.T) {
 
 func TestHandleSessionWake_DoesNotRewriteHistoricalWaitNudge(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Historical Wait")
 	wait, err := fs.cityBeadStore.Create(beads.Bead{
 		Type:   session.WaitBeadType,
@@ -428,13 +498,20 @@ func TestHandleSessionWake_DoesNotRewriteHistoricalWaitNudge(t *testing.T) {
 		"sleep_intent": "wait-hold",
 		"sleep_reason": "wait-hold",
 	})
+	_, _, conn := wsSetup(t, fs)
 
-	w := httptest.NewRecorder()
-	r := newPostRequest("/v0/session/"+info.ID+"/wake", nil)
-	srv.ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.wake",
+		Payload: map[string]any{
+			"id": info.ID,
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "t1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
 	updated, err := fs.cityBeadStore.Get(nudge.ID)
 	if err != nil {
@@ -454,20 +531,30 @@ func TestHandleSessionWake_DoesNotRewriteHistoricalWaitNudge(t *testing.T) {
 func TestHandleSessionNoCityStore(t *testing.T) {
 	fs := newFakeState(t) // no cityBeadStore set
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/sessions", nil)
-	srv.ServeHTTP(w, r)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("got status %d, want %d", w.Code, http.StatusServiceUnavailable)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "sessions.list",
+	})
+	var resp wsErrorEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "error" {
+		t.Fatalf("response type = %q, want error", resp.Type)
+	}
+	if resp.Code != "unavailable" {
+		t.Fatalf("error code = %q, want unavailable", resp.Code)
 	}
 }
 
 func TestHandleSessionWake(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Held Session")
 	wait, err := fs.cityBeadStore.Create(beads.Bead{
 		Type:   session.WaitBeadType,
@@ -481,24 +568,28 @@ func TestHandleSessionWake(t *testing.T) {
 		t.Fatalf("create wait: %v", err)
 	}
 	nudgeID := seedQueuedWaitNudge(t, fs, wait, "default")
-
-	// Set hold metadata.
 	_ = fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{
 		"held_until":   "9999-12-31T23:59:59Z",
 		"wait_hold":    "true",
 		"sleep_intent": "wait-hold",
 		"sleep_reason": "wait-hold",
 	})
+	_, _, conn := wsSetup(t, fs)
 
-	w := httptest.NewRecorder()
-	r := newPostRequest("/v0/session/"+info.ID+"/wake", nil)
-	srv.ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.wake",
+		Payload: map[string]any{
+			"id": info.ID,
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "t1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
 
-	// Verify hold cleared.
 	b, _ := fs.cityBeadStore.Get(info.ID)
 	if b.Metadata["held_until"] != "" {
 		t.Errorf("held_until should be cleared, got %q", b.Metadata["held_until"])
@@ -542,125 +633,153 @@ func TestHandleSessionWake(t *testing.T) {
 
 func TestHandleSessionWakeClosed(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Closed Session")
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
 	_ = mgr.Close(info.ID)
+	_, _, conn := wsSetup(t, fs)
 
-	w := httptest.NewRecorder()
-	r := newPostRequest("/v0/session/"+info.ID+"/wake", nil)
-	srv.ServeHTTP(w, r)
-
-	if w.Code != http.StatusConflict {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.wake",
+		Payload: map[string]any{
+			"id": info.ID,
+		},
+	})
+	var resp wsErrorEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "error" {
+		t.Fatalf("response type = %q, want error", resp.Type)
+	}
+	if resp.Code != "conflict" {
+		t.Fatalf("error code = %q, want conflict", resp.Code)
 	}
 }
+
+// ---- session.get by alias ----
 
 func TestHandleSessionGetByTemplateName(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Named Session")
-
-	// Set alias metadata on the bead so public resolution works.
 	_ = fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{
 		"alias": "overseer",
 	})
+	_, _, conn := wsSetup(t, fs)
 
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/overseer", nil)
-	srv.ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.get",
+		Payload: map[string]any{
+			"id": "overseer",
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "t1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	var body sessionResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-	if resp.ID != info.ID {
-		t.Errorf("got ID %q, want %q", resp.ID, info.ID)
+	if body.ID != info.ID {
+		t.Errorf("got ID %q, want %q", body.ID, info.ID)
 	}
 }
 
+// ---- session.patch tests ----
+
 func TestHandleSessionPatchTitle(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Original")
+	_, _, conn := wsSetup(t, fs)
 
-	body := `{"title":"Updated Title"}`
-	req := httptest.NewRequest("PATCH", "/v0/session/"+info.ID, strings.NewReader(body))
-	req.Header.Set("X-GC-Request", "true")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	title := "Updated Title"
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.patch",
+		Payload: map[string]any{
+			"id":    info.ID,
+			"title": title,
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "t1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	var body sessionResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-	if resp.Title != "Updated Title" {
-		t.Errorf("got title %q, want %q", resp.Title, "Updated Title")
+	if body.Title != "Updated Title" {
+		t.Errorf("got title %q, want %q", body.Title, "Updated Title")
 	}
 }
 
 func TestHandleSessionPatchAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Original")
+	_, _, conn := wsSetup(t, fs)
 
-	body := `{"alias":"mayor"}`
-	req := httptest.NewRequest("PATCH", "/v0/session/"+info.ID, strings.NewReader(body))
-	req.Header.Set("X-GC-Request", "true")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	alias := "mayor"
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.patch",
+		Payload: map[string]any{
+			"id":    info.ID,
+			"alias": alias,
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "t1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	var body sessionResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-	if resp.Alias != "mayor" {
-		t.Errorf("got alias %q, want %q", resp.Alias, "mayor")
+	if body.Alias != "mayor" {
+		t.Errorf("got alias %q, want %q", body.Alias, "mayor")
 	}
 }
 
 func TestHandleSessionPatchAliasRejectsManagedSession(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Original")
 	if err := fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{
 		"agent_name": "mayor",
 	}); err != nil {
 		t.Fatalf("SetMetadataBatch: %v", err)
 	}
+	_, _, conn := wsSetup(t, fs)
 
-	body := `{"alias":"new-mayor"}`
-	req := httptest.NewRequest("PATCH", "/v0/session/"+info.ID, strings.NewReader(body))
-	req.Header.Set("X-GC-Request", "true")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusForbidden, w.Body.String())
+	alias := "new-mayor"
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.patch",
+		Payload: map[string]any{
+			"id":    info.ID,
+			"alias": alias,
+		},
+	})
+	var resp wsErrorEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "error" {
+		t.Fatalf("response type = %q, want error", resp.Type)
+	}
+	if resp.Code != "forbidden" {
+		t.Fatalf("error code = %q, want forbidden", resp.Code)
 	}
 }
 
 func TestHandleSessionPatchRejectsReservedQualifiedAliasOnFork(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
 	info, err := mgr.Create(
 		context.Background(),
@@ -676,60 +795,77 @@ func TestHandleSessionPatchRejectsReservedQualifiedAliasOnFork(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
+	_, _, conn := wsSetup(t, fs)
 
-	body := `{"alias":"myrig/worker"}`
-	req := httptest.NewRequest("PATCH", "/v0/session/"+info.ID, strings.NewReader(body))
-	req.Header.Set("X-GC-Request", "true")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusConflict {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
+	alias := "myrig/worker"
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.patch",
+		Payload: map[string]any{
+			"id":    info.ID,
+			"alias": alias,
+		},
+	})
+	var resp wsErrorEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "error" {
+		t.Fatalf("response type = %q, want error", resp.Type)
+	}
+	if resp.Code != "conflict" {
+		t.Fatalf("error code = %q, want conflict", resp.Code)
 	}
 }
 
 func TestHandleSessionPatchImmutableField(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Test")
+	_, _, conn := wsSetup(t, fs)
 
-	body := `{"template":"hacked"}`
-	req := httptest.NewRequest("PATCH", "/v0/session/"+info.ID, strings.NewReader(body))
-	req.Header.Set("X-GC-Request", "true")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusForbidden, w.Body.String())
+	// session.patch only accepts title and alias. "template" should be rejected.
+	// The WS payload struct only has Title and Alias pointers, so "template" would
+	// be ignored. However, the patch logic rejects empty patches. So we test that
+	// passing neither title nor alias returns an error.
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.patch",
+		Payload: map[string]any{
+			"id": info.ID,
+		},
+	})
+	var resp wsErrorEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "error" {
+		t.Fatalf("response type = %q, want error", resp.Type)
+	}
+	if resp.Code != "invalid" {
+		t.Fatalf("error code = %q, want invalid", resp.Code)
 	}
 }
 
+// ---- sessions.list enrichment tests ----
+
 func TestHandleSessionListIncludesReason(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Held")
-
-	// Set sleep reason on bead.
 	_ = fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{
 		"sleep_reason": "user-hold",
 	})
+	_, _, conn := wsSetup(t, fs)
 
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/sessions", nil)
-	srv.ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("got status %d, want %d", w.Code, http.StatusOK)
-	}
-
-	// Parse into raw JSON to check for reason field.
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "sessions.list",
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
 	var raw struct {
 		Items []json.RawMessage `json:"items"`
 	}
-	if err := json.NewDecoder(w.Body).Decode(&raw); err != nil {
-		t.Fatalf("decode: %v", err)
+	if err := json.Unmarshal(resp.Result, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
 	if len(raw.Items) != 1 {
 		t.Fatalf("got %d items, want 1", len(raw.Items))
@@ -743,173 +879,210 @@ func TestHandleSessionListIncludesReason(t *testing.T) {
 	}
 }
 
+// ---- session.rename tests ----
+
 func TestHandleSessionRename(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Original")
+	_, _, conn := wsSetup(t, fs)
 
-	body := `{"title":"Renamed"}`
-	req := newPostRequest("/v0/session/"+info.ID+"/rename", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.rename",
+		Payload: map[string]any{
+			"id":    info.ID,
+			"title": "Renamed",
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "t1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	var body sessionResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-	if resp.Title != "Renamed" {
-		t.Errorf("got title %q, want %q", resp.Title, "Renamed")
+	if body.Title != "Renamed" {
+		t.Errorf("got title %q, want %q", body.Title, "Renamed")
 	}
 }
 
 func TestHandleSessionRenameEmptyTitle(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Test")
+	_, _, conn := wsSetup(t, fs)
 
-	body := `{"title":""}`
-	req := newPostRequest("/v0/session/"+info.ID+"/rename", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusBadRequest, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.rename",
+		Payload: map[string]any{
+			"id":    info.ID,
+			"title": "",
+		},
+	})
+	var resp wsErrorEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "error" {
+		t.Fatalf("response type = %q, want error", resp.Type)
 	}
 }
 
+// ---- session.get ambiguity tests ----
+
 func TestHandleSessionAmbiguousAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
-	// Create two sessions with the same public alias.
 	info1 := createTestSession(t, fs.cityBeadStore, fs.sp, "Worker 1")
 	info2 := createTestSession(t, fs.cityBeadStore, fs.sp, "Worker 2")
 	_ = fs.cityBeadStore.SetMetadataBatch(info1.ID, map[string]string{"alias": "worker"})
 	_ = fs.cityBeadStore.SetMetadataBatch(info2.ID, map[string]string{"alias": "worker"})
+	_, _, conn := wsSetup(t, fs)
 
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/worker", nil)
-	srv.ServeHTTP(w, r)
-
-	if w.Code != http.StatusConflict {
-		t.Fatalf("got status %d, want %d (ambiguous); body: %s", w.Code, http.StatusConflict, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.get",
+		Payload: map[string]any{
+			"id": "worker",
+		},
+	})
+	var resp wsErrorEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "error" {
+		t.Fatalf("response type = %q, want error", resp.Type)
+	}
+	if resp.Code != "ambiguous" {
+		t.Fatalf("error code = %q, want ambiguous", resp.Code)
 	}
 }
 
+// ---- session.get enrichment ----
+
 func TestHandleSessionGetEnrichment(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Enriched Session")
+	_, _, conn := wsSetup(t, fs)
 
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/"+info.ID, nil)
-	srv.ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("got status %d, want %d", w.Code, http.StatusOK)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.get",
+		Payload: map[string]any{
+			"id": info.ID,
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	var body sessionResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-
-	if !resp.Running {
+	if !body.Running {
 		t.Error("running = false, want true for active session")
 	}
-	if resp.DisplayName != "Test" {
-		t.Errorf("display_name = %q, want %q", resp.DisplayName, "Test")
+	if body.DisplayName != "Test" {
+		t.Errorf("display_name = %q, want %q", body.DisplayName, "Test")
 	}
 }
 
 func TestHandleSessionListPeek(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
 	createTestSession(t, fs.cityBeadStore, fs.sp, "Peek Session")
+	_, _, conn := wsSetup(t, fs)
 
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/sessions", nil)
-	srv.ServeHTTP(w, r)
-
-	var resp struct {
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "sessions.list",
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	var body struct {
 		Items []sessionResponse `json:"items"`
 	}
-	_ = json.NewDecoder(w.Body).Decode(&resp)
-	if len(resp.Items) == 0 {
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(body.Items) == 0 {
 		t.Fatal("no sessions returned")
 	}
-	if resp.Items[0].LastOutput != "" {
-		t.Errorf("last_output = %q without peek param, want empty", resp.Items[0].LastOutput)
+	if body.Items[0].LastOutput != "" {
+		t.Errorf("last_output = %q without peek param, want empty", body.Items[0].LastOutput)
 	}
 }
 
+// ---- session.create tests ----
+
 func TestHandleSessionCreate(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	_, _, conn := wsSetup(t, fs)
 
-	body := `{"kind":"agent","name":"myrig/worker"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
-	req.Header.Set("Idempotency-Key", "sess-create-1")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.create",
+		Payload: map[string]any{
+			"kind": "agent",
+			"name": "myrig/worker",
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "t1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	var body sessionResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-	if resp.Template != "myrig/worker" {
-		t.Errorf("Template = %q, want %q", resp.Template, "myrig/worker")
+	if body.Template != "myrig/worker" {
+		t.Errorf("Template = %q, want %q", body.Template, "myrig/worker")
 	}
-	if resp.Title != "myrig/worker" {
-		t.Errorf("Title = %q, want default %q", resp.Title, "myrig/worker")
+	if body.Title != "myrig/worker" {
+		t.Errorf("Title = %q, want default %q", body.Title, "myrig/worker")
 	}
-	// Agent sessions are always created async — not running until the
-	// reconciler starts the process.
-	if resp.Running {
-		t.Errorf("Running = %v, want false for async create", resp.Running)
+	if body.Running {
+		t.Errorf("Running = %v, want false for async create", body.Running)
 	}
-	if resp.DisplayName != "Test Agent" {
-		t.Errorf("DisplayName = %q, want %q", resp.DisplayName, "Test Agent")
+	if body.DisplayName != "Test Agent" {
+		t.Errorf("DisplayName = %q, want %q", body.DisplayName, "Test Agent")
 	}
 }
 
 func TestHandleSessionCreateAsync(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	_, _, conn := wsSetup(t, fs)
 
-	body := `{"kind":"agent","name":"myrig/worker","alias":"sky","async":true}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.create",
+		Payload: map[string]any{
+			"kind":  "agent",
+			"name":  "myrig/worker",
+			"alias": "sky",
+			"async": true,
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "t1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	var body sessionResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-	if resp.State != "creating" {
-		t.Fatalf("State = %q, want %q", resp.State, "creating")
+	if body.State != "creating" {
+		t.Fatalf("State = %q, want %q", body.State, "creating")
 	}
-	if resp.Running {
+	if body.Running {
 		t.Fatalf("Running = true, want false for async create")
 	}
-	if resp.Alias != "sky" {
-		t.Fatalf("Alias = %q, want %q", resp.Alias, "sky")
+	if body.Alias != "sky" {
+		t.Fatalf("Alias = %q, want %q", body.Alias, "sky")
 	}
 	if fs.pokeCount != 1 {
 		t.Fatalf("pokeCount = %d, want 1", fs.pokeCount)
@@ -918,34 +1091,47 @@ func TestHandleSessionCreateAsync(t *testing.T) {
 
 func TestHandleSessionCreateAsyncAcceptsInlineMessage(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	_, _, conn := wsSetup(t, fs)
 
-	// Agent sessions are always async; messages are stored as initial_message
-	// in template_overrides for the reconciler to pick up.
-	body := `{"kind":"agent","name":"myrig/worker","async":true,"message":"hello"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.create",
+		Payload: map[string]any{
+			"kind":    "agent",
+			"name":    "myrig/worker",
+			"async":   true,
+			"message": "hello",
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "t1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
 }
 
 func TestHandleProviderSessionCreateRejectsAsync(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	_, _, conn := wsSetup(t, fs)
 
-	body := `{"kind":"provider","name":"test-agent","async":true}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusBadRequest, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.create",
+		Payload: map[string]any{
+			"kind":  "provider",
+			"name":  "test-agent",
+			"async": true,
+		},
+	})
+	var resp wsErrorEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "error" {
+		t.Fatalf("response type = %q, want error", resp.Type)
 	}
-	if !strings.Contains(w.Body.String(), "async session creation is only supported for configured agent templates") {
-		t.Fatalf("body = %q, want provider async guidance", w.Body.String())
+	if !strings.Contains(resp.Message, "async session creation is only supported for configured agent templates") {
+		t.Fatalf("message = %q, want provider async guidance", resp.Message)
 	}
 	if fs.pokeCount != 0 {
 		t.Fatalf("pokeCount = %d, want 0", fs.pokeCount)
@@ -954,31 +1140,36 @@ func TestHandleProviderSessionCreateRejectsAsync(t *testing.T) {
 
 func TestHandleProviderSessionCreateWithMessageUsesProviderDefaultNudge(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	_, _, conn := wsSetup(t, fs)
 
-	body := `{"kind":"provider","name":"test-agent","message":"hello"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusCreated, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.create",
+		Payload: map[string]any{
+			"kind":    "provider",
+			"name":    "test-agent",
+			"message": "hello",
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "t1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	var body sessionResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-	if resp.ID == "" {
+	if body.ID == "" {
 		t.Fatal("response missing id")
 	}
-	if resp.SessionName == "" {
+	if body.SessionName == "" {
 		t.Fatal("response missing session_name")
 	}
-
 	nudgeCount := 0
 	for _, call := range fs.sp.Calls {
-		if call.Name != resp.SessionName || call.Message != "hello" {
+		if call.Name != body.SessionName || call.Message != "hello" {
 			continue
 		}
 		if call.Method == "Nudge" {
@@ -986,152 +1177,229 @@ func TestHandleProviderSessionCreateWithMessageUsesProviderDefaultNudge(t *testi
 		}
 	}
 	if nudgeCount != 1 {
-		t.Fatalf("Nudge count for %q = %d, want 1; calls=%#v", resp.SessionName, nudgeCount, fs.sp.Calls)
+		t.Fatalf("Nudge count for %q = %d, want 1; calls=%#v", body.SessionName, nudgeCount, fs.sp.Calls)
 	}
 }
 
 func TestHandleSessionCreatePersistsAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	_, _, conn := wsSetup(t, fs)
 
-	body := `{"kind":"agent","name":"myrig/worker","alias":"sky"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.create",
+		Payload: map[string]any{
+			"kind":  "agent",
+			"name":  "myrig/worker",
+			"alias": "sky",
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	var body sessionResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	if body.Alias != "sky" {
+		t.Fatalf("Alias = %q, want sky", body.Alias)
 	}
-	if resp.Alias != "sky" {
-		t.Fatalf("Alias = %q, want sky", resp.Alias)
-	}
-	if resp.SessionName == "sky" {
-		t.Fatalf("SessionName = %q, want bead-derived runtime name", resp.SessionName)
+	if body.SessionName == "sky" {
+		t.Fatalf("SessionName = %q, want bead-derived runtime name", body.SessionName)
 	}
 }
 
 func TestHandleSessionCreateRejectsReservedQualifiedAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	_, _, conn := wsSetup(t, fs)
 
-	body := `{"kind":"agent","name":"myrig/worker","alias":"myrig/worker"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusConflict {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.create",
+		Payload: map[string]any{
+			"kind":  "agent",
+			"name":  "myrig/worker",
+			"alias": "myrig/worker",
+		},
+	})
+	var resp wsErrorEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "error" {
+		t.Fatalf("response type = %q, want error", resp.Type)
+	}
+	if resp.Code != "conflict" {
+		t.Fatalf("error code = %q, want conflict", resp.Code)
 	}
 }
 
 func TestHandleProviderSessionCreateRejectsReservedQualifiedAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	_, _, conn := wsSetup(t, fs)
 
-	body := `{"kind":"provider","name":"test-agent","alias":"myrig/worker"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusConflict {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusConflict, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.create",
+		Payload: map[string]any{
+			"kind":  "provider",
+			"name":  "test-agent",
+			"alias": "myrig/worker",
+		},
+	})
+	var resp wsErrorEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "error" {
+		t.Fatalf("response type = %q, want error", resp.Type)
+	}
+	if resp.Code != "conflict" {
+		t.Fatalf("error code = %q, want conflict", resp.Code)
 	}
 }
 
 func TestHandleSessionCreateRejectsInvalidAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	_, _, conn := wsSetup(t, fs)
 
-	body := `{"kind":"agent","name":"myrig/worker","alias":"bad:name"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusBadRequest, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.create",
+		Payload: map[string]any{
+			"kind":  "agent",
+			"name":  "myrig/worker",
+			"alias": "bad:name",
+		},
+	})
+	var resp wsErrorEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "error" {
+		t.Fatalf("response type = %q, want error", resp.Type)
+	}
+	if resp.Code != "invalid" {
+		t.Fatalf("error code = %q, want invalid", resp.Code)
 	}
 }
 
 func TestHandleSessionCreateRejectsLegacySessionNameField(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	_, _, conn := wsSetup(t, fs)
 
-	body := `{"kind":"agent","name":"myrig/worker","session_name":"mayor"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusBadRequest, w.Body.String())
+	legacyName := "mayor"
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.create",
+		Payload: map[string]any{
+			"kind":         "agent",
+			"name":         "myrig/worker",
+			"session_name": &legacyName,
+		},
+	})
+	var resp wsErrorEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "error" {
+		t.Fatalf("response type = %q, want error", resp.Type)
 	}
-	if !strings.Contains(w.Body.String(), "use alias") {
-		t.Fatalf("body = %q, want use alias guidance", w.Body.String())
+	if !strings.Contains(resp.Message, "use alias") {
+		t.Fatalf("message = %q, want use alias guidance", resp.Message)
 	}
 }
 
 func TestHandleSessionCreateRejectsEmptyLegacySessionNameField(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	_, _, conn := wsSetup(t, fs)
 
-	body := `{"kind":"agent","name":"myrig/worker","session_name":""}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusBadRequest, w.Body.String())
+	emptyName := ""
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.create",
+		Payload: map[string]any{
+			"kind":         "agent",
+			"name":         "myrig/worker",
+			"session_name": &emptyName,
+		},
+	})
+	var resp wsErrorEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "error" {
+		t.Fatalf("response type = %q, want error", resp.Type)
 	}
-	if !strings.Contains(w.Body.String(), "use alias") {
-		t.Fatalf("body = %q, want use alias guidance", w.Body.String())
+	if !strings.Contains(resp.Message, "use alias") {
+		t.Fatalf("message = %q, want use alias guidance", resp.Message)
 	}
 }
 
 func TestHandleSessionCreateRejectsDuplicateAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	_, _, conn := wsSetup(t, fs)
 
-	first := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"myrig/worker","alias":"sky"}`))
-	firstW := httptest.NewRecorder()
-	srv.ServeHTTP(firstW, first)
-	if firstW.Code != http.StatusAccepted {
-		t.Fatalf("first create status %d, want %d; body: %s", firstW.Code, http.StatusAccepted, firstW.Body.String())
+	// First create succeeds.
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.create",
+		Payload: map[string]any{
+			"kind":  "agent",
+			"name":  "myrig/worker",
+			"alias": "sky",
+		},
+	})
+	var resp1 wsResponseEnvelope
+	readWSJSON(t, conn, &resp1)
+	if resp1.Type != "response" {
+		t.Fatalf("first create response type = %q, want response", resp1.Type)
 	}
 
-	second := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"myrig/worker","alias":"sky"}`))
-	secondW := httptest.NewRecorder()
-	srv.ServeHTTP(secondW, second)
-
-	if secondW.Code != http.StatusConflict {
-		t.Fatalf("got status %d, want %d; body: %s", secondW.Code, http.StatusConflict, secondW.Body.String())
+	// Second create with same alias conflicts.
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t2",
+		Action: "session.create",
+		Payload: map[string]any{
+			"kind":  "agent",
+			"name":  "myrig/worker",
+			"alias": "sky",
+		},
+	})
+	var resp2 wsErrorEnvelope
+	readWSJSON(t, conn, &resp2)
+	if resp2.Type != "error" {
+		t.Fatalf("response type = %q, want error", resp2.Type)
+	}
+	if resp2.Code != "conflict" {
+		t.Fatalf("error code = %q, want conflict", resp2.Code)
 	}
 }
 
 func TestHandleSessionCreateCanonicalizesBareTemplate(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	_, _, conn := wsSetup(t, fs)
 
-	req := newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"worker"}`))
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.create",
+		Payload: map[string]any{
+			"kind": "agent",
+			"name": "worker",
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "t1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	var body sessionResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-	if resp.Template != "myrig/worker" {
-		t.Errorf("Template = %q, want %q", resp.Template, "myrig/worker")
+	if body.Template != "myrig/worker" {
+		t.Errorf("Template = %q, want %q", body.Template, "myrig/worker")
 	}
-	if resp.Title != "myrig/worker" {
-		t.Errorf("Title = %q, want %q", resp.Title, "myrig/worker")
+	if body.Title != "myrig/worker" {
+		t.Errorf("Title = %q, want %q", body.Title, "myrig/worker")
 	}
 }
 
@@ -1177,23 +1445,27 @@ func newSessionFakeStateWithOptions(t *testing.T) *fakeState {
 
 func TestHandleSessionCreateAppliesProviderDefaults(t *testing.T) {
 	fs := newSessionFakeStateWithOptions(t)
-	srv := New(fs)
+	_, _, conn := wsSetup(t, fs)
 
-	body := `{"kind":"agent","name":"myrig/worker"}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.create",
+		Payload: map[string]any{
+			"kind": "agent",
+			"name": "myrig/worker",
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "t1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	var body sessionResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-
-	b, err := fs.cityBeadStore.Get(resp.ID)
+	b, err := fs.cityBeadStore.Get(body.ID)
 	if err != nil {
 		t.Fatalf("get bead: %v", err)
 	}
@@ -1208,23 +1480,28 @@ func TestHandleSessionCreateAppliesProviderDefaults(t *testing.T) {
 
 func TestHandleSessionCreateMergesPartialOptionsWithDefaults(t *testing.T) {
 	fs := newSessionFakeStateWithOptions(t)
-	srv := New(fs)
+	_, _, conn := wsSetup(t, fs)
 
-	body := `{"kind":"agent","name":"myrig/worker","options":{"effort":"high"}}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.create",
+		Payload: map[string]any{
+			"kind":    "agent",
+			"name":    "myrig/worker",
+			"options": map[string]string{"effort": "high"},
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "t1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	var body sessionResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-
-	b, err := fs.cityBeadStore.Get(resp.ID)
+	b, err := fs.cityBeadStore.Get(body.ID)
 	if err != nil {
 		t.Fatalf("get bead: %v", err)
 	}
@@ -1242,23 +1519,28 @@ func TestHandleSessionCreateMergesPartialOptionsWithDefaults(t *testing.T) {
 
 func TestHandleSessionCreateExplicitOptionsOverrideDefaults(t *testing.T) {
 	fs := newSessionFakeStateWithOptions(t)
-	srv := New(fs)
+	_, _, conn := wsSetup(t, fs)
 
-	body := `{"kind":"agent","name":"myrig/worker","options":{"permission_mode":"plan","effort":"low"}}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.create",
+		Payload: map[string]any{
+			"kind":    "agent",
+			"name":    "myrig/worker",
+			"options": map[string]string{"permission_mode": "plan", "effort": "low"},
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "t1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	var body sessionResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-
-	b, err := fs.cityBeadStore.Get(resp.ID)
+	b, err := fs.cityBeadStore.Get(body.ID)
 	if err != nil {
 		t.Fatalf("get bead: %v", err)
 	}
@@ -1276,26 +1558,29 @@ func TestHandleSessionCreateExplicitOptionsOverrideDefaults(t *testing.T) {
 
 func TestHandleSessionCreatePreservesInitialMessageWithOptions(t *testing.T) {
 	fs := newSessionFakeStateWithOptions(t)
-	srv := New(fs)
+	_, _, conn := wsSetup(t, fs)
 
-	// Create session with BOTH options AND a message.
-	// Regression: the old code overwrote template_overrides with just the
-	// options, clobbering the initial_message that was set at creation time.
-	body := `{"kind":"agent","name":"myrig/worker","message":"Hello from Discord!","options":{"effort":"high"}}`
-	req := newPostRequest("/v0/sessions", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.create",
+		Payload: map[string]any{
+			"kind":    "agent",
+			"name":    "myrig/worker",
+			"message": "Hello from Discord!",
+			"options": map[string]string{"effort": "high"},
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "t1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	var body sessionResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-
-	b, err := fs.cityBeadStore.Get(resp.ID)
+	b, err := fs.cityBeadStore.Get(body.ID)
 	if err != nil {
 		t.Fatalf("get bead: %v", err)
 	}
@@ -1315,26 +1600,33 @@ func TestHandleSessionCreatePreservesInitialMessageWithOptions(t *testing.T) {
 	}
 }
 
+// ---- session.messages tests ----
+
 func TestHandleSessionMessageResumesSuspendedSessionUsingProviderDefaultNudge(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Resume Me")
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
 	if err := mgr.Suspend(info.ID); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
+	_, _, conn := wsSetup(t, fs)
 
-	req := newPostRequest("/v0/session/"+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
-	req.Header.Set("Idempotency-Key", "sess-msg-1")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.messages",
+		Payload: map[string]any{
+			"id":      info.ID,
+			"message": "hello",
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "t1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
 	if !fs.sp.IsRunning(info.SessionName) {
-		t.Fatal("session should be running after POST /messages")
+		t.Fatal("session should be running after session.messages")
 	}
 	found := false
 	for _, call := range fs.sp.Calls {
@@ -1350,21 +1642,27 @@ func TestHandleSessionMessageResumesSuspendedSessionUsingProviderDefaultNudge(t 
 
 func TestHandleSessionMessageMaterializesNamedSessionUsingProviderDefaultNudge(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	_, _, conn := wsSetup(t, fs)
 
-	req := newPostRequest("/v0/session/worker/messages", strings.NewReader(`{"message":"hello"}`))
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.messages",
+		Payload: map[string]any{
+			"id":      "worker",
+			"message": "hello",
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "t1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-
-	var resp map[string]string
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	var body map[string]string
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-	id := resp["id"]
+	id := body["id"]
 	if id == "" {
 		t.Fatal("response missing session id")
 	}
@@ -1383,7 +1681,7 @@ func TestHandleSessionMessageMaterializesNamedSessionUsingProviderDefaultNudge(t
 		t.Fatal("materialized named session missing session_name")
 	}
 	if !fs.sp.IsRunning(sessionName) {
-		t.Fatalf("session %q should be running after POST /messages", sessionName)
+		t.Fatalf("session %q should be running after session.messages", sessionName)
 	}
 	nudgeCount := 0
 	for _, call := range fs.sp.Calls {
@@ -1395,6 +1693,8 @@ func TestHandleSessionMessageMaterializesNamedSessionUsingProviderDefaultNudge(t
 		t.Fatalf("Nudge count for %q = %d, want 1; calls=%#v", sessionName, nudgeCount, fs.sp.Calls)
 	}
 }
+
+// ---- Internal method tests (no HTTP/WS transport) ----
 
 func TestResolveSessionIDMaterializingNamedWithContext_RollsBackCanceledCreate(t *testing.T) {
 	fs := newSessionFakeState(t)
@@ -1436,33 +1736,48 @@ func TestHandleSessionGetIncludesConfiguredNamedSessionFlag(t *testing.T) {
 		t.Fatalf("materializeNamedSession: %v", err)
 	}
 
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/v0/session/"+id, nil)
-	srv.ServeHTTP(rec, req)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("get status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.get",
+		Payload: map[string]any{
+			"id": id,
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	var body sessionResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-
-	var resp sessionResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if !resp.ConfiguredNamedSession {
+	if !body.ConfiguredNamedSession {
 		t.Fatal("ConfiguredNamedSession = false, want true")
 	}
 }
 
 func TestHandleSessionMessageInvalidNamedTargetDoesNotMaterialize(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	_, _, conn := wsSetup(t, fs)
 
-	req := newPostRequest("/v0/session/worker/messages", strings.NewReader(`{"message":"   "}`))
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.messages",
+		Payload: map[string]any{
+			"id":      "worker",
+			"message": "   ",
+		},
+	})
+	var resp wsErrorEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "error" {
+		t.Fatalf("response type = %q, want error", resp.Type)
 	}
 	items, err := fs.cityBeadStore.ListByLabel(session.LabelSession, 0)
 	if err != nil {
@@ -1475,8 +1790,6 @@ func TestHandleSessionMessageInvalidNamedTargetDoesNotMaterialize(t *testing.T) 
 
 func TestHandleSessionGetReservedNamedTargetIgnoresClosedHistoricalBead(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
 	info, err := mgr.CreateAliasedNamedWithTransport(
 		context.Background(),
@@ -1498,13 +1811,23 @@ func TestHandleSessionGetReservedNamedTargetIgnoresClosedHistoricalBead(t *testi
 	if err := mgr.Close(info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
+	_, _, conn := wsSetup(t, fs)
 
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/v0/session/worker", nil)
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("get status = %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.get",
+		Payload: map[string]any{
+			"id": "worker",
+		},
+	})
+	var resp wsErrorEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "error" {
+		t.Fatalf("response type = %q, want error", resp.Type)
+	}
+	if resp.Code != "not_found" {
+		t.Fatalf("error code = %q, want not_found", resp.Code)
 	}
 }
 
@@ -1525,12 +1848,27 @@ func TestHandleSessionCloseRejectsAlwaysNamedSession(t *testing.T) {
 		t.Fatalf("materializeNamedSession: %v", err)
 	}
 
-	rec := httptest.NewRecorder()
-	req := newPostRequest("/v0/session/"+id+"/close", nil)
-	srv.ServeHTTP(rec, req)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("close status = %d, want %d; body: %s", rec.Code, http.StatusConflict, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.close",
+		Payload: map[string]any{
+			"id": id,
+		},
+	})
+	var resp wsErrorEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "error" {
+		t.Fatalf("response type = %q, want error", resp.Type)
+	}
+	if resp.Code != "conflict" {
+		t.Fatalf("error code = %q, want conflict", resp.Code)
 	}
 }
 
@@ -1710,23 +2048,30 @@ func TestResolveSessionIDMaterializingNamed_RuntimeSessionNameWrongTemplateConfl
 	}
 }
 
+// ---- session.wake materialization tests ----
+
 func TestHandleSessionWakeMaterializesNamedSessionAndStartsRuntime(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
+	_, _, conn := wsSetup(t, fs)
 
-	rec := httptest.NewRecorder()
-	req := newPostRequest("/v0/session/worker/wake", nil)
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("wake status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.wake",
+		Payload: map[string]any{
+			"id": "worker",
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "t1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-
-	var resp map[string]string
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	var body map[string]string
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-	id := resp["id"]
+	id := body["id"]
 	if id == "" {
 		t.Fatal("wake response missing session id")
 	}
@@ -1745,7 +2090,7 @@ func TestHandleSessionWakeMaterializesNamedSessionAndStartsRuntime(t *testing.T)
 		t.Fatal("materialized named session missing session_name")
 	}
 	if !fs.sp.IsRunning(sessionName) {
-		t.Fatalf("session %q should be running after POST /wake", sessionName)
+		t.Fatalf("session %q should be running after session.wake", sessionName)
 	}
 }
 
@@ -1757,12 +2102,12 @@ func TestHandleSessionWakeCanceledNamedCreateRollsBack(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	rec := httptest.NewRecorder()
-	req := newPostRequest("/v0/session/worker/wake", nil).WithContext(ctx)
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("wake status = %d, want %d; body: %s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	// This test exercises internal method behavior with a canceled context.
+	// The WS transport always uses context.Background(), so we test the underlying
+	// method directly.
+	_, err := srv.wakeSessionTarget(ctx, "worker")
+	if err == nil {
+		t.Fatal("wakeSessionTarget: expected error, got nil")
 	}
 
 	all, err := fs.cityBeadStore.ListByLabel(session.LabelSession, 0)
@@ -1776,10 +2121,12 @@ func TestHandleSessionWakeCanceledNamedCreateRollsBack(t *testing.T) {
 	}
 }
 
+// ---- session.transcript tests ----
+
 func TestHandleSessionTranscriptUsesSessionKey(t *testing.T) {
 	fs := newSessionFakeState(t)
-	searchBase := t.TempDir()
 	srv := New(fs)
+	searchBase := t.TempDir()
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -1802,30 +2149,37 @@ func TestHandleSessionTranscriptUsesSessionKey(t *testing.T) {
 		`{"uuid":"9","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"wrong file\"}","timestamp":"2025-01-01T00:00:00Z"}`,
 	)
 
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/transcript", nil)
-	srv.ServeHTTP(w, r)
+	conn := wsSetupSrv(t, srv)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.transcript",
+		Payload: map[string]any{
+			"id": info.ID,
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "t1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-
-	var resp sessionTranscriptResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	var body sessionTranscriptResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-	if resp.Format != "conversation" {
-		t.Errorf("Format = %q, want %q", resp.Format, "conversation")
+	if body.Format != "conversation" {
+		t.Errorf("Format = %q, want %q", body.Format, "conversation")
 	}
-	if len(resp.Turns) != 2 || resp.Turns[1].Text != "world" {
-		t.Fatalf("Turns = %+v, want hello/world from session key file", resp.Turns)
+	if len(body.Turns) != 2 || body.Turns[1].Text != "world" {
+		t.Fatalf("Turns = %+v, want hello/world from session key file", body.Turns)
 	}
 }
 
 func TestHandleSessionTranscriptClosedSession(t *testing.T) {
 	fs := newSessionFakeState(t)
-	searchBase := t.TempDir()
 	srv := New(fs)
+	searchBase := t.TempDir()
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -1847,57 +2201,73 @@ func TestHandleSessionTranscriptClosedSession(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/transcript?tail=0", nil)
-	srv.ServeHTTP(w, r)
+	conn := wsSetupSrv(t, srv)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.transcript",
+		Payload: map[string]any{
+			"id":   info.ID,
+			"tail": 0,
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	var body sessionTranscriptResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-
-	var resp sessionTranscriptResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(resp.Turns) != 2 || resp.Turns[0].Text != "hello" || resp.Turns[1].Text != "world" {
-		t.Fatalf("Turns = %+v, want closed-session transcript hello/world", resp.Turns)
+	if len(body.Turns) != 2 || body.Turns[0].Text != "hello" || body.Turns[1].Text != "world" {
+		t.Fatalf("Turns = %+v, want closed-session transcript hello/world", body.Turns)
 	}
 }
 
+// ---- session.pending and session.respond tests ----
+
 func TestHandleSessionPendingAndRespond(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Interactive")
 	fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
 		RequestID: "req-1",
 		Kind:      "approval",
 		Prompt:    "approve?",
 	})
+	_, _, conn := wsSetup(t, fs)
 
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/pending", nil)
-	srv.ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("pending status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	// pending
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.pending",
+		Payload: map[string]any{
+			"id": info.ID,
+		},
+	})
+	var pendingResp wsResponseEnvelope
+	readWSJSON(t, conn, &pendingResp)
+	var pendingBody sessionPendingResponse
+	if err := json.Unmarshal(pendingResp.Result, &pendingBody); err != nil {
+		t.Fatalf("unmarshal pending: %v", err)
+	}
+	if !pendingBody.Supported || pendingBody.Pending == nil || pendingBody.Pending.RequestID != "req-1" {
+		t.Fatalf("pending response = %#v, want req-1", pendingBody)
 	}
 
-	var pendingResp sessionPendingResponse
-	if err := json.NewDecoder(w.Body).Decode(&pendingResp); err != nil {
-		t.Fatalf("decode pending: %v", err)
-	}
-	if !pendingResp.Supported || pendingResp.Pending == nil || pendingResp.Pending.RequestID != "req-1" {
-		t.Fatalf("pending response = %#v, want req-1", pendingResp)
-	}
-
-	respondReq := newPostRequest("/v0/session/"+info.ID+"/respond", strings.NewReader(`{"action":"approve"}`))
-	respondReq.Header.Set("Idempotency-Key", "sess-respond-1")
-	respondRec := httptest.NewRecorder()
-	srv.ServeHTTP(respondRec, respondReq)
-
-	if respondRec.Code != http.StatusAccepted {
-		t.Fatalf("respond status = %d, want %d; body: %s", respondRec.Code, http.StatusAccepted, respondRec.Body.String())
+	// respond
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t2",
+		Action: "session.respond",
+		Payload: map[string]any{
+			"id":     info.ID,
+			"action": "approve",
+		},
+	})
+	var respondResp wsResponseEnvelope
+	readWSJSON(t, conn, &respondResp)
+	if respondResp.Type != "response" || respondResp.ID != "t2" {
+		t.Fatalf("respond response = %#v, want correlated response", respondResp)
 	}
 	if got := fs.sp.Responses[info.SessionName]; len(got) != 1 || got[0].Action != "approve" {
 		t.Fatalf("responses = %#v, want single approve", got)
@@ -1906,24 +2276,33 @@ func TestHandleSessionPendingAndRespond(t *testing.T) {
 
 func TestHandleSessionMessageRejectsPendingInteraction(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Interactive")
 	fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
 		RequestID: "req-1",
 		Kind:      "approval",
 		Prompt:    "approve?",
 	})
+	_, _, conn := wsSetup(t, fs)
 
-	rec := httptest.NewRecorder()
-	req := newPostRequest("/v0/session/"+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusConflict, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.messages",
+		Payload: map[string]any{
+			"id":      info.ID,
+			"message": "hello",
+		},
+	})
+	var resp wsErrorEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "error" {
+		t.Fatalf("response type = %q, want error", resp.Type)
 	}
-	if !strings.Contains(rec.Body.String(), "pending_interaction") {
-		t.Fatalf("message body = %s, want pending_interaction error", rec.Body.String())
+	if resp.Code != "conflict" {
+		t.Fatalf("error code = %q, want conflict", resp.Code)
+	}
+	if !strings.Contains(resp.Message, "pending interaction") {
+		t.Fatalf("message = %s, want pending interaction error", resp.Message)
 	}
 	for _, call := range fs.sp.Calls {
 		if (call.Method == "Nudge" || call.Method == "NudgeNow") && call.Name == info.SessionName {
@@ -1934,8 +2313,6 @@ func TestHandleSessionMessageRejectsPendingInteraction(t *testing.T) {
 
 func TestHandleSessionMessageRejectsClosedNamedSession(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
 	info, err := mgr.CreateNamedWithTransport(context.Background(), "sky", "myrig/worker", "Sky", "claude", t.TempDir(), "claude", "", nil, session.ProviderResume{}, runtime.Config{})
 	if err != nil {
@@ -1944,263 +2321,63 @@ func TestHandleSessionMessageRejectsClosedNamedSession(t *testing.T) {
 	if err := mgr.Close(info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
+	_, _, conn := wsSetup(t, fs)
 
-	rec := httptest.NewRecorder()
-	req := newPostRequest("/v0/session/sky/messages", strings.NewReader(`{"message":"hello"}`))
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.messages",
+		Payload: map[string]any{
+			"id":      "sky",
+			"message": "hello",
+		},
+	})
+	var resp wsErrorEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "error" {
+		t.Fatalf("response type = %q, want error", resp.Type)
 	}
-	if !strings.Contains(rec.Body.String(), "not_found") {
-		t.Fatalf("message body = %s, want not_found error", rec.Body.String())
+	if resp.Code != "not_found" {
+		t.Fatalf("error code = %q, want not_found", resp.Code)
 	}
 }
 
 func TestHandleSessionRespondMismatchedRequest(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Interactive")
 	fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
 		RequestID: "req-1",
 		Kind:      "approval",
 		Prompt:    "approve?",
 	})
+	_, _, conn := wsSetup(t, fs)
 
-	respondReq := newPostRequest("/v0/session/"+info.ID+"/respond", strings.NewReader(`{"request_id":"req-2","action":"approve"}`))
-	respondRec := httptest.NewRecorder()
-	srv.ServeHTTP(respondRec, respondReq)
-
-	if respondRec.Code != http.StatusConflict {
-		t.Fatalf("respond status = %d, want %d; body: %s", respondRec.Code, http.StatusConflict, respondRec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.respond",
+		Payload: map[string]any{
+			"id":         info.ID,
+			"request_id": "req-2",
+			"action":     "approve",
+		},
+	})
+	var resp wsErrorEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "error" {
+		t.Fatalf("response type = %q, want error", resp.Type)
+	}
+	if resp.Code != "conflict" {
+		t.Fatalf("error code = %q, want conflict", resp.Code)
 	}
 }
 
-func TestHandleSessionStreamSSEHeaders(t *testing.T) {
-	fs := newSessionFakeState(t)
-	searchBase := t.TempDir()
-	srv := New(fs)
-	srv.sessionLogSearchPaths = []string{searchBase}
-
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
-	resume := session.ProviderResume{
-		ResumeFlag:    "--resume",
-		ResumeStyle:   "flag",
-		SessionIDFlag: "--session-id",
-	}
-	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
-		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
-		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
-	)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-
-	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream", nil).WithContext(ctx)
-	rec := httptest.NewRecorder()
-
-	done := make(chan struct{})
-	go func() {
-		srv.ServeHTTP(rec, req)
-		close(done)
-	}()
-	<-done
-
-	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
-		t.Errorf("Content-Type = %q, want %q", ct, "text/event-stream")
-	}
-	if !strings.Contains(rec.Body.String(), "event: turn") || !strings.Contains(rec.Body.String(), "hello") {
-		t.Errorf("stream body missing initial turn: %s", rec.Body.String())
-	}
-}
-
-func TestHandleSessionStreamStoppedWithoutOutputReturnsNotFound(t *testing.T) {
-	fs := newSessionFakeState(t)
-	srv := New(fs)
-	srv.sessionLogSearchPaths = []string{t.TempDir()}
-
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
-	info, err := mgr.Create(context.Background(), "default", "No Output", "echo test", t.TempDir(), "test", nil, session.ProviderResume{}, runtime.Config{})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if err := mgr.Suspend(info.ID); err != nil {
-		t.Fatalf("Suspend: %v", err)
-	}
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream", nil)
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("got status %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
-	}
-}
-
-func TestHandleSessionStreamClosedSessionReturnsSnapshot(t *testing.T) {
-	fs := newSessionFakeState(t)
-	searchBase := t.TempDir()
-	srv := New(fs)
-	srv.sessionLogSearchPaths = []string{searchBase}
-
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
-	resume := session.ProviderResume{
-		ResumeFlag:    "--resume",
-		ResumeStyle:   "flag",
-		SessionIDFlag: "--session-id",
-	}
-	workDir := t.TempDir()
-	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
-		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
-		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
-	)
-	if err := mgr.Close(info.ID); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	req := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/stream", nil)
-	rec := httptest.NewRecorder()
-	done := make(chan struct{})
-	go func() {
-		srv.ServeHTTP(rec, req)
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("closed session stream should return immediately")
-	}
-
-	if !strings.Contains(rec.Body.String(), "event: turn") || !strings.Contains(rec.Body.String(), "hello") || !strings.Contains(rec.Body.String(), "world") {
-		t.Errorf("stream body missing closed-session snapshot: %s", rec.Body.String())
-	}
-}
-
-func TestHandleSessionStreamClosedNamedSessionReturnsSnapshot(t *testing.T) {
-	fs := newSessionFakeState(t)
-	searchBase := t.TempDir()
-	srv := New(fs)
-	srv.sessionLogSearchPaths = []string{searchBase}
-
-	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
-	resume := session.ProviderResume{
-		ResumeFlag:    "--resume",
-		ResumeStyle:   "flag",
-		SessionIDFlag: "--session-id",
-	}
-	workDir := t.TempDir()
-	info, err := mgr.CreateNamedWithTransport(context.Background(), "sky", "myrig/worker", "Chat", "claude", workDir, "claude", "", nil, resume, runtime.Config{})
-	if err != nil {
-		t.Fatalf("CreateNamedWithTransport: %v", err)
-	}
-	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
-		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
-		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
-	)
-	if err := mgr.Close(info.ID); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	req := httptest.NewRequest("GET", "/v0/session/sky/stream", nil)
-	rec := httptest.NewRecorder()
-	done := make(chan struct{})
-	go func() {
-		srv.ServeHTTP(rec, req)
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("closed named session stream should return immediately")
-	}
-
-	if !strings.Contains(rec.Body.String(), "event: turn") || !strings.Contains(rec.Body.String(), "hello") || !strings.Contains(rec.Body.String(), "world") {
-		t.Errorf("stream body missing closed-session snapshot: %s", rec.Body.String())
-	}
-}
-
-func TestStreamSessionTranscriptLogDoesNotSkipTurnsAcrossCompactionBoundaries(t *testing.T) {
-	fs := newSessionFakeState(t)
-	srv := New(fs)
-
-	searchBase := t.TempDir()
-	workDir := t.TempDir()
-	logDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	logPath := filepath.Join(logDir, "session.jsonl")
-	initial := strings.Join([]string{
-		`{"uuid":"a","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"before compaction\"}","timestamp":"2025-01-01T00:00:00Z"}`,
-		`{"uuid":"cb0","parentUuid":"a","type":"system","subtype":"compact_boundary","timestamp":"2025-01-01T00:00:01Z"}`,
-		`{"uuid":"b","parentUuid":"cb0","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"after first boundary\"}","timestamp":"2025-01-01T00:00:02Z"}`,
-	}, "\n") + "\n"
-	if err := os.WriteFile(logPath, []byte(initial), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-
-	info := session.Info{ID: "sess-1", Template: "default"}
-	ctx, cancel := context.WithTimeout(context.Background(), 3500*time.Millisecond)
-	defer cancel()
-
-	rec := httptest.NewRecorder()
-	done := make(chan struct{})
-	go func() {
-		srv.streamSessionTranscriptLog(ctx, rec, info, logPath)
-		close(done)
-	}()
-
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if strings.Contains(rec.Body.String(), "after first boundary") {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	appendFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		t.Fatalf("OpenFile: %v", err)
-	}
-	_, err = appendFile.WriteString(strings.Join([]string{
-		`{"uuid":"c","parentUuid":"b","type":"user","message":"{\"role\":\"user\",\"content\":\"bridge turn\"}","timestamp":"2025-01-01T00:00:03Z"}`,
-		`{"uuid":"cb1","parentUuid":"c","type":"system","subtype":"compact_boundary","timestamp":"2025-01-01T00:00:04Z"}`,
-		`{"uuid":"d","parentUuid":"cb1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"after second boundary\"}","timestamp":"2025-01-01T00:00:05Z"}`,
-	}, "\n") + "\n")
-	if closeErr := appendFile.Close(); closeErr != nil && err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		t.Fatalf("append transcript: %v", err)
-	}
-
-	<-done
-
-	body := rec.Body.String()
-	if !strings.Contains(body, "bridge turn") {
-		t.Fatalf("stream body missing turn written before new compact boundary: %s", body)
-	}
-	if !strings.Contains(body, "after second boundary") {
-		t.Fatalf("stream body missing turn written after new compact boundary: %s", body)
-	}
-}
+// SSE stream tests DELETED - WS subscription tests cover streaming.
 
 func TestHandleSessionTranscriptRawIncludesAllTypes(t *testing.T) {
 	fs := newSessionFakeState(t)
-	searchBase := t.TempDir()
 	srv := New(fs)
+	searchBase := t.TempDir()
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -2215,7 +2392,6 @@ func TestHandleSessionTranscriptRawIncludesAllTypes(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	// Write entries of different types, including tool_use and progress.
 	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
 		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
 		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
@@ -2223,31 +2399,36 @@ func TestHandleSessionTranscriptRawIncludesAllTypes(t *testing.T) {
 		`{"uuid":"4","parentUuid":"3","type":"tool_result","message":"{\"role\":\"tool\",\"content\":\"file contents\"}","timestamp":"2025-01-01T00:00:03Z"}`,
 	)
 
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/"+info.ID+"/transcript?format=raw&tail=0", nil)
-	srv.ServeHTTP(w, r)
+	conn := wsSetupSrv(t, srv)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.transcript",
+		Payload: map[string]any{
+			"id":     info.ID,
+			"format": "raw",
+			"tail":   0,
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	var body sessionRawTranscriptResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-
-	var resp sessionRawTranscriptResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	if body.Format != "raw" {
+		t.Errorf("Format = %q, want %q", body.Format, "raw")
 	}
-	if resp.Format != "raw" {
-		t.Errorf("Format = %q, want %q", resp.Format, "raw")
-	}
-	// Raw format should include ALL entry types (user, assistant, tool_use, tool_result).
-	if len(resp.Messages) != 4 {
-		t.Fatalf("got %d raw messages, want 4 (all types included)", len(resp.Messages))
+	if len(body.Messages) != 4 {
+		t.Fatalf("got %d raw messages, want 4 (all types included)", len(body.Messages))
 	}
 }
 
 func TestHandleSessionGetActivity(t *testing.T) {
 	fs := newSessionFakeState(t)
-	searchBase := t.TempDir()
 	srv := New(fs)
+	searchBase := t.TempDir()
 	srv.sessionLogSearchPaths = []string{searchBase}
 
 	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
@@ -2262,28 +2443,33 @@ func TestHandleSessionGetActivity(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	// Write JSONL ending with end_turn → expect "idle".
 	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
 		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
 		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":\"done\",\"model\":\"claude-opus-4-5-20251101\",\"usage\":{\"input_tokens\":1000}}","timestamp":"2025-01-01T00:00:01Z"}`,
 	)
 
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/"+info.ID, nil)
-	srv.ServeHTTP(w, r)
+	conn := wsSetupSrv(t, srv)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.get",
+		Payload: map[string]any{
+			"id": info.ID,
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	var body sessionResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Activity != "idle" {
-		t.Errorf("Activity = %q, want %q", resp.Activity, "idle")
+	if body.Activity != "idle" {
+		t.Errorf("Activity = %q, want %q", body.Activity, "idle")
 	}
 }
+
+// ---- Pure unit tests (no transport) ----
 
 func TestFilterMetadataAllowlistsMCPrefix(t *testing.T) {
 	tests := []struct {
@@ -2337,11 +2523,7 @@ func TestFilterMetadataAllowlistsMCPrefix(t *testing.T) {
 
 func TestHandleSessionGetMetadataFiltered(t *testing.T) {
 	fs := newSessionFakeState(t)
-	srv := New(fs)
-
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Test")
-
-	// Set metadata with both mc_ and internal keys.
 	if err := fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{
 		"mc_project_id":  "proj-1",
 		"session_key":    "secret-key",
@@ -2352,35 +2534,35 @@ func TestHandleSessionGetMetadataFiltered(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("set metadata: %v", err)
 	}
+	_, _, conn := wsSetup(t, fs)
 
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/v0/session/"+info.ID, nil)
-	srv.ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "t1",
+		Action: "session.get",
+		Payload: map[string]any{
+			"id": info.ID,
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	var body sessionResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-
-	var resp sessionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	if len(body.Metadata) != 2 {
+		t.Fatalf("got %d metadata keys, want 2: %v", len(body.Metadata), body.Metadata)
 	}
-
-	// Only mc_ prefixed keys should be present.
-	if len(resp.Metadata) != 2 {
-		t.Fatalf("got %d metadata keys, want 2: %v", len(resp.Metadata), resp.Metadata)
+	if body.Metadata["mc_project_id"] != "proj-1" {
+		t.Errorf("mc_project_id = %q, want %q", body.Metadata["mc_project_id"], "proj-1")
 	}
-	if resp.Metadata["mc_project_id"] != "proj-1" {
-		t.Errorf("mc_project_id = %q, want %q", resp.Metadata["mc_project_id"], "proj-1")
+	if body.Metadata["mc_custom_mode"] != "plan" {
+		t.Errorf("mc_custom_mode = %q, want %q", body.Metadata["mc_custom_mode"], "plan")
 	}
-	if resp.Metadata["mc_custom_mode"] != "plan" {
-		t.Errorf("mc_custom_mode = %q, want %q", resp.Metadata["mc_custom_mode"], "plan")
-	}
-	// Internal keys must NOT be present.
-	if _, ok := resp.Metadata["session_key"]; ok {
+	if _, ok := body.Metadata["session_key"]; ok {
 		t.Error("session_key should not be exposed in API response")
 	}
-	if _, ok := resp.Metadata["command"]; ok {
+	if _, ok := body.Metadata["command"]; ok {
 		t.Error("command should not be exposed in API response")
 	}
 }

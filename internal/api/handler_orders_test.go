@@ -2,8 +2,8 @@ package api
 
 import (
 	"encoding/json"
-	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,23 +14,29 @@ import (
 func TestHandleOrderList_Empty(t *testing.T) {
 	fs := newFakeState(t)
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/orders", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "test-1", Action: "orders.list"})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+
+	if resp.Type != "response" || resp.ID != "test-1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
 
-	var resp struct {
+	var body struct {
 		Orders []orderResponse `json:"orders"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(resp.Orders) != 0 {
-		t.Errorf("len(orders) = %d, want 0", len(resp.Orders))
+	if len(body.Orders) != 0 {
+		t.Errorf("len(orders) = %d, want 0", len(body.Orders))
 	}
 }
 
@@ -55,26 +61,32 @@ func TestHandleOrderList(t *testing.T) {
 		},
 	}
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/orders", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "test-1", Action: "orders.list"})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+
+	if resp.Type != "response" || resp.ID != "test-1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
 
-	var resp struct {
+	var body struct {
 		Orders []orderResponse `json:"orders"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(resp.Orders) != 2 {
-		t.Fatalf("len(orders) = %d, want 2", len(resp.Orders))
+	if len(body.Orders) != 2 {
+		t.Fatalf("len(orders) = %d, want 2", len(body.Orders))
 	}
 
-	a0 := resp.Orders[0]
+	a0 := body.Orders[0]
 	if a0.Name != "dolt-health" {
 		t.Errorf("name = %q, want %q", a0.Name, "dolt-health")
 	}
@@ -91,7 +103,7 @@ func TestHandleOrderList(t *testing.T) {
 		t.Error("expected enabled=true")
 	}
 
-	a1 := resp.Orders[1]
+	a1 := body.Orders[1]
 	if a1.Name != "deploy" {
 		t.Errorf("name = %q, want %q", a1.Name, "deploy")
 	}
@@ -118,24 +130,35 @@ func TestHandleOrderGet(t *testing.T) {
 		},
 	}
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/order/dolt-health", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:    "request",
+		ID:      "test-1",
+		Action:  "order.get",
+		Payload: map[string]any{"name": "dolt-health"},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+
+	if resp.Type != "response" || resp.ID != "test-1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
 
-	var resp orderResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+	var body orderResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if resp.Name != "dolt-health" {
-		t.Errorf("name = %q, want %q", resp.Name, "dolt-health")
+	if body.Name != "dolt-health" {
+		t.Errorf("name = %q, want %q", body.Name, "dolt-health")
 	}
-	if resp.Type != "exec" {
-		t.Errorf("type = %q, want %q", resp.Type, "exec")
+	if body.Type != "exec" {
+		t.Errorf("type = %q, want %q", body.Type, "exec")
 	}
 }
 
@@ -150,38 +173,63 @@ func TestHandleOrderGet_ScopedName(t *testing.T) {
 		},
 	}
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
 	// Match by scoped name: health:rig:myrig
-	req := httptest.NewRequest("GET", "/v0/order/health:rig:myrig", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:    "request",
+		ID:      "test-1",
+		Action:  "order.get",
+		Payload: map[string]any{"name": "health:rig:myrig"},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	if resp.Type != "response" || resp.ID != "test-1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
 
-	var resp orderResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+	var body orderResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if resp.Name != "health" {
-		t.Errorf("name = %q, want %q", resp.Name, "health")
+	if body.Name != "health" {
+		t.Errorf("name = %q, want %q", body.Name, "health")
 	}
-	if resp.Rig != "myrig" {
-		t.Errorf("rig = %q, want %q", resp.Rig, "myrig")
+	if body.Rig != "myrig" {
+		t.Errorf("rig = %q, want %q", body.Rig, "myrig")
 	}
 }
 
 func TestHandleOrderGet_NotFound(t *testing.T) {
 	fs := newFakeState(t)
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/order/nonexistent", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:    "request",
+		ID:      "test-1",
+		Action:  "order.get",
+		Payload: map[string]any{"name": "nonexistent"},
+	})
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+
+	if errResp.Type != "error" {
+		t.Fatalf("type = %q, want error", errResp.Type)
+	}
+	if errResp.Code != "not_found" {
+		t.Fatalf("code = %q, want not_found", errResp.Code)
 	}
 }
 
@@ -191,13 +239,24 @@ func TestHandleOrderDisable(t *testing.T) {
 		{Name: "health", Exec: "echo ok", Gate: "cooldown"},
 	}
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := newPostRequest("/v0/order/health/disable", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:    "request",
+		ID:      "test-1",
+		Action:  "order.disable",
+		Payload: map[string]any{"name": "health"},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+
+	if resp.Type != "response" || resp.ID != "test-1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
 
 	// Verify override was written.
@@ -219,13 +278,24 @@ func TestHandleOrderEnable(t *testing.T) {
 		{Name: "health", Exec: "echo ok", Gate: "cooldown"},
 	}
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := newPostRequest("/v0/order/health/enable", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:    "request",
+		ID:      "test-1",
+		Action:  "order.enable",
+		Payload: map[string]any{"name": "health"},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+
+	if resp.Type != "response" || resp.ID != "test-1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
 
 	if len(fs.cfg.Orders.Overrides) != 1 {
@@ -290,44 +360,59 @@ func TestHandleOrdersFeedReturnsWorkflowAndScheduledOrderRuns(t *testing.T) {
 	}
 
 	srv := New(fs)
-	req := httptest.NewRequest(http.MethodGet, "/v0/orders/feed?scope_kind=rig&scope_ref=myrig", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "test-1",
+		Action: "orders.feed",
+		Payload: map[string]any{
+			"scope_kind": "rig",
+			"scope_ref":  "myrig",
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+
+	if resp.Type != "response" || resp.ID != "test-1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
 
-	var resp struct {
+	var body struct {
 		Items         []monitorFeedItemResponse `json:"items"`
 		Partial       bool                      `json:"partial"`
 		PartialErrors []string                  `json:"partial_errors"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(resp.Items) != 2 {
-		t.Fatalf("len(items) = %d, want 2", len(resp.Items))
+	if len(body.Items) != 2 {
+		t.Fatalf("len(items) = %d, want 2", len(body.Items))
 	}
 
-	if resp.Items[0].WorkflowID != "wf-123" || resp.Items[0].Type != "formula" {
-		t.Fatalf("items[0] = %+v, want workflow feed item first", resp.Items[0])
+	if body.Items[0].WorkflowID != "wf-123" || body.Items[0].Type != "formula" {
+		t.Fatalf("items[0] = %+v, want workflow feed item first", body.Items[0])
 	}
-	if resp.Items[0].Target != "myrig/claude" {
-		t.Fatalf("workflow target = %q, want myrig/claude", resp.Items[0].Target)
+	if body.Items[0].Target != "myrig/claude" {
+		t.Fatalf("workflow target = %q, want myrig/claude", body.Items[0].Target)
 	}
-	if !resp.Items[0].RunDetailAvailable || resp.Items[0].DetailAvailable {
-		t.Fatalf("workflow detail flags = %+v, want run_detail_available only", resp.Items[0])
+	if !body.Items[0].RunDetailAvailable || body.Items[0].DetailAvailable {
+		t.Fatalf("workflow detail flags = %+v, want run_detail_available only", body.Items[0])
 	}
 
-	if resp.Items[1].BeadID == "" || resp.Items[1].Type != "formula" {
-		t.Fatalf("items[1] = %+v, want scheduled formula order tracking item", resp.Items[1])
+	if body.Items[1].BeadID == "" || body.Items[1].Type != "formula" {
+		t.Fatalf("items[1] = %+v, want scheduled formula order tracking item", body.Items[1])
 	}
-	if resp.Items[1].Target != "myrig/reviewers" {
-		t.Fatalf("scheduled order target = %q, want myrig/reviewers", resp.Items[1].Target)
+	if body.Items[1].Target != "myrig/reviewers" {
+		t.Fatalf("scheduled order target = %q, want myrig/reviewers", body.Items[1].Target)
 	}
-	if resp.Items[1].UpdatedAt == resp.Items[1].StartedAt {
-		t.Fatalf("scheduled order timestamps = started %q updated %q, want updated_at to reflect newer run activity", resp.Items[1].StartedAt, resp.Items[1].UpdatedAt)
+	if body.Items[1].UpdatedAt == body.Items[1].StartedAt {
+		t.Fatalf("scheduled order timestamps = started %q updated %q, want updated_at to reflect newer run activity", body.Items[1].StartedAt, body.Items[1].UpdatedAt)
 	}
 }
 
@@ -348,28 +433,35 @@ func TestHandleOrderCheckTreatsWispFailedAsFailed(t *testing.T) {
 	}
 
 	srv := New(fs)
-	req := httptest.NewRequest(http.MethodGet, "/v0/orders/check", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "test-1", Action: "orders.check"})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+
+	if resp.Type != "response" || resp.ID != "test-1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
 
-	var resp struct {
+	var body struct {
 		Checks []struct {
 			ScopedName     string  `json:"scoped_name"`
 			LastRunOutcome *string `json:"last_run_outcome"`
 		} `json:"checks"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(resp.Checks) != 1 {
-		t.Fatalf("len(checks) = %d, want 1", len(resp.Checks))
+	if len(body.Checks) != 1 {
+		t.Fatalf("len(checks) = %d, want 1", len(body.Checks))
 	}
-	if resp.Checks[0].LastRunOutcome == nil || *resp.Checks[0].LastRunOutcome != "failed" {
-		t.Fatalf("last_run_outcome = %v, want failed", resp.Checks[0].LastRunOutcome)
+	if body.Checks[0].LastRunOutcome == nil || *body.Checks[0].LastRunOutcome != "failed" {
+		t.Fatalf("last_run_outcome = %v, want failed", body.Checks[0].LastRunOutcome)
 	}
 }
 
@@ -425,30 +517,45 @@ func TestHandleOrdersFeedIgnoresUnrelatedStoreListFailures(t *testing.T) {
 	}
 
 	srv := New(fs)
-	req := httptest.NewRequest(http.MethodGet, "/v0/orders/feed?scope_kind=rig&scope_ref=myrig", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "test-1",
+		Action: "orders.feed",
+		Payload: map[string]any{
+			"scope_kind": "rig",
+			"scope_ref":  "myrig",
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+
+	if resp.Type != "response" || resp.ID != "test-1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
 
-	var resp struct {
+	var body struct {
 		Items         []monitorFeedItemResponse `json:"items"`
 		Partial       bool                      `json:"partial"`
 		PartialErrors []string                  `json:"partial_errors"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(resp.Items) != 1 {
-		t.Fatalf("len(items) = %d, want 1", len(resp.Items))
+	if len(body.Items) != 1 {
+		t.Fatalf("len(items) = %d, want 1", len(body.Items))
 	}
-	if resp.Items[0].WorkflowID != "wf-healthy" {
-		t.Fatalf("items[0] = %+v, want healthy workflow result", resp.Items[0])
+	if body.Items[0].WorkflowID != "wf-healthy" {
+		t.Fatalf("items[0] = %+v, want healthy workflow result", body.Items[0])
 	}
-	if resp.Partial {
-		t.Fatalf("partial = true, want false; errors = %v", resp.PartialErrors)
+	if body.Partial {
+		t.Fatalf("partial = true, want false; errors = %v", body.PartialErrors)
 	}
 }
 
@@ -476,28 +583,43 @@ func TestHandleOrdersFeedCityScopeIncludesRigWorkflowRuns(t *testing.T) {
 	}
 
 	srv := New(fs)
-	req := httptest.NewRequest(http.MethodGet, "/v0/orders/feed?scope_kind=city&scope_ref=test-city", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "test-1",
+		Action: "orders.feed",
+		Payload: map[string]any{
+			"scope_kind": "city",
+			"scope_ref":  "test-city",
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+
+	if resp.Type != "response" || resp.ID != "test-1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
 
-	var resp struct {
+	var body struct {
 		Items []monitorFeedItemResponse `json:"items"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(resp.Items) != 1 {
-		t.Fatalf("len(items) = %d, want 1", len(resp.Items))
+	if len(body.Items) != 1 {
+		t.Fatalf("len(items) = %d, want 1", len(body.Items))
 	}
-	if resp.Items[0].WorkflowID != "wf-city-view" {
-		t.Fatalf("items[0] = %+v, want rig workflow visible in city feed", resp.Items[0])
+	if body.Items[0].WorkflowID != "wf-city-view" {
+		t.Fatalf("items[0] = %+v, want rig workflow visible in city feed", body.Items[0])
 	}
-	if resp.Items[0].ScopeKind != "rig" || resp.Items[0].ScopeRef != "myrig" {
-		t.Fatalf("scope = %s/%s, want rig/myrig", resp.Items[0].ScopeKind, resp.Items[0].ScopeRef)
+	if body.Items[0].ScopeKind != "rig" || body.Items[0].ScopeRef != "myrig" {
+		t.Fatalf("scope = %s/%s, want rig/myrig", body.Items[0].ScopeKind, body.Items[0].ScopeRef)
 	}
 }
 
@@ -526,30 +648,45 @@ func TestHandleOrdersFeedCityScopeReportsPartialRigFailures(t *testing.T) {
 	}
 
 	srv := New(fs)
-	req := httptest.NewRequest(http.MethodGet, "/v0/orders/feed?scope_kind=city&scope_ref=test-city", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "test-1",
+		Action: "orders.feed",
+		Payload: map[string]any{
+			"scope_kind": "city",
+			"scope_ref":  "test-city",
+		},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+
+	if resp.Type != "response" || resp.ID != "test-1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
 
-	var resp struct {
+	var body struct {
 		Items         []monitorFeedItemResponse `json:"items"`
 		Partial       bool                      `json:"partial"`
 		PartialErrors []string                  `json:"partial_errors"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(resp.Items) != 1 {
-		t.Fatalf("len(items) = %d, want 1", len(resp.Items))
+	if len(body.Items) != 1 {
+		t.Fatalf("len(items) = %d, want 1", len(body.Items))
 	}
-	if !resp.Partial {
+	if !body.Partial {
 		t.Fatalf("partial = false, want true")
 	}
-	if len(resp.PartialErrors) != 1 || resp.PartialErrors[0] != "rig:alpha store unavailable" {
-		t.Fatalf("partial_errors = %v, want rig:alpha store unavailable", resp.PartialErrors)
+	if len(body.PartialErrors) != 1 || body.PartialErrors[0] != "rig:alpha store unavailable" {
+		t.Fatalf("partial_errors = %v, want rig:alpha store unavailable", body.PartialErrors)
 	}
 }
 
@@ -560,30 +697,52 @@ func TestHandleOrderGet_Ambiguous(t *testing.T) {
 		{Name: "health", Exec: "echo ok", Gate: "cooldown", Rig: "rig-b"},
 	}
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	// Bare name should return 409 when ambiguous.
-	req := httptest.NewRequest("GET", "/v0/order/health", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if w.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusConflict, w.Body.String())
+	// Bare name should return ambiguous error.
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:    "request",
+		ID:      "test-1",
+		Action:  "order.get",
+		Payload: map[string]any{"name": "health"},
+	})
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+
+	if errResp.Type != "error" {
+		t.Fatalf("type = %q, want error", errResp.Type)
+	}
+	if errResp.Code != "ambiguous" {
+		t.Fatalf("code = %q, want ambiguous", errResp.Code)
+	}
+	if !strings.Contains(errResp.Message, "ambiguous") {
+		t.Fatalf("message = %q, want ambiguous mention", errResp.Message)
 	}
 
 	// Scoped name should resolve unambiguously.
-	req = httptest.NewRequest("GET", "/v0/order/health:rig:rig-a", nil)
-	w = httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:    "request",
+		ID:      "test-2",
+		Action:  "order.get",
+		Payload: map[string]any{"name": "health:rig:rig-a"},
+	})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	if resp.Type != "response" || resp.ID != "test-2" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-	var resp orderResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+	var body orderResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if resp.Rig != "rig-a" {
-		t.Errorf("rig = %q, want %q", resp.Rig, "rig-a")
+	if body.Rig != "rig-a" {
+		t.Errorf("rig = %q, want %q", body.Rig, "rig-a")
 	}
 }
 
@@ -594,25 +753,53 @@ func TestHandleOrderDisable_Ambiguous(t *testing.T) {
 		{Name: "health", Exec: "echo ok", Gate: "cooldown", Rig: "rig-b"},
 	}
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := newPostRequest("/v0/order/health/disable", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if w.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusConflict, w.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:    "request",
+		ID:      "test-1",
+		Action:  "order.disable",
+		Payload: map[string]any{"name": "health"},
+	})
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+
+	if errResp.Type != "error" {
+		t.Fatalf("type = %q, want error", errResp.Type)
+	}
+	if errResp.Code != "ambiguous" {
+		t.Fatalf("code = %q, want ambiguous", errResp.Code)
 	}
 }
 
 func TestHandleOrderDisable_NotFound(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := newPostRequest("/v0/order/nonexistent/disable", nil)
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:    "request",
+		ID:      "test-1",
+		Action:  "order.disable",
+		Payload: map[string]any{"name": "nonexistent"},
+	})
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+
+	if errResp.Type != "error" {
+		t.Fatalf("type = %q, want error", errResp.Type)
+	}
+	if errResp.Code != "not_found" {
+		t.Fatalf("code = %q, want not_found", errResp.Code)
 	}
 }

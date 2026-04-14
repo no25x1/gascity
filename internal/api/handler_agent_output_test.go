@@ -3,168 +3,232 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
-	"time"
 
-	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
-// writeSessionJSONL creates a JSONL session file at the slug path for
-// the given workDir.
-func writeSessionJSONL(t *testing.T, searchBase, workDir string, lines ...string) {
+// createTranscriptSession creates a session with a real workDir (temp dir)
+// and a SessionIDFlag so session_key-based lookup works. Returns the info
+// and a searchBase suitable for writeNamedSessionJSONL.
+func createTranscriptSession(t *testing.T, fs *fakeState, title string) (session.Info, string) {
 	t.Helper()
-	slug := strings.ReplaceAll(workDir, "/", "-")
-	slug = strings.ReplaceAll(slug, ".", "-")
-	dir := filepath.Join(searchBase, slug)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
+	workDir := t.TempDir()
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
 	}
-	path := filepath.Join(dir, "test-session.jsonl")
-	content := strings.Join(lines, "\n") + "\n"
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
+	info, err := mgr.Create(context.Background(), "default", title, "echo test", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
 	}
-}
-
-func newServerWithSearchPaths(state State, searchBase string) *Server {
-	s := New(state)
-	s.sessionLogSearchPaths = []string{searchBase}
-	return s
+	searchBase := t.TempDir()
+	return info, searchBase
 }
 
 func TestAgentOutputConversation(t *testing.T) {
-	state := newFakeState(t)
-	rigDir := t.TempDir()
-	state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: rigDir}}
+	fs := newSessionFakeState(t)
+	info, searchBase := createTranscriptSession(t, fs, "Conversation")
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
 
-	searchBase := t.TempDir()
-	writeSessionJSONL(t, searchBase, rigDir,
+	writeNamedSessionJSONL(t, searchBase, info.WorkDir, info.SessionKey+".jsonl",
 		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
 		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
 	)
-
-	srv := newServerWithSearchPaths(state, searchBase)
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output?tail=0", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	if err := session.NewManager(fs.cityBeadStore, fs.sp).Close(info.ID); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 
-	var resp agentOutputResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "test-1",
+		Action: "session.transcript",
+		Payload: map[string]any{
+			"id":   info.ID,
+			"tail": 0,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "test-1" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
 
-	if resp.Agent != "myrig/worker" {
-		t.Errorf("Agent = %q, want %q", resp.Agent, "myrig/worker")
+	var body sessionTranscriptResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
 	}
-	if resp.Format != "conversation" {
-		t.Errorf("Format = %q, want %q", resp.Format, "conversation")
+	if body.Format != "conversation" {
+		t.Errorf("Format = %q, want %q", body.Format, "conversation")
 	}
-	if len(resp.Turns) != 2 {
-		t.Fatalf("got %d turns, want 2", len(resp.Turns))
+	if len(body.Turns) != 2 {
+		t.Fatalf("got %d turns, want 2", len(body.Turns))
 	}
-	if resp.Turns[0].Role != "user" || resp.Turns[0].Text != "hello" {
-		t.Errorf("turn[0] = %+v, want role=user text=hello", resp.Turns[0])
+	if body.Turns[0].Role != "user" || body.Turns[0].Text != "hello" {
+		t.Errorf("turn[0] = %+v, want role=user text=hello", body.Turns[0])
 	}
-	if resp.Turns[1].Role != "assistant" || resp.Turns[1].Text != "world" {
-		t.Errorf("turn[1] = %+v, want role=assistant text=world", resp.Turns[1])
+	if body.Turns[1].Role != "assistant" || body.Turns[1].Text != "world" {
+		t.Errorf("turn[1] = %+v, want role=assistant text=world", body.Turns[1])
 	}
 }
 
 func TestAgentOutputConversationUsesConfiguredWorkDir(t *testing.T) {
-	state := newFakeState(t)
-	rigDir := t.TempDir()
-	state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: rigDir}}
-	state.cfg.Agents[0].WorkDir = ".gc/worktrees/{{.Rig}}/{{.AgentBase}}"
+	fs := newSessionFakeState(t)
+	// Create a session with a specific workDir to verify it's resolved correctly.
+	workDir := t.TempDir()
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
+	}
+	info, err := mgr.Create(context.Background(), "default", "WorkDir Test", "echo test", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
 
 	searchBase := t.TempDir()
-	workDir := filepath.Join(state.cityPath, ".gc", "worktrees", "myrig", "worker")
-	writeSessionJSONL(t, searchBase, workDir,
+	writeNamedSessionJSONL(t, searchBase, info.WorkDir, info.SessionKey+".jsonl",
 		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
 		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"from workdir\"}","timestamp":"2025-01-01T00:00:01Z"}`,
 	)
-
-	srv := newServerWithSearchPaths(state, searchBase)
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output?tail=0", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	if err := mgr.Close(info.ID); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 
-	var resp agentOutputResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "test-workdir",
+		Action: "session.transcript",
+		Payload: map[string]any{
+			"id":   info.ID,
+			"tail": 0,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "test-workdir" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
-	if resp.Format != "conversation" {
-		t.Fatalf("Format = %q, want conversation", resp.Format)
+
+	var body sessionTranscriptResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
 	}
-	if len(resp.Turns) != 2 || resp.Turns[1].Text != "from workdir" {
-		t.Fatalf("Turns = %+v, want configured work_dir session log", resp.Turns)
+	if body.Format != "conversation" {
+		t.Fatalf("Format = %q, want conversation", body.Format)
+	}
+	if len(body.Turns) != 2 || body.Turns[1].Text != "from workdir" {
+		t.Fatalf("Turns = %+v, want configured work_dir session log", body.Turns)
 	}
 }
 
 func TestAgentOutputNotFound(t *testing.T) {
-	state := newFakeState(t)
-	srv := New(state)
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-	req := httptest.NewRequest("GET", "/v0/agent/nonexistent/output", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "test-not-found",
+		Action: "session.transcript",
+		Payload: map[string]any{
+			"id": "nonexistent-session-id",
+		},
+	})
+
+	var resp wsErrorEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "error" {
+		t.Fatalf("response type = %q, want error", resp.Type)
+	}
+	if resp.ID != "test-not-found" {
+		t.Fatalf("response id = %q, want test-not-found", resp.ID)
 	}
 }
 
 func TestAgentOutputCityScoped(t *testing.T) {
-	state := newFakeState(t)
-	state.cfg.Agents = append(state.cfg.Agents, config.Agent{Name: "mayor"})
+	fs := newSessionFakeState(t)
+	info, searchBase := createTranscriptSession(t, fs, "CityScoped")
 
-	searchBase := t.TempDir()
-	writeSessionJSONL(t, searchBase, state.cityPath,
+	writeNamedSessionJSONL(t, searchBase, info.WorkDir, info.SessionKey+".jsonl",
 		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"plan\"}","timestamp":"2025-01-01T00:00:00Z"}`,
 	)
-
-	srv := newServerWithSearchPaths(state, searchBase)
-	req := httptest.NewRequest("GET", "/v0/agent/mayor/output?tail=0", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
+	if err := session.NewManager(fs.cityBeadStore, fs.sp).Close(info.ID); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 
-	var resp agentOutputResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "test-city-scoped",
+		Action: "session.transcript",
+		Payload: map[string]any{
+			"id":   info.ID,
+			"tail": 0,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "test-city-scoped" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
 
-	if resp.Agent != "mayor" {
-		t.Errorf("Agent = %q, want %q", resp.Agent, "mayor")
+	var body sessionTranscriptResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
 	}
-	if len(resp.Turns) != 1 {
-		t.Fatalf("got %d turns, want 1", len(resp.Turns))
+	if body.ID != info.ID {
+		t.Errorf("ID = %q, want %q", body.ID, info.ID)
 	}
-	if resp.Turns[0].Text != "plan" {
-		t.Errorf("text = %q, want %q", resp.Turns[0].Text, "plan")
+	if len(body.Turns) != 1 {
+		t.Fatalf("got %d turns, want 1", len(body.Turns))
+	}
+	if body.Turns[0].Text != "plan" {
+		t.Errorf("text = %q, want %q", body.Turns[0].Text, "plan")
 	}
 }
 
 func TestAgentOutputPagination(t *testing.T) {
-	state := newFakeState(t)
-	rigDir := t.TempDir()
-	state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: rigDir}}
-	searchBase := t.TempDir()
+	fs := newSessionFakeState(t)
+	info, searchBase := createTranscriptSession(t, fs, "Pagination")
 
 	var lines []string
 	lines = append(lines, `{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"first\"}","timestamp":"2025-01-01T00:00:00Z"}`)
@@ -176,232 +240,96 @@ func TestAgentOutputPagination(t *testing.T) {
 	lines = append(lines, `{"uuid":"7","parentUuid":"6","type":"user","message":"{\"role\":\"user\",\"content\":\"third\"}","timestamp":"2025-01-01T00:00:06Z"}`)
 	lines = append(lines, `{"uuid":"8","parentUuid":"7","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"third reply\"}","timestamp":"2025-01-01T00:00:07Z"}`)
 
-	writeSessionJSONL(t, searchBase, rigDir, lines...)
-
-	srv := newServerWithSearchPaths(state, searchBase)
-
-	// tail=1 should return messages from the last compact boundary onward.
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output?tail=1", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
+	writeNamedSessionJSONL(t, searchBase, info.WorkDir, info.SessionKey+".jsonl", lines...)
+	if err := session.NewManager(fs.cityBeadStore, fs.sp).Close(info.ID); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 
-	var resp agentOutputResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	// tail=1 should return messages from the last compact boundary onward.
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "test-pagination",
+		Action: "session.transcript",
+		Payload: map[string]any{
+			"id":    info.ID,
+			"turns": 1,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "test-pagination" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body sessionTranscriptResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
 	}
 
 	// Boundary text + 2 turns after = 3 turns (system entry "compacted 2" + user + assistant).
-	if len(resp.Turns) != 3 {
-		t.Fatalf("got %d turns, want 3", len(resp.Turns))
+	if len(body.Turns) != 3 {
+		t.Fatalf("got %d turns, want 3", len(body.Turns))
 	}
 
-	if resp.Pagination == nil {
+	if body.Pagination == nil {
 		t.Fatal("pagination is nil, expected non-nil")
 	}
-	if !resp.Pagination.HasOlderMessages {
+	if !body.Pagination.HasOlderMessages {
 		t.Error("expected HasOlderMessages=true")
 	}
 }
 
 func TestAgentOutputCorruptedSessionFile(t *testing.T) {
-	state := newFakeState(t)
-	rigDir := t.TempDir()
-	state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: rigDir}}
+	fs := newSessionFakeState(t)
+	info, searchBase := createTranscriptSession(t, fs, "Corrupted")
 
-	searchBase := t.TempDir()
-	// Write a corrupt JSONL file that will cause ReadFile to fail.
-	// An empty file won't trigger the path (FindSessionFile needs .jsonl).
-	// Write truncated/garbage content.
-	writeSessionJSONL(t, searchBase, rigDir,
+	// Write corrupt JSONL content.
+	writeNamedSessionJSONL(t, searchBase, info.WorkDir, info.SessionKey+".jsonl",
 		`not valid json at all {{{`,
 	)
-
-	srv := newServerWithSearchPaths(state, searchBase)
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	// The corrupt file IS found by FindSessionFile, but ReadFile returns
-	// an empty session (no valid entries). The handler should return a
-	// conversation response with 0 turns (the entries are skipped, not errored).
-	// This is correct because ReadFile skips malformed lines rather than
-	// failing the whole parse.
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-	var resp agentOutputResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Format != "conversation" {
-		t.Errorf("Format = %q, want %q", resp.Format, "conversation")
-	}
-}
-
-func TestAgentOutputStreamSSEHeaders(t *testing.T) {
-	state := newFakeState(t)
-	rigDir := t.TempDir()
-	state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: rigDir}}
-
-	searchBase := t.TempDir()
-	writeSessionJSONL(t, searchBase, rigDir,
-		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
-	)
-
-	srv := newServerWithSearchPaths(state, searchBase)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output/stream", nil).WithContext(ctx)
-	rec := httptest.NewRecorder()
-
-	done := make(chan struct{})
-	go func() {
-		srv.ServeHTTP(rec, req)
-		close(done)
-	}()
-
-	<-done
-
-	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
-		t.Errorf("Content-Type = %q, want %q", ct, "text/event-stream")
+	if err := session.NewManager(fs.cityBeadStore, fs.sp).Close(info.ID); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 
-	body := rec.Body.String()
-	if !strings.Contains(body, "event: turn") {
-		t.Errorf("body should contain SSE turn event, got: %s", body)
-	}
-	if !strings.Contains(body, "hello") {
-		t.Errorf("body should contain initial turn text, got: %s", body)
-	}
-}
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
 
-func TestAgentOutputStreamNotFound(t *testing.T) {
-	state := newFakeState(t)
-	srv := New(state)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	req := httptest.NewRequest("GET", "/v0/agent/nonexistent/output/stream", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "test-corrupt",
+		Action: "session.transcript",
+		Payload: map[string]any{
+			"id": info.ID,
+		},
+	})
 
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
-	}
-}
-
-func TestAgentOutputStreamNotRunning(t *testing.T) {
-	state := newFakeState(t)
-	// Agent exists in config but no session file and not running → 404.
-	srv := New(state)
-
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output/stream", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
-	}
-}
-
-func TestAgentOutputStreamNewTurns(t *testing.T) {
-	state := newFakeState(t)
-	rigDir := t.TempDir()
-	state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: rigDir}}
-
-	searchBase := t.TempDir()
-	writeSessionJSONL(t, searchBase, rigDir,
-		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"first\"}","timestamp":"2025-01-01T00:00:00Z"}`,
-	)
-
-	srv := newServerWithSearchPaths(state, searchBase)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output/stream", nil).WithContext(ctx)
-	rec := httptest.NewRecorder()
-
-	done := make(chan struct{})
-	go func() {
-		srv.ServeHTTP(rec, req)
-		close(done)
-	}()
-
-	// Wait for initial burst.
-	time.Sleep(100 * time.Millisecond)
-
-	// Append a new entry to the session file.
-	slug := strings.ReplaceAll(rigDir, "/", "-")
-	slug = strings.ReplaceAll(slug, ".", "-")
-	sessionFile := filepath.Join(searchBase, slug, "test-session.jsonl")
-	f, err := os.OpenFile(sessionFile, os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = f.WriteString(`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"second\"}","timestamp":"2025-01-01T00:00:01Z"}` + "\n")
-	f.Close() //nolint:errcheck // test file
-	if err != nil {
-		t.Fatal(err)
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "test-corrupt" {
+		t.Fatalf("response = %#v, want correlated response", resp)
 	}
 
-	// Wait for poll to pick up the change (poll interval is 2s).
-	time.Sleep(3 * time.Second)
-	cancel()
-	<-done
-
-	body := rec.Body.String()
-	// Should have two SSE events: initial "first" and new "second".
-	if !strings.Contains(body, "first") {
-		t.Errorf("body should contain initial turn, got: %s", body)
+	var body sessionTranscriptResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
 	}
-	if !strings.Contains(body, "second") {
-		t.Errorf("body should contain new turn after poll, got: %s", body)
-	}
-	// Should have two separate "event: turn" lines.
-	if strings.Count(body, "event: turn") < 2 {
-		t.Errorf("expected at least 2 SSE turn events, got %d in: %s", strings.Count(body, "event: turn"), body)
-	}
-}
-
-func TestAgentOutputStreamStoppedAgent(t *testing.T) {
-	// When a session log exists but the agent is not running, the stream
-	// should still succeed (replay mode) but include GC-Agent-Status: stopped.
-	state := newFakeState(t)
-	rigDir := t.TempDir()
-	state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: rigDir}}
-
-	searchBase := t.TempDir()
-	writeSessionJSONL(t, searchBase, rigDir,
-		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
-	)
-
-	srv := newServerWithSearchPaths(state, searchBase)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output/stream", nil).WithContext(ctx)
-	rec := httptest.NewRecorder()
-
-	done := make(chan struct{})
-	go func() {
-		srv.ServeHTTP(rec, req)
-		close(done)
-	}()
-	<-done
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-	if got := rec.Header().Get("GC-Agent-Status"); got != "stopped" {
-		t.Errorf("GC-Agent-Status = %q, want %q", got, "stopped")
-	}
-	if !strings.Contains(rec.Body.String(), "hello") {
-		t.Errorf("body should contain session data, got: %s", rec.Body.String())
+	if body.Format != "conversation" {
+		t.Errorf("Format = %q, want %q", body.Format, "conversation")
 	}
 }

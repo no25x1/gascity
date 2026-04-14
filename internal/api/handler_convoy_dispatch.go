@@ -226,6 +226,103 @@ func (s *Server) handleWorkflowDelete(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// deleteWorkflow is the shared method for workflow deletion (WS + HTTP).
+func (s *Server) deleteWorkflow(workflowID, scopeKind, scopeRef string, deleteFromStore bool) (any, error) {
+	if workflowID == "" {
+		return nil, httpError{status: 400, code: "invalid", message: "id is required"}
+	}
+	stores := s.workflowStores()
+	closed := 0
+	deleted := 0
+	found := false
+	for _, info := range stores {
+		if info.store == nil {
+			continue
+		}
+		if scopeKind != "" && info.scopeKind != scopeKind {
+			continue
+		}
+		if scopeRef != "" && info.scopeRef != scopeRef {
+			continue
+		}
+		var ids []string
+		seen := make(map[string]struct{}, 4)
+		rootIDs := make([]string, 0, 2)
+		rootSeen := make(map[string]struct{}, 2)
+		addID := func(id string) {
+			if id == "" {
+				return
+			}
+			if _, ok := seen[id]; ok {
+				return
+			}
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
+		addRoot := func(root beads.Bead) {
+			if !isWorkflowRoot(root) || !matchesWorkflowID(root, workflowID) {
+				return
+			}
+			if _, ok := rootSeen[root.ID]; ok {
+				return
+			}
+			rootSeen[root.ID] = struct{}{}
+			rootIDs = append(rootIDs, root.ID)
+			addID(root.ID)
+		}
+		if root, err := info.store.Get(workflowID); err == nil {
+			addRoot(root)
+		}
+		if roots, err := info.store.List(beads.ListQuery{
+			Metadata:      map[string]string{"gc.kind": "workflow", "gc.workflow_id": workflowID},
+			IncludeClosed: true,
+		}); err == nil {
+			for _, root := range roots {
+				addRoot(root)
+			}
+		}
+		for _, rootID := range rootIDs {
+			all, err := info.store.List(beads.ListQuery{
+				Metadata:      map[string]string{"gc.root_bead_id": rootID},
+				IncludeClosed: true,
+			})
+			if err != nil {
+				continue
+			}
+			for _, b := range all {
+				addID(b.ID)
+			}
+		}
+		if len(ids) == 0 {
+			continue
+		}
+		found = true
+		n, _ := info.store.CloseAll(ids, map[string]string{"gc.outcome": "skipped"})
+		closed += n
+		if deleteFromStore {
+			for _, id := range ids {
+				if deps, err := info.store.DepList(id, "down"); err == nil {
+					for _, dep := range deps {
+						_ = info.store.DepRemove(id, dep.DependsOnID)
+					}
+				}
+				if deps, err := info.store.DepList(id, "up"); err == nil {
+					for _, dep := range deps {
+						_ = info.store.DepRemove(dep.IssueID, id)
+					}
+				}
+				if err := info.store.Delete(id); err == nil {
+					deleted++
+				}
+			}
+		}
+	}
+	if !found {
+		return nil, httpError{status: 404, code: "not_found", message: "workflow " + workflowID + " not found"}
+	}
+	return map[string]any{"workflow_id": workflowID, "closed": closed, "deleted": deleted}, nil
+}
+
 func (s *Server) buildWorkflowSnapshot(workflowID, fallbackScopeKind, fallbackScopeRef string, snapshotIndex uint64) (*workflowSnapshotResponse, error) {
 	// Fast path: resolve the correct store and fetch the entire snapshot via SQL.
 	if snap, err := s.tryFullWorkflowSQL(workflowID, fallbackScopeKind, fallbackScopeRef, snapshotIndex); err == nil {

@@ -441,20 +441,26 @@ func (s *Server) assignBead(id, assignee string) (map[string]string, error) {
 	return nil, beads.ErrNotFound
 }
 
-func (s *Server) handleBeadDelete(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+func (s *Server) deleteBead(id string) error {
 	for _, store := range s.beadStoresForID(id) {
 		if err := store.Close(id); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			writeError(w, http.StatusInternalServerError, "internal", err.Error())
-			return
+			return err
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+		return nil
+	}
+	return beads.ErrNotFound
+}
+
+func (s *Server) handleBeadDelete(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.deleteBead(id); err != nil {
+		writeStoreError(w, err)
 		return
 	}
-	writeError(w, http.StatusNotFound, "not_found", "bead "+id+" not found")
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 // findStore returns the bead store for the given rig. If rig is empty, returns

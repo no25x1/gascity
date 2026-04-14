@@ -1454,7 +1454,7 @@
             "type": "string"
           },
           "type": "object",
-          "description": "PermissionModes maps permission mode names to CLI flags.\nExample: {\"unrestricted\": \"--dangerously-skip-permissions\", \"plan\": \"--permission-mode plan\"}\nThis is a config-only lookup table consumed by external clients\n(e.g., Mission Control) to populate permission mode dropdowns.\nLaunch-time flag substitution is planned for a follow-up PR —\ncurrently no runtime code reads this field."
+          "description": "PermissionModes maps permission mode names to CLI flags.\nExample: {\"unrestricted\": \"--dangerously-skip-permissions\", \"plan\": \"--permission-mode plan\"}\nThis is a config-only lookup table consumed by external clients\nto populate permission mode dropdowns.\nLaunch-time flag substitution is planned for a follow-up PR —\ncurrently no runtime code reads this field."
         },
         "option_defaults": {
           "additionalProperties": {

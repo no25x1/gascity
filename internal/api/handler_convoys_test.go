@@ -2,9 +2,7 @@ package api
 
 import (
 	"encoding/json"
-	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -13,118 +11,134 @@ import (
 func TestConvoyCreateAndGet(t *testing.T) {
 	state := newFakeMutatorState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	// Create a bead to link as convoy item.
 	store := state.stores["myrig"]
 	item, err := store.Create(beads.Bead{Title: "task-1"})
 	if err != nil {
 		t.Fatalf("create item: %v", err)
 	}
 
-	// Create convoy with the item.
-	body := `{"rig":"myrig","title":"test convoy","items":["` + item.ID + `"]}`
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/convoys", strings.NewReader(body)))
-
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create: status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "cc-1", Action: "convoy.create", Payload: map[string]any{"rig": "myrig", "title": "test convoy", "items": []string{item.ID}}})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("create: type = %q, want response; result = %s", resp.Type, resp.Result)
 	}
-
 	var convoy beads.Bead
-	if err := json.NewDecoder(rec.Body).Decode(&convoy); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	json.Unmarshal(resp.Result, &convoy)
 	if convoy.Type != "convoy" {
-		t.Fatalf("type = %q, want %q", convoy.Type, "convoy")
+		t.Fatalf("type = %q, want convoy", convoy.Type)
 	}
 
-	// Get convoy.
-	rec = httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/v0/convoy/"+convoy.ID, nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("get: status = %d, want 200", rec.Code)
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "cg-1", Action: "convoy.get", Payload: map[string]any{"id": convoy.ID}})
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("get: type = %q, want response", resp.Type)
 	}
 }
 
 func TestConvoyCreateInvalidItem(t *testing.T) {
 	state := newFakeMutatorState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	body := `{"rig":"myrig","title":"test","items":["nonexistent"]}`
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/convoys", strings.NewReader(body)))
-
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404; body = %s", rec.Code, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "cc-bad", Action: "convoy.create", Payload: map[string]any{"rig": "myrig", "title": "test", "items": []string{"nonexistent"}}})
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Type != "error" {
+		t.Fatalf("type = %q, want error", errResp.Type)
 	}
 }
 
 func TestConvoyAddItems(t *testing.T) {
 	state := newFakeMutatorState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
 	store := state.stores["myrig"]
 	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
 	item, _ := store.Create(beads.Bead{Title: "task"})
 
-	body := `{"items":["` + item.ID + `"]}`
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/convoy/"+convoy.ID+"/add", strings.NewReader(body)))
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("add: status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "ca-1", Action: "convoy.add", Payload: map[string]any{"id": convoy.ID, "items": []string{item.ID}}})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("add: type = %q, want response", resp.Type)
 	}
 }
 
 func TestConvoyClose(t *testing.T) {
 	state := newFakeMutatorState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
 	store := state.stores["myrig"]
 	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
 
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/convoy/"+convoy.ID+"/close", nil))
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("close: status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "ccl-1", Action: "convoy.close", Payload: map[string]any{"id": convoy.ID}})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("close: type = %q, want response", resp.Type)
 	}
 }
 
 func TestConvoyNotFound(t *testing.T) {
 	state := newFakeMutatorState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/v0/convoy/nonexistent", nil))
-
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", rec.Code)
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "cnf", Action: "convoy.get", Payload: map[string]any{"id": "nonexistent"}})
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Type != "error" {
+		t.Fatalf("type = %q, want error", errResp.Type)
 	}
 }
 
 func TestConvoyRemoveItems(t *testing.T) {
 	state := newFakeMutatorState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
 	store := state.stores["myrig"]
 	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
 	item, _ := store.Create(beads.Bead{Title: "task"})
-
-	// Add item to convoy.
 	pid := convoy.ID
 	store.Update(item.ID, beads.UpdateOpts{ParentID: &pid}) //nolint:errcheck
 
-	// Remove item from convoy.
-	body := `{"items":["` + item.ID + `"]}`
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/convoy/"+convoy.ID+"/remove", strings.NewReader(body)))
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("remove: status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "cr-1", Action: "convoy.remove", Payload: map[string]any{"id": convoy.ID, "items": []string{item.ID}}})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("remove: type = %q, want response", resp.Type)
 	}
 
-	// Verify item is unlinked.
 	got, _ := store.Get(item.ID)
 	if got.ParentID != "" {
 		t.Errorf("ParentID = %q, want empty", got.ParentID)
@@ -134,141 +148,154 @@ func TestConvoyRemoveItems(t *testing.T) {
 func TestConvoyRemoveNonMember(t *testing.T) {
 	state := newFakeMutatorState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
 	store := state.stores["myrig"]
 	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
-	item, _ := store.Create(beads.Bead{Title: "unrelated task"})
+	item, _ := store.Create(beads.Bead{Title: "unrelated"})
 
-	// Item is not linked to this convoy — remove should fail.
-	body := `{"items":["` + item.ID + `"]}`
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/convoy/"+convoy.ID+"/remove", strings.NewReader(body)))
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("remove non-member: status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "cr-nm", Action: "convoy.remove", Payload: map[string]any{"id": convoy.ID, "items": []string{item.ID}}})
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Type != "error" {
+		t.Fatalf("type = %q, want error", errResp.Type)
 	}
 }
 
 func TestConvoyCheck(t *testing.T) {
 	state := newFakeMutatorState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
 	store := state.stores["myrig"]
 	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
 	item1, _ := store.Create(beads.Bead{Title: "task1"})
 	item2, _ := store.Create(beads.Bead{Title: "task2"})
-
 	pid := convoy.ID
 	store.Update(item1.ID, beads.UpdateOpts{ParentID: &pid}) //nolint:errcheck
 	store.Update(item2.ID, beads.UpdateOpts{ParentID: &pid}) //nolint:errcheck
 	store.Close(item1.ID)                                    //nolint:errcheck
 
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/v0/convoy/"+convoy.ID+"/check", nil))
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("check: status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "chk-1", Action: "convoy.check", Payload: map[string]any{"id": convoy.ID}})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("check: type = %q, want response", resp.Type)
 	}
-
-	var resp map[string]any
-	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
-	if resp["total"] != float64(2) {
-		t.Errorf("total = %v, want 2", resp["total"])
+	var result map[string]any
+	json.Unmarshal(resp.Result, &result)
+	if result["total"] != float64(2) {
+		t.Errorf("total = %v, want 2", result["total"])
 	}
-	if resp["closed"] != float64(1) {
-		t.Errorf("closed = %v, want 1", resp["closed"])
+	if result["closed"] != float64(1) {
+		t.Errorf("closed = %v, want 1", result["closed"])
 	}
-	if resp["complete"] != false {
-		t.Errorf("complete = %v, want false", resp["complete"])
+	if result["complete"] != false {
+		t.Errorf("complete = %v, want false", result["complete"])
 	}
 }
 
 func TestConvoyCheckComplete(t *testing.T) {
 	state := newFakeMutatorState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
 	store := state.stores["myrig"]
 	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
 	item, _ := store.Create(beads.Bead{Title: "task"})
-
 	pid := convoy.ID
 	store.Update(item.ID, beads.UpdateOpts{ParentID: &pid}) //nolint:errcheck
 	store.Close(item.ID)                                    //nolint:errcheck
 
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/v0/convoy/"+convoy.ID+"/check", nil))
-
-	var resp map[string]any
-	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
-	if resp["complete"] != true {
-		t.Errorf("complete = %v, want true", resp["complete"])
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "chk-complete", Action: "convoy.check", Payload: map[string]any{"id": convoy.ID}})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	var result map[string]any
+	json.Unmarshal(resp.Result, &result)
+	if result["complete"] != true {
+		t.Errorf("complete = %v, want true", result["complete"])
 	}
 }
 
 func TestConvoyDelete(t *testing.T) {
 	state := newFakeMutatorState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
 	store := state.stores["myrig"]
 	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
 
-	req := httptest.NewRequest("DELETE", "/v0/convoy/"+convoy.ID, nil)
-	req.Header.Set("X-GC-Request", "true")
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("delete: status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "cd-1", Action: "convoy.delete", Payload: map[string]any{"id": convoy.ID}})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("delete: type = %q, want response", resp.Type)
 	}
 
-	// Verify closed.
 	got, _ := store.Get(convoy.ID)
 	if got.Status != "closed" {
-		t.Errorf("Status = %q, want %q", got.Status, "closed")
+		t.Errorf("Status = %q, want closed", got.Status)
 	}
 }
 
 func TestConvoyDeleteNotConvoy(t *testing.T) {
 	state := newFakeMutatorState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
 	store := state.stores["myrig"]
 	task, _ := store.Create(beads.Bead{Title: "task", Type: "task"})
 
-	req := httptest.NewRequest("DELETE", "/v0/convoy/"+task.ID, nil)
-	req.Header.Set("X-GC-Request", "true")
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "cd-nc", Action: "convoy.delete", Payload: map[string]any{"id": task.ID}})
+	var errResp wsErrorEnvelope
+	readWSJSON(t, conn, &errResp)
+	if errResp.Type != "error" {
+		t.Fatalf("type = %q, want error", errResp.Type)
 	}
 }
 
 func TestConvoyList(t *testing.T) {
 	state := newFakeMutatorState(t)
 	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
 
 	store := state.stores["myrig"]
-	if _, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy"}); err != nil {
-		t.Fatalf("create convoy: %v", err)
-	}
-	if _, err := store.Create(beads.Bead{Title: "task", Type: "task"}); err != nil {
-		t.Fatalf("create task: %v", err)
-	}
+	store.Create(beads.Bead{Title: "convoy", Type: "convoy"}) //nolint:errcheck
+	store.Create(beads.Bead{Title: "task", Type: "task"})     //nolint:errcheck
 
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, httptest.NewRequest("GET", "/v0/convoys", nil))
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
+	writeWSJSON(t, conn, wsRequestEnvelope{Type: "request", ID: "cl-1", Action: "convoys.list"})
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" {
+		t.Fatalf("list: type = %q, want response", resp.Type)
 	}
-
-	var resp listResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Total != 1 {
-		t.Fatalf("total = %d, want 1 (only convoys)", resp.Total)
+	var lr listResponse
+	json.Unmarshal(resp.Result, &lr)
+	if lr.Total != 1 {
+		t.Fatalf("total = %d, want 1 (only convoys)", lr.Total)
 	}
 }

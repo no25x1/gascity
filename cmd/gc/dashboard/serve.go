@@ -12,9 +12,9 @@ import (
 	gcapi "github.com/gastownhall/gascity/internal/api"
 )
 
-// Serve starts the dashboard HTTP server. It creates an APIFetcher, builds
-// the dashboard mux, and listens on the given port. This is the entry point
-// called by the "gc dashboard serve" cobra command.
+// Serve starts the dashboard HTTP server. The dashboard serves static files
+// only — all API operations go from the browser directly to the supervisor
+// via WebSocket.
 func Serve(port int, cityPath, cityName, apiURL, initialCityScope string) error {
 	apiURL = strings.TrimRight(apiURL, "/")
 	if err := ValidateAPI(apiURL); err != nil {
@@ -28,21 +28,19 @@ func Serve(port int, cityPath, cityName, apiURL, initialCityScope string) error 
 
 	isSupervisor := detectSupervisor(apiURL)
 	if isSupervisor {
-		log.Printf("dashboard: supervisor mode detected, city selector enabled")
+		log.Printf("dashboard: supervisor mode detected")
 	}
 
-	fetcher := NewAPIFetcher(apiURL, cityPath, cityName)
-
 	mux, err := NewDashboardMux(
-		fetcher,
+		nil, // fetcher not needed — browser uses WS directly
 		cityPath,
 		cityName,
 		apiURL,
 		initialCityScope,
 		isSupervisor,
-		8*time.Second,  // fetchTimeout
-		30*time.Second, // defaultRunTimeout
-		60*time.Second, // maxRunTimeout
+		8*time.Second,
+		30*time.Second,
+		60*time.Second,
 	)
 	if err != nil {
 		return fmt.Errorf("dashboard: failed to create handler: %w", err)
@@ -53,9 +51,7 @@ func Serve(port int, cityPath, cityName, apiURL, initialCityScope string) error 
 	return http.ListenAndServe(addr, mux)
 }
 
-// ValidateAPI checks that the upstream GC API is reachable before the
-// dashboard starts serving requests. This prevents a misleading empty UI when
-// the user supplied or auto-discovered API endpoint is dead.
+// ValidateAPI checks that the upstream GC API is reachable.
 func ValidateAPI(apiURL string) error {
 	if strings.TrimSpace(apiURL) == "" {
 		return fmt.Errorf("dashboard: API server URL is empty")
@@ -79,8 +75,7 @@ func ValidateAPI(apiURL string) error {
 	return nil
 }
 
-// detectSupervisor probes the API server for supervisor mode by checking
-// whether /v0/cities responds successfully.
+// detectSupervisor probes the API server for supervisor mode.
 func detectSupervisor(apiURL string) bool {
 	client := gcapi.NewClient(apiURL)
 	cities, err := client.ListCities()

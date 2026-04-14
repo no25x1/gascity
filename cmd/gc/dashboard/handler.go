@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -340,6 +341,7 @@ func (h *ConvoyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Summary:       summary,
 		Expand:        expandPanel,
 		CSRFToken:     h.csrfToken,
+		APIURL:        h.apiURL,
 		Cities:        cities,
 		SelectedCity:  selectedCity,
 	}
@@ -500,18 +502,11 @@ func generateCSRFToken() string {
 	return hex.EncodeToString(b)
 }
 
-// NewDashboardMux creates an HTTP handler that serves both the dashboard and API.
-func NewDashboardMux(fetcher *APIFetcher, cityPath, cityName, apiURL, initialCityScope string, isSupervisor bool,
-	fetchTimeout, defaultRunTimeout, maxRunTimeout time.Duration,
+// NewDashboardMux creates an HTTP handler that serves the static dashboard.
+// All API operations go from the browser directly to the supervisor via WebSocket.
+func NewDashboardMux(_ *APIFetcher, _, _, apiURL, initialCityScope string, _ bool,
+	_, _, _ time.Duration,
 ) (http.Handler, error) {
-	csrfToken := generateCSRFToken()
-
-	convoyHandler, err := NewConvoyHandler(fetcher, isSupervisor, apiURL, initialCityScope, fetchTimeout, csrfToken)
-	if err != nil {
-		return nil, err
-	}
-
-	apiHandler := NewAPIHandler(cityPath, cityName, apiURL, initialCityScope, defaultRunTimeout, maxRunTimeout, csrfToken)
 
 	staticFS, err := fs.Sub(staticFiles, "static")
 	if err != nil {
@@ -520,10 +515,34 @@ func NewDashboardMux(fetcher *APIFetcher, cityPath, cityName, apiURL, initialCit
 	staticHandler := http.FileServer(http.FS(staticFS))
 
 	mux := http.NewServeMux()
-	mux.Handle("/api/", apiHandler)
-	mux.HandleFunc("/panels/activity", convoyHandler.ServeActivityPanel)
 	mux.Handle("/static/", http.StripPrefix("/static/", staticHandler))
-	mux.Handle("/", convoyHandler)
+	// Serve index.html for all non-static paths.
+	dashAPIURL := apiURL // capture for closure
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		indexData, err := fs.ReadFile(staticFS, "index.html")
+		if err != nil {
+			http.Error(w, "dashboard not found", http.StatusInternalServerError)
+			return
+		}
+		// Inject API URL and selected city into the static HTML.
+		html := string(indexData)
+		city := r.URL.Query().Get("city")
+		if city == "" {
+			city = initialCityScope
+		}
+		inject := ""
+		if dashAPIURL != "" {
+			inject += `<meta name="api-url" content="` + dashAPIURL + `">`
+		}
+		if city != "" {
+			inject += `<meta name="selected-city" content="` + city + `">`
+		}
+		if inject != "" {
+			html = strings.Replace(html, "</head>", inject+"\n</head>", 1)
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(html)) //nolint:errcheck
+	})
 
 	return mux, nil
 }

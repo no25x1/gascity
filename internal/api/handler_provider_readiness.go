@@ -567,6 +567,7 @@ func probeGitHubCLIAuthStatus(ctx context.Context, homeDir, ghPath string) provi
 		ctx,
 		homeDir,
 		providerProbeCLITimeout,
+		nil,
 		ghPath,
 		"auth",
 		"status",
