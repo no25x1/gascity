@@ -400,9 +400,69 @@ func (s *Server) startSessionStreamSubscription(parent context.Context, sess *so
 	}, nil
 }
 
-// watchCityAvailability polls the resolver for city availability. When the
-// city becomes unavailable, it emits a terminal event and cancels the subscription.
-func (sm *SupervisorMux) watchCityAvailability(ctx context.Context, cityName string, sess *socketSession, subID string) {
+// cityWatcherHub manages one polling goroutine per watched city instead of
+// one per subscription. When a city becomes unavailable, all subscriptions
+// targeting that city are notified.
+type cityWatcherHub struct {
+	mu       sync.Mutex
+	resolver CityResolver
+	cities   map[string]*cityWatcherEntry
+}
+
+type cityWatcherEntry struct {
+	cancel context.CancelFunc
+	subs   map[string]cityWatchSub // keyed by subscription ID
+}
+
+type cityWatchSub struct {
+	sess  *socketSession
+	subID string
+}
+
+func newCityWatcherHub(resolver CityResolver) *cityWatcherHub {
+	return &cityWatcherHub{
+		resolver: resolver,
+		cities:   make(map[string]*cityWatcherEntry),
+	}
+}
+
+// watch registers a subscription for city availability notifications.
+// Starts a watcher goroutine for the city if one isn't running.
+func (h *cityWatcherHub) watch(cityName string, sess *socketSession, subID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	entry, ok := h.cities[cityName]
+	if !ok {
+		ctx, cancel := context.WithCancel(context.Background())
+		entry = &cityWatcherEntry{
+			cancel: cancel,
+			subs:   make(map[string]cityWatchSub),
+		}
+		h.cities[cityName] = entry
+		go h.pollCity(ctx, cityName)
+	}
+	entry.subs[subID] = cityWatchSub{sess: sess, subID: subID}
+}
+
+// unwatch removes a subscription from city notifications.
+// Stops the watcher goroutine if no subscriptions remain.
+func (h *cityWatcherHub) unwatch(cityName, subID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	entry, ok := h.cities[cityName]
+	if !ok {
+		return
+	}
+	delete(entry.subs, subID)
+	if len(entry.subs) == 0 {
+		entry.cancel()
+		delete(h.cities, cityName)
+	}
+}
+
+func (h *cityWatcherHub) pollCity(ctx context.Context, cityName string) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -410,18 +470,39 @@ func (sm *SupervisorMux) watchCityAvailability(ctx context.Context, cityName str
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if sm.resolver.CityState(cityName) == nil {
-				log.Printf("api: ws subscription id=%s city %s became unavailable", subID, cityName)
-				_ = sess.conn.writeJSON(socketEventEnvelope{
-					Type:           "event",
-					SubscriptionID: subID,
-					EventType:      "city.unavailable",
-					Payload:        map[string]string{"city": cityName, "reason": "city stopped or unavailable"},
-				})
-				sess.stopSubscription(subID)
+			if h.resolver.CityState(cityName) == nil {
+				h.notifyCityUnavailable(cityName)
 				return
 			}
 		}
+	}
+}
+
+func (h *cityWatcherHub) notifyCityUnavailable(cityName string) {
+	h.mu.Lock()
+	entry, ok := h.cities[cityName]
+	if !ok {
+		h.mu.Unlock()
+		return
+	}
+	// Copy subs under lock, then notify outside.
+	subs := make([]cityWatchSub, 0, len(entry.subs))
+	for _, sub := range entry.subs {
+		subs = append(subs, sub)
+	}
+	entry.cancel()
+	delete(h.cities, cityName)
+	h.mu.Unlock()
+
+	for _, sub := range subs {
+		log.Printf("api: ws subscription id=%s city %s became unavailable", sub.subID, cityName)
+		_ = sub.sess.conn.writeJSON(socketEventEnvelope{
+			Type:           "event",
+			SubscriptionID: sub.subID,
+			EventType:      "city.unavailable",
+			Payload:        map[string]string{"city": cityName, "reason": "city stopped or unavailable"},
+		})
+		sub.sess.stopSubscription(sub.subID)
 	}
 }
 
@@ -433,10 +514,9 @@ func (sm *SupervisorMux) wrapAfterWriteWithCityWatch(ctx context.Context, cityNa
 		if origAfterWrite != nil {
 			origAfterWrite()
 		}
-		// Extract subscription ID from result.
 		if m, ok := result.Result.(map[string]string); ok {
 			if subID := m["subscription_id"]; subID != "" {
-				go sm.watchCityAvailability(ctx, cityName, sess, subID)
+				sm.cityWatchers.watch(cityName, sess, subID)
 			}
 		}
 	}

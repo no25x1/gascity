@@ -59,6 +59,10 @@ type SupervisorMux struct {
 	// the State pointer changes (city restarted → new controllerState).
 	cacheMu sync.RWMutex
 	cache   map[string]cachedCityServer
+
+	// cityWatchers manages shared per-city availability polling goroutines
+	// for supervisor-scoped subscriptions (O(cities) not O(subscriptions)).
+	cityWatchers *cityWatcherHub
 }
 
 // NewSupervisorMux creates a SupervisorMux that routes requests to cities
@@ -69,7 +73,8 @@ func NewSupervisorMux(resolver CityResolver, readOnly bool, version string, star
 		readOnly:  readOnly,
 		version:   version,
 		startedAt: startedAt,
-		cache:     make(map[string]cachedCityServer),
+		cache:        make(map[string]cachedCityServer),
+		cityWatchers: newCityWatcherHub(resolver),
 	}
 	sm.server = &http.Server{Handler: sm.Handler()}
 	return sm
