@@ -8,6 +8,25 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
+type socketBeadsListPayload struct {
+	Status   string `json:"status,omitempty"`
+	Type     string `json:"type,omitempty"`
+	Label    string `json:"label,omitempty"`
+	Assignee string `json:"assignee,omitempty"`
+	Rig      string `json:"rig,omitempty"`
+	Limit    *int   `json:"limit,omitempty"`
+	Cursor   string `json:"cursor,omitempty"`
+}
+
+type socketBeadAssignPayload struct {
+	ID       string `json:"id"`
+	Assignee string `json:"assignee"`
+}
+
+type socketBeadGraphPayload struct {
+	RootID string `json:"root_id"`
+}
+
 func init() {
 	RegisterAction("beads.list", ActionDef{
 		Description:       "List beads",

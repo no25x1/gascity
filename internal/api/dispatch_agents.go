@@ -6,6 +6,20 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
+type socketAgentsListPayload struct {
+	Pool    string `json:"pool,omitempty"`
+	Rig     string `json:"rig,omitempty"`
+	Running string `json:"running,omitempty"`
+	Peek    bool   `json:"peek,omitempty"`
+}
+
+type socketAgentUpdatePayload struct {
+	Name      string `json:"name"`
+	Provider  string `json:"provider,omitempty"`
+	Scope     string `json:"scope,omitempty"`
+	Suspended *bool  `json:"suspended,omitempty"`
+}
+
 func init() {
 	RegisterAction("agents.list", ActionDef{
 		Description:       "List agents",

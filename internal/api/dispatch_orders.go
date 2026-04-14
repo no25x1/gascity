@@ -2,6 +2,18 @@ package api
 
 import "context"
 
+type socketOrdersHistoryPayload struct {
+	ScopedName string `json:"scoped_name"`
+	Limit      int    `json:"limit,omitempty"`
+	Before     string `json:"before,omitempty"`
+}
+
+type socketOrdersFeedPayload struct {
+	ScopeKind string `json:"scope_kind"`
+	ScopeRef  string `json:"scope_ref"`
+	Limit     int    `json:"limit,omitempty"`
+}
+
 func init() {
 	RegisterVoidAction("orders.list", ActionDef{
 		Description:       "List orders",

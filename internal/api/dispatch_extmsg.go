@@ -2,6 +2,10 @@ package api
 
 import "context"
 
+type socketExtMsgBindingsPayload struct {
+	SessionID string `json:"session_id"`
+}
+
 func init() {
 	RegisterAction("extmsg.inbound", ActionDef{
 		Description:       "Process inbound external message",

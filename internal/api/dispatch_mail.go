@@ -6,6 +6,37 @@ import (
 	"github.com/gastownhall/gascity/internal/mail"
 )
 
+type socketMailListPayload struct {
+	Agent  string `json:"agent,omitempty"`
+	Status string `json:"status,omitempty"`
+	Rig    string `json:"rig,omitempty"`
+	Limit  *int   `json:"limit,omitempty"`
+	Cursor string `json:"cursor,omitempty"`
+}
+
+type socketMailGetPayload struct {
+	ID  string `json:"id"`
+	Rig string `json:"rig,omitempty"`
+}
+
+type socketMailCountPayload struct {
+	Agent string `json:"agent,omitempty"`
+	Rig   string `json:"rig,omitempty"`
+}
+
+type socketMailThreadPayload struct {
+	ID  string `json:"id"`
+	Rig string `json:"rig,omitempty"`
+}
+
+type socketMailReplyPayload struct {
+	ID      string `json:"id"`
+	Rig     string `json:"rig,omitempty"`
+	From    string `json:"from"`
+	Subject string `json:"subject"`
+	Body    string `json:"body"`
+}
+
 func init() {
 	RegisterAction("mail.list", ActionDef{
 		Description:       "List mail messages",

@@ -2,6 +2,32 @@ package api
 
 import "context"
 
+type socketFormulaScopePayload struct {
+	ScopeKind string `json:"scope_kind"`
+	ScopeRef  string `json:"scope_ref"`
+}
+
+type socketFormulaFeedPayload struct {
+	ScopeKind string `json:"scope_kind"`
+	ScopeRef  string `json:"scope_ref"`
+	Limit     int    `json:"limit,omitempty"`
+}
+
+type socketFormulaGetPayload struct {
+	Name      string            `json:"name"`
+	ScopeKind string            `json:"scope_kind"`
+	ScopeRef  string            `json:"scope_ref"`
+	Target    string            `json:"target"`
+	Vars      map[string]string `json:"vars,omitempty"`
+}
+
+type socketFormulaRunsPayload struct {
+	Name      string `json:"name"`
+	ScopeKind string `json:"scope_kind"`
+	ScopeRef  string `json:"scope_ref"`
+	Limit     int    `json:"limit,omitempty"`
+}
+
 func init() {
 	RegisterAction("formulas.list", ActionDef{
 		Description:       "List formulas",

@@ -7,6 +7,61 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
+type socketSessionsListPayload struct {
+	State    string `json:"state,omitempty"`
+	Template string `json:"template,omitempty"`
+	Peek     bool   `json:"peek,omitempty"`
+	Limit    *int   `json:"limit,omitempty"`
+	Cursor   string `json:"cursor,omitempty"`
+}
+
+type socketSessionTargetPayload struct {
+	ID   string `json:"id"`
+	Peek bool   `json:"peek,omitempty"`
+}
+
+type socketSessionSubmitPayload struct {
+	ID      string               `json:"id"`
+	Message string               `json:"message"`
+	Intent  session.SubmitIntent `json:"intent,omitempty"`
+}
+
+type socketSessionTranscriptPayload struct {
+	ID     string `json:"id"`
+	Turns  int    `json:"turns,omitempty"` // most recent N turns (0=all)
+	Before string `json:"before,omitempty"`
+	Format string `json:"format,omitempty"`
+}
+
+type socketSessionRenamePayload struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+type socketSessionRespondPayload struct {
+	ID        string            `json:"id"`
+	RequestID string            `json:"request_id,omitempty"`
+	Action    string            `json:"action"`
+	Text      string            `json:"text,omitempty"`
+	Metadata  map[string]string `json:"metadata,omitempty"`
+}
+
+type socketSessionPatchPayload struct {
+	ID    string  `json:"id"`
+	Title *string `json:"title,omitempty"`
+	Alias *string `json:"alias,omitempty"`
+}
+
+type socketSessionAgentGetPayload struct {
+	ID      string `json:"id"`
+	AgentID string `json:"agent_id"`
+}
+
+type socketSessionMessagesPayload struct {
+	ID      string `json:"id"`
+	Message string `json:"message"`
+}
+
 func init() {
 	RegisterAction("sessions.list", ActionDef{
 		Description:       "List sessions",

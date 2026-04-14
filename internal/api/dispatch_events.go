@@ -7,6 +7,14 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 )
 
+type socketEventsListPayload struct {
+	Type   string `json:"type,omitempty"`
+	Actor  string `json:"actor,omitempty"`
+	Since  string `json:"since,omitempty"`
+	Limit  *int   `json:"limit,omitempty"`
+	Cursor string `json:"cursor,omitempty"`
+}
+
 func init() {
 	RegisterAction("events.list", ActionDef{
 		Description:       "List events",

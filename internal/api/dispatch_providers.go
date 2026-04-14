@@ -1,6 +1,24 @@
 package api
 
-import "context"
+import (
+	"context"
+
+	"github.com/gastownhall/gascity/internal/config"
+)
+
+type socketProvidersListPayload struct {
+	View string `json:"view,omitempty"`
+}
+
+type socketProviderCreatePayload struct {
+	Name string             `json:"name"`
+	Spec config.ProviderSpec `json:"spec"`
+}
+
+type socketProviderUpdatePayload struct {
+	Name   string         `json:"name"`
+	Update ProviderUpdate `json:"update"`
+}
 
 func init() {
 	RegisterAction("providers.list", ActionDef{

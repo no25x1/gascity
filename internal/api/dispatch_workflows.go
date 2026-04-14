@@ -5,6 +5,19 @@ import (
 	"encoding/json"
 )
 
+type socketWorkflowGetPayload struct {
+	ID        string `json:"id"`
+	ScopeKind string `json:"scope_kind,omitempty"`
+	ScopeRef  string `json:"scope_ref,omitempty"`
+}
+
+type socketWorkflowDeletePayload struct {
+	ID        string `json:"id"`
+	ScopeKind string `json:"scope_kind,omitempty"`
+	ScopeRef  string `json:"scope_ref,omitempty"`
+	Delete    bool   `json:"delete,omitempty"`
+}
+
 func init() {
 	// workflow.get needs the dispatch index for snapshot consistency.
 	// Uses raw actionHandler to access req.dispatchIndex directly.

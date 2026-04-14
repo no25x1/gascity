@@ -6,6 +6,18 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
+type socketRigCreatePayload struct {
+	Name string `json:"name"`
+	Path string `json:"path,omitempty"`
+}
+
+type socketRigUpdatePayload struct {
+	Name      string `json:"name"`
+	Path      string `json:"path,omitempty"`
+	Prefix    string `json:"prefix,omitempty"`
+	Suspended *bool  `json:"suspended,omitempty"`
+}
+
 func init() {
 	RegisterVoidAction("rigs.list", ActionDef{
 		Description:       "List rigs",

@@ -2,6 +2,11 @@ package api
 
 import "context"
 
+type socketConvoyItemsPayload struct {
+	ID    string   `json:"id"`
+	Items []string `json:"items"`
+}
+
 func init() {
 	RegisterVoidAction("convoys.list", ActionDef{
 		Description:       "List convoys",

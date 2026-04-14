@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/gastownhall/gascity/internal/api/specgen"
@@ -252,4 +253,36 @@ func actionTableSupportsWatch(action string) bool {
 		return entry.SupportsWatch
 	}
 	return false
+}
+
+// --- Shared payload types used by multiple dispatch_*.go files ---
+
+type socketNamePayload struct {
+	Name string `json:"name"`
+}
+
+type socketIDPayload struct {
+	ID string `json:"id"`
+}
+
+func socketPageParams(limit *int, cursor string, defaultLimit int) pageParams {
+	pp := pageParams{
+		Limit:    defaultLimit,
+		IsPaging: strings.TrimSpace(cursor) != "",
+	}
+	if limit != nil {
+		switch {
+		case *limit == 0:
+			pp.Limit = maxPaginationLimit
+		case *limit > 0:
+			pp.Limit = *limit
+		}
+	}
+	if pp.Limit > maxPaginationLimit {
+		pp.Limit = maxPaginationLimit
+	}
+	if cursor != "" {
+		pp.Offset = decodeCursor(cursor)
+	}
+	return pp
 }
