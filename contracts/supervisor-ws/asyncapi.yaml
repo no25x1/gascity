@@ -295,6 +295,20 @@ components:
         agent.create:
           description: Create an agent
           x-mutation: true
+          x-request-schema:
+            properties:
+              dir:
+                type: string
+              name:
+                type: string
+              provider:
+                type: string
+              scope:
+                type: string
+            required:
+              - name
+              - provider
+            type: object
         agent.delete:
           description: Delete an agent
           x-mutation: true
@@ -393,6 +407,19 @@ components:
         agent.update:
           description: Update agent config
           x-mutation: true
+          x-request-schema:
+            properties:
+              name:
+                type: string
+              provider:
+                type: string
+              scope:
+                type: string
+              suspended:
+                type: boolean
+            required:
+              - name
+            type: object
         agents.list:
           description: List agents
           x-request-schema:
@@ -1050,11 +1077,37 @@ components:
         convoy.add:
           description: Add items to a convoy
           x-mutation: true
+          x-request-schema:
+            properties:
+              id:
+                type: string
+              items:
+                items:
+                  type: string
+                type: array
+            required:
+              - id
+              - items
+            type: object
         convoy.check:
           description: Check convoy status
+          x-request-schema:
+            properties:
+              id:
+                type: string
+            required:
+              - id
+            type: object
         convoy.close:
           description: Close a convoy
           x-mutation: true
+          x-request-schema:
+            properties:
+              id:
+                type: string
+            required:
+              - id
+            type: object
         convoy.create:
           description: Create a convoy
           x-mutation: true
@@ -1076,6 +1129,13 @@ components:
         convoy.delete:
           description: Delete a convoy
           x-mutation: true
+          x-request-schema:
+            properties:
+              id:
+                type: string
+            required:
+              - id
+            type: object
         convoy.get:
           description: Get convoy details
           x-request-schema:
@@ -1088,6 +1148,18 @@ components:
         convoy.remove:
           description: Remove items from a convoy
           x-mutation: true
+          x-request-schema:
+            properties:
+              id:
+                type: string
+              items:
+                items:
+                  type: string
+                type: array
+            required:
+              - id
+              - items
+            type: object
         convoys.list:
           description: List convoys
           x-response-schema:
@@ -1195,12 +1267,69 @@ components:
           x-mutation: true
         formula.get:
           description: Get formula details
+          x-request-schema:
+            properties:
+              name:
+                type: string
+              scope_kind:
+                type: string
+              scope_ref:
+                type: string
+              target:
+                type: string
+              vars:
+                additionalProperties:
+                  type: string
+                type: object
+            required:
+              - name
+              - scope_kind
+              - scope_ref
+              - target
+            type: object
         formula.runs:
           description: Get formula run history
+          x-request-schema:
+            properties:
+              limit:
+                type: integer
+              name:
+                type: string
+              scope_kind:
+                type: string
+              scope_ref:
+                type: string
+            required:
+              - name
+              - scope_kind
+              - scope_ref
+            type: object
         formulas.feed:
           description: Formula activity feed
+          x-request-schema:
+            properties:
+              limit:
+                type: integer
+              scope_kind:
+                type: string
+              scope_ref:
+                type: string
+            required:
+              - scope_kind
+              - scope_ref
+            type: object
         formulas.list:
           description: List formulas
+          x-request-schema:
+            properties:
+              scope_kind:
+                type: string
+              scope_ref:
+                type: string
+            required:
+              - scope_kind
+              - scope_ref
+            type: object
         health.get:
           description: Health check
         mail.archive:
@@ -1458,11 +1587,16 @@ components:
                 type: string
               from:
                 type: string
+              id:
+                type: string
+              rig:
+                type: string
               subject:
                 type: string
             required:
               - body
               - from
+              - id
               - subject
             type: object
         mail.send:
@@ -1648,8 +1782,31 @@ components:
           description: Check order gate conditions
         orders.feed:
           description: Order activity feed
+          x-request-schema:
+            properties:
+              limit:
+                type: integer
+              scope_kind:
+                type: string
+              scope_ref:
+                type: string
+            required:
+              - scope_kind
+              - scope_ref
+            type: object
         orders.history:
           description: Get order history
+          x-request-schema:
+            properties:
+              before:
+                type: string
+              limit:
+                type: integer
+              scoped_name:
+                type: string
+            required:
+              - scoped_name
+            type: object
         orders.list:
           description: List orders
         packs.list:
@@ -1687,6 +1844,99 @@ components:
         provider.create:
           description: Create a provider
           x-mutation: true
+          x-request-schema:
+            properties:
+              name:
+                type: string
+              spec:
+                properties:
+                  Args:
+                    items:
+                      type: string
+                    type: array
+                  Command:
+                    type: string
+                  DisplayName:
+                    type: string
+                  EmitsPermissionWarning:
+                    type: boolean
+                  Env:
+                    additionalProperties:
+                      type: string
+                    type: object
+                  InstructionsFile:
+                    type: string
+                  NeedsNudgePoller:
+                    type: boolean
+                  OptionDefaults:
+                    additionalProperties:
+                      type: string
+                    type: object
+                  PathCheck:
+                    type: string
+                  PermissionModes:
+                    additionalProperties:
+                      type: string
+                    type: object
+                  PrintArgs:
+                    items:
+                      type: string
+                    type: array
+                  ProcessNames:
+                    items:
+                      type: string
+                    type: array
+                  PromptFlag:
+                    type: string
+                  PromptMode:
+                    type: string
+                  ReadyDelayMs:
+                    type: integer
+                  ReadyPromptPrefix:
+                    type: string
+                  ResumeCommand:
+                    type: string
+                  ResumeFlag:
+                    type: string
+                  ResumeStyle:
+                    type: string
+                  SessionIDFlag:
+                    type: string
+                  SupportsACP:
+                    type: boolean
+                  SupportsHooks:
+                    type: boolean
+                  TitleModel:
+                    type: string
+                required:
+                  - Args
+                  - Command
+                  - DisplayName
+                  - EmitsPermissionWarning
+                  - Env
+                  - InstructionsFile
+                  - NeedsNudgePoller
+                  - OptionDefaults
+                  - PathCheck
+                  - PermissionModes
+                  - PrintArgs
+                  - ProcessNames
+                  - PromptFlag
+                  - PromptMode
+                  - ReadyDelayMs
+                  - ReadyPromptPrefix
+                  - ResumeCommand
+                  - ResumeFlag
+                  - ResumeStyle
+                  - SessionIDFlag
+                  - SupportsACP
+                  - SupportsHooks
+                  - TitleModel
+                type: object
+            required:
+              - name
+              - spec
+            type: object
         provider.delete:
           description: Delete a provider
           x-mutation: true
@@ -1709,6 +1959,43 @@ components:
         provider.update:
           description: Update provider config
           x-mutation: true
+          x-request-schema:
+            properties:
+              name:
+                type: string
+              update:
+                properties:
+                  Args:
+                    items:
+                      type: string
+                    type: array
+                  Command:
+                    type: string
+                  DisplayName:
+                    type: string
+                  Env:
+                    additionalProperties:
+                      type: string
+                    type: object
+                  PromptFlag:
+                    type: string
+                  PromptMode:
+                    type: string
+                  ReadyDelayMs:
+                    type: integer
+                required:
+                  - Args
+                  - Command
+                  - DisplayName
+                  - Env
+                  - PromptFlag
+                  - PromptMode
+                  - ReadyDelayMs
+                type: object
+            required:
+              - name
+              - update
+            type: object
         providers.list:
           description: List AI providers
           x-request-schema:
@@ -1730,6 +2017,15 @@ components:
         rig.create:
           description: Create a rig
           x-mutation: true
+          x-request-schema:
+            properties:
+              name:
+                type: string
+              path:
+                type: string
+            required:
+              - name
+            type: object
         rig.delete:
           description: Delete a rig
           x-mutation: true
@@ -1782,6 +2078,19 @@ components:
         rig.update:
           description: Update rig config
           x-mutation: true
+          x-request-schema:
+            properties:
+              name:
+                type: string
+              path:
+                type: string
+              prefix:
+                type: string
+              suspended:
+                type: boolean
+            required:
+              - name
+            type: object
         rigs.list:
           description: List rigs
           x-response-schema:
@@ -1871,8 +2180,38 @@ components:
             type: object
         session.agent.get:
           description: Get session agent details
+          x-request-schema:
+            properties:
+              agent_id:
+                type: string
+              id:
+                type: string
+            required:
+              - agent_id
+              - id
+            type: object
         session.agents.list:
           description: List agents in a session
+          x-request-schema:
+            properties:
+              id:
+                type: string
+              peek:
+                type: boolean
+            required:
+              - id
+            type: object
+          x-response-schema:
+            properties:
+              items:
+              next_cursor:
+                type: string
+              total:
+                type: integer
+            required:
+              - items
+              - total
+            type: object
         session.close:
           description: Close a session
           x-mutation: true
@@ -2013,9 +2352,31 @@ components:
             type: object
         session.messages:
           description: Get session messages
+          x-mutation: true
+          x-request-schema:
+            properties:
+              id:
+                type: string
+              message:
+                type: string
+            required:
+              - id
+              - message
+            type: object
         session.patch:
           description: Update session metadata
           x-mutation: true
+          x-request-schema:
+            properties:
+              alias:
+                type: string
+              id:
+                type: string
+              title:
+                type: string
+            required:
+              - id
+            type: object
         session.pending:
           description: Get pending input requests
           x-request-schema:
@@ -2198,5 +2559,29 @@ components:
         workflow.delete:
           description: Delete a workflow
           x-mutation: true
+          x-request-schema:
+            properties:
+              delete:
+                type: boolean
+              id:
+                type: string
+              scope_kind:
+                type: string
+              scope_ref:
+                type: string
+            required:
+              - id
+            type: object
         workflow.get:
           description: Get workflow details
+          x-request-schema:
+            properties:
+              id:
+                type: string
+              scope_kind:
+                type: string
+              scope_ref:
+                type: string
+            required:
+              - id
+            type: object

@@ -182,6 +182,119 @@ type socketSessionRespondPayload struct {
 	Metadata  map[string]string `json:"metadata,omitempty"`
 }
 
+type socketMailReplyPayload struct {
+	ID      string `json:"id"`
+	Rig     string `json:"rig,omitempty"`
+	From    string `json:"from"`
+	Subject string `json:"subject"`
+	Body    string `json:"body"`
+}
+
+type socketFormulaScopePayload struct {
+	ScopeKind string `json:"scope_kind"`
+	ScopeRef  string `json:"scope_ref"`
+}
+
+type socketFormulaFeedPayload struct {
+	ScopeKind string `json:"scope_kind"`
+	ScopeRef  string `json:"scope_ref"`
+	Limit     int    `json:"limit,omitempty"`
+}
+
+type socketFormulaGetPayload struct {
+	Name      string            `json:"name"`
+	ScopeKind string            `json:"scope_kind"`
+	ScopeRef  string            `json:"scope_ref"`
+	Target    string            `json:"target"`
+	Vars      map[string]string `json:"vars,omitempty"`
+}
+
+type socketFormulaRunsPayload struct {
+	Name      string `json:"name"`
+	ScopeKind string `json:"scope_kind"`
+	ScopeRef  string `json:"scope_ref"`
+	Limit     int    `json:"limit,omitempty"`
+}
+
+type socketOrdersHistoryPayload struct {
+	ScopedName string `json:"scoped_name"`
+	Limit      int    `json:"limit,omitempty"`
+	Before     string `json:"before,omitempty"`
+}
+
+type socketOrdersFeedPayload struct {
+	ScopeKind string `json:"scope_kind"`
+	ScopeRef  string `json:"scope_ref"`
+	Limit     int    `json:"limit,omitempty"`
+}
+
+type socketExtMsgBindingsPayload struct {
+	SessionID string `json:"session_id"`
+}
+
+type socketWorkflowGetPayload struct {
+	ID        string `json:"id"`
+	ScopeKind string `json:"scope_kind,omitempty"`
+	ScopeRef  string `json:"scope_ref,omitempty"`
+}
+
+type socketWorkflowDeletePayload struct {
+	ID        string `json:"id"`
+	ScopeKind string `json:"scope_kind,omitempty"`
+	ScopeRef  string `json:"scope_ref,omitempty"`
+	Delete    bool   `json:"delete,omitempty"`
+}
+
+type socketSessionPatchPayload struct {
+	ID    string  `json:"id"`
+	Title *string `json:"title,omitempty"`
+	Alias *string `json:"alias,omitempty"`
+}
+
+type socketSessionAgentGetPayload struct {
+	ID      string `json:"id"`
+	AgentID string `json:"agent_id"`
+}
+
+type socketSessionMessagesPayload struct {
+	ID      string `json:"id"`
+	Message string `json:"message"`
+}
+
+type socketConvoyItemsPayload struct {
+	ID    string   `json:"id"`
+	Items []string `json:"items"`
+}
+
+type socketAgentUpdatePayload struct {
+	Name      string `json:"name"`
+	Provider  string `json:"provider,omitempty"`
+	Scope     string `json:"scope,omitempty"`
+	Suspended *bool  `json:"suspended,omitempty"`
+}
+
+type socketRigCreatePayload struct {
+	Name string `json:"name"`
+	Path string `json:"path,omitempty"`
+}
+
+type socketRigUpdatePayload struct {
+	Name      string `json:"name"`
+	Path      string `json:"path,omitempty"`
+	Prefix    string `json:"prefix,omitempty"`
+	Suspended *bool  `json:"suspended,omitempty"`
+}
+
+type socketProviderCreatePayload struct {
+	Name string             `json:"name"`
+	Spec config.ProviderSpec `json:"spec"`
+}
+
+type socketProviderUpdatePayload struct {
+	Name   string         `json:"name"`
+	Update ProviderUpdate `json:"update"`
+}
+
 func socketPageParams(limit *int, cursor string, defaultLimit int) pageParams {
 	pp := pageParams{
 		Limit:    defaultLimit,
@@ -1046,13 +1159,7 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (result socketA
 		if s.readOnly {
 			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
 		}
-		var payload struct {
-			ID      string `json:"id"`
-			Rig     string `json:"rig,omitempty"`
-			From    string `json:"from"`
-			Subject string `json:"subject"`
-			Body    string `json:"body"`
-		}
+		var payload socketMailReplyPayload
 		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
 			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 		}
@@ -1200,10 +1307,7 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (result socketA
 		}
 		return socketActionResult{Result: provider, Index: s.latestIndex()}, nil
 	case "formulas.list":
-		var payload struct {
-			ScopeKind string `json:"scope_kind"`
-			ScopeRef  string `json:"scope_ref"`
-		}
+		var payload socketFormulaScopePayload
 		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
 			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 		}
@@ -1213,11 +1317,7 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (result socketA
 		}
 		return socketActionResult{Result: result, Index: s.latestIndex()}, nil
 	case "formulas.feed":
-		var payload struct {
-			ScopeKind string `json:"scope_kind"`
-			ScopeRef  string `json:"scope_ref"`
-			Limit     int    `json:"limit,omitempty"`
-		}
+		var payload socketFormulaFeedPayload
 		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
 			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 		}
@@ -1227,13 +1327,7 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (result socketA
 		}
 		return socketActionResult{Result: result, Index: s.latestIndex()}, nil
 	case "formula.get":
-		var payload struct {
-			Name      string            `json:"name"`
-			ScopeKind string            `json:"scope_kind"`
-			ScopeRef  string            `json:"scope_ref"`
-			Target    string            `json:"target"`
-			Vars      map[string]string `json:"vars,omitempty"`
-		}
+		var payload socketFormulaGetPayload
 		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
 			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 		}
@@ -1243,12 +1337,7 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (result socketA
 		}
 		return socketActionResult{Result: result, Index: s.latestIndex()}, nil
 	case "formula.runs":
-		var payload struct {
-			Name      string `json:"name"`
-			ScopeKind string `json:"scope_kind"`
-			ScopeRef  string `json:"scope_ref"`
-			Limit     int    `json:"limit,omitempty"`
-		}
+		var payload socketFormulaRunsPayload
 		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
 			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 		}
@@ -1308,11 +1397,7 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (result socketA
 		result := s.checkOrders()
 		return socketActionResult{Result: result, Index: s.latestIndex()}, nil
 	case "orders.history":
-		var payload struct {
-			ScopedName string `json:"scoped_name"`
-			Limit      int    `json:"limit,omitempty"`
-			Before     string `json:"before,omitempty"`
-		}
+		var payload socketOrdersHistoryPayload
 		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
 			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 		}
@@ -1687,9 +1772,7 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (result socketA
 		}
 		return socketActionResult{Result: result}, nil
 	case "extmsg.bindings.list":
-		var payload struct {
-			SessionID string `json:"session_id"`
-		}
+		var payload socketExtMsgBindingsPayload
 		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
 			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 		}
@@ -1829,11 +1912,7 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (result socketA
 		}
 		return socketActionResult{Result: result}, nil
 	case "workflow.get":
-		var payload struct {
-			ID        string `json:"id"`
-			ScopeKind string `json:"scope_kind,omitempty"`
-			ScopeRef  string `json:"scope_ref,omitempty"`
-		}
+		var payload socketWorkflowGetPayload
 		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
 			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 		}
@@ -1857,12 +1936,7 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (result socketA
 		if s.readOnly {
 			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
 		}
-		var payload struct {
-			ID        string `json:"id"`
-			ScopeKind string `json:"scope_kind,omitempty"`
-			ScopeRef  string `json:"scope_ref,omitempty"`
-			Delete    bool   `json:"delete,omitempty"`
-		}
+		var payload socketWorkflowDeletePayload
 		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
 			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 		}
@@ -1875,11 +1949,7 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (result socketA
 		}
 		return socketActionResult{Result: result}, nil
 	case "orders.feed":
-		var payload struct {
-			ScopeKind string `json:"scope_kind"`
-			ScopeRef  string `json:"scope_ref"`
-			Limit     int    `json:"limit,omitempty"`
-		}
+		var payload socketOrdersFeedPayload
 		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
 			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 		}
@@ -1893,11 +1963,7 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (result socketA
 		if s.readOnly {
 			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
 		}
-		var payload struct {
-			ID    string  `json:"id"`
-			Title *string `json:"title,omitempty"`
-			Alias *string `json:"alias,omitempty"`
-		}
+		var payload socketSessionPatchPayload
 		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
 			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 		}
@@ -1939,10 +2005,7 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (result socketA
 		}
 		return socketActionResult{Result: result, Index: s.latestIndex()}, nil
 	case "session.agent.get":
-		var payload struct {
-			ID      string `json:"id"`
-			AgentID string `json:"agent_id"`
-		}
+		var payload socketSessionAgentGetPayload
 		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
 			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 		}
@@ -1976,10 +2039,7 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (result socketA
 		if s.readOnly {
 			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
 		}
-		var payload struct {
-			ID      string `json:"id"`
-			Message string `json:"message"`
-		}
+		var payload socketSessionMessagesPayload
 		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
 			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 		}
@@ -2016,10 +2076,7 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (result socketA
 		if s.readOnly {
 			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
 		}
-		var payload struct {
-			ID    string   `json:"id"`
-			Items []string `json:"items"`
-		}
+		var payload socketConvoyItemsPayload
 		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
 			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 		}
@@ -2031,10 +2088,7 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (result socketA
 		if s.readOnly {
 			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
 		}
-		var payload struct {
-			ID    string   `json:"id"`
-			Items []string `json:"items"`
-		}
+		var payload socketConvoyItemsPayload
 		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
 			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 		}
@@ -2108,12 +2162,7 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (result socketA
 		if !ok {
 			return socketActionResult{}, newSocketError(req.ID, "internal", "mutations not supported")
 		}
-		var payload struct {
-			Name      string `json:"name"`
-			Provider  string `json:"provider,omitempty"`
-			Scope     string `json:"scope,omitempty"`
-			Suspended *bool  `json:"suspended,omitempty"`
-		}
+		var payload socketAgentUpdatePayload
 		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
 			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 		}
@@ -2146,10 +2195,7 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (result socketA
 		if !ok {
 			return socketActionResult{}, newSocketError(req.ID, "internal", "mutations not supported")
 		}
-		var payload struct {
-			Name string `json:"name"`
-			Path string `json:"path,omitempty"`
-		}
+		var payload socketRigCreatePayload
 		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
 			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 		}
@@ -2168,12 +2214,7 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (result socketA
 		if !ok {
 			return socketActionResult{}, newSocketError(req.ID, "internal", "mutations not supported")
 		}
-		var payload struct {
-			Name      string `json:"name"`
-			Path      string `json:"path,omitempty"`
-			Prefix    string `json:"prefix,omitempty"`
-			Suspended *bool  `json:"suspended,omitempty"`
-		}
+		var payload socketRigUpdatePayload
 		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
 			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 		}
@@ -2206,10 +2247,7 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (result socketA
 		if !ok {
 			return socketActionResult{}, newSocketError(req.ID, "internal", "mutations not supported")
 		}
-		var payload struct {
-			Name string             `json:"name"`
-			Spec config.ProviderSpec `json:"spec"`
-		}
+		var payload socketProviderCreatePayload
 		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
 			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 		}
@@ -2228,10 +2266,7 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (result socketA
 		if !ok {
 			return socketActionResult{}, newSocketError(req.ID, "internal", "mutations not supported")
 		}
-		var payload struct {
-			Name   string         `json:"name"`
-			Update ProviderUpdate `json:"update"`
-		}
+		var payload socketProviderUpdatePayload
 		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
 			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 		}

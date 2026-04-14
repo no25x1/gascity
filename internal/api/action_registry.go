@@ -66,10 +66,14 @@ func BuildActionRegistry() *specgen.Registry {
 		RequestType: t[socketSessionSubmitPayload]()})
 	r.Register(specgen.ActionDef{Action: "session.transcript", Description: "Get session transcript",
 		RequestType: t[socketSessionTranscriptPayload]()})
-	r.Register(specgen.ActionDef{Action: "session.patch", Description: "Update session metadata", IsMutation: true})
-	r.Register(specgen.ActionDef{Action: "session.messages", Description: "Get session messages"})
-	r.Register(specgen.ActionDef{Action: "session.agents.list", Description: "List agents in a session"})
-	r.Register(specgen.ActionDef{Action: "session.agent.get", Description: "Get session agent details"})
+	r.Register(specgen.ActionDef{Action: "session.patch", Description: "Update session metadata", IsMutation: true,
+		RequestType: t[socketSessionPatchPayload]()})
+	r.Register(specgen.ActionDef{Action: "session.messages", Description: "Get session messages", IsMutation: true,
+		RequestType: t[socketSessionMessagesPayload]()})
+	r.Register(specgen.ActionDef{Action: "session.agents.list", Description: "List agents in a session",
+		RequestType: t[socketSessionTargetPayload](), ResponseType: t[listResponse]()})
+	r.Register(specgen.ActionDef{Action: "session.agent.get", Description: "Get session agent details",
+		RequestType: t[socketSessionAgentGetPayload]()})
 
 	// ── Beads ────────────────────────────────────────────────────
 	r.Register(specgen.ActionDef{Action: "beads.list", Description: "List beads with filters",
@@ -111,7 +115,7 @@ func BuildActionRegistry() *specgen.Registry {
 	r.Register(specgen.ActionDef{Action: "mail.archive", Description: "Archive a mail message", IsMutation: true,
 		RequestType: t[socketMailGetPayload](), ResponseType: t[mail.Message]()})
 	r.Register(specgen.ActionDef{Action: "mail.reply", Description: "Reply to a mail message", IsMutation: true,
-		RequestType: t[mailReplyRequest]()})
+		RequestType: t[socketMailReplyPayload]()})
 	r.Register(specgen.ActionDef{Action: "mail.send", Description: "Send a new mail message", IsMutation: true,
 		RequestType: t[mailSendRequest](), ResponseType: t[mail.Message]()})
 	r.Register(specgen.ActionDef{Action: "mail.delete", Description: "Delete a mail message", IsMutation: true,
@@ -132,8 +136,10 @@ func BuildActionRegistry() *specgen.Registry {
 		RequestType: t[socketNamePayload]()})
 	r.Register(specgen.ActionDef{Action: "agent.resume", Description: "Resume a suspended agent", IsMutation: true,
 		RequestType: t[socketNamePayload]()})
-	r.Register(specgen.ActionDef{Action: "agent.create", Description: "Create an agent", IsMutation: true})
-	r.Register(specgen.ActionDef{Action: "agent.update", Description: "Update agent config", IsMutation: true})
+	r.Register(specgen.ActionDef{Action: "agent.create", Description: "Create an agent", IsMutation: true,
+		RequestType: t[agentCreateRequest]()})
+	r.Register(specgen.ActionDef{Action: "agent.update", Description: "Update agent config", IsMutation: true,
+		RequestType: t[socketAgentUpdatePayload]()})
 	r.Register(specgen.ActionDef{Action: "agent.delete", Description: "Delete an agent", IsMutation: true,
 		RequestType: t[socketNamePayload]()})
 
@@ -148,8 +154,10 @@ func BuildActionRegistry() *specgen.Registry {
 		RequestType: t[socketNamePayload]()})
 	r.Register(specgen.ActionDef{Action: "rig.restart", Description: "Restart a rig", IsMutation: true,
 		RequestType: t[socketNamePayload]()})
-	r.Register(specgen.ActionDef{Action: "rig.create", Description: "Create a rig", IsMutation: true})
-	r.Register(specgen.ActionDef{Action: "rig.update", Description: "Update rig config", IsMutation: true})
+	r.Register(specgen.ActionDef{Action: "rig.create", Description: "Create a rig", IsMutation: true,
+		RequestType: t[socketRigCreatePayload]()})
+	r.Register(specgen.ActionDef{Action: "rig.update", Description: "Update rig config", IsMutation: true,
+		RequestType: t[socketRigUpdatePayload]()})
 	r.Register(specgen.ActionDef{Action: "rig.delete", Description: "Delete a rig", IsMutation: true,
 		RequestType: t[socketNamePayload]()})
 
@@ -160,11 +168,16 @@ func BuildActionRegistry() *specgen.Registry {
 		RequestType: t[socketIDPayload]()})
 	r.Register(specgen.ActionDef{Action: "convoy.create", Description: "Create a convoy", IsMutation: true,
 		RequestType: t[convoyCreateRequest]()})
-	r.Register(specgen.ActionDef{Action: "convoy.add", Description: "Add items to a convoy", IsMutation: true})
-	r.Register(specgen.ActionDef{Action: "convoy.remove", Description: "Remove items from a convoy", IsMutation: true})
-	r.Register(specgen.ActionDef{Action: "convoy.check", Description: "Check convoy status"})
-	r.Register(specgen.ActionDef{Action: "convoy.close", Description: "Close a convoy", IsMutation: true})
-	r.Register(specgen.ActionDef{Action: "convoy.delete", Description: "Delete a convoy", IsMutation: true})
+	r.Register(specgen.ActionDef{Action: "convoy.add", Description: "Add items to a convoy", IsMutation: true,
+		RequestType: t[socketConvoyItemsPayload]()})
+	r.Register(specgen.ActionDef{Action: "convoy.remove", Description: "Remove items from a convoy", IsMutation: true,
+		RequestType: t[socketConvoyItemsPayload]()})
+	r.Register(specgen.ActionDef{Action: "convoy.check", Description: "Check convoy status",
+		RequestType: t[socketIDPayload]()})
+	r.Register(specgen.ActionDef{Action: "convoy.close", Description: "Close a convoy", IsMutation: true,
+		RequestType: t[socketIDPayload]()})
+	r.Register(specgen.ActionDef{Action: "convoy.delete", Description: "Delete a convoy", IsMutation: true,
+		RequestType: t[socketIDPayload]()})
 
 	// ── Services ─────────────────────────────────────────────────
 	r.Register(specgen.ActionDef{Action: "services.list", Description: "List workspace services",
@@ -179,22 +192,30 @@ func BuildActionRegistry() *specgen.Registry {
 		RequestType: t[socketProvidersListPayload](), ResponseType: t[listResponse]()})
 	r.Register(specgen.ActionDef{Action: "provider.get", Description: "Get provider details",
 		RequestType: t[socketNamePayload]()})
-	r.Register(specgen.ActionDef{Action: "provider.create", Description: "Create a provider", IsMutation: true})
-	r.Register(specgen.ActionDef{Action: "provider.update", Description: "Update provider config", IsMutation: true})
+	r.Register(specgen.ActionDef{Action: "provider.create", Description: "Create a provider", IsMutation: true,
+		RequestType: t[socketProviderCreatePayload]()})
+	r.Register(specgen.ActionDef{Action: "provider.update", Description: "Update provider config", IsMutation: true,
+		RequestType: t[socketProviderUpdatePayload]()})
 	r.Register(specgen.ActionDef{Action: "provider.delete", Description: "Delete a provider", IsMutation: true,
 		RequestType: t[socketNamePayload]()})
 
 	// ── Formulas ─────────────────────────────────────────────────
-	r.Register(specgen.ActionDef{Action: "formulas.list", Description: "List formulas"})
-	r.Register(specgen.ActionDef{Action: "formulas.feed", Description: "Formula activity feed"})
-	r.Register(specgen.ActionDef{Action: "formula.get", Description: "Get formula details"})
-	r.Register(specgen.ActionDef{Action: "formula.runs", Description: "Get formula run history"})
+	r.Register(specgen.ActionDef{Action: "formulas.list", Description: "List formulas",
+		RequestType: t[socketFormulaScopePayload]()})
+	r.Register(specgen.ActionDef{Action: "formulas.feed", Description: "Formula activity feed",
+		RequestType: t[socketFormulaFeedPayload]()})
+	r.Register(specgen.ActionDef{Action: "formula.get", Description: "Get formula details",
+		RequestType: t[socketFormulaGetPayload]()})
+	r.Register(specgen.ActionDef{Action: "formula.runs", Description: "Get formula run history",
+		RequestType: t[socketFormulaRunsPayload]()})
 
 	// ── Orders ───────────────────────────────────────────────────
 	r.Register(specgen.ActionDef{Action: "orders.list", Description: "List orders"})
 	r.Register(specgen.ActionDef{Action: "orders.check", Description: "Check order gate conditions"})
-	r.Register(specgen.ActionDef{Action: "orders.history", Description: "Get order history"})
-	r.Register(specgen.ActionDef{Action: "orders.feed", Description: "Order activity feed"})
+	r.Register(specgen.ActionDef{Action: "orders.history", Description: "Get order history",
+		RequestType: t[socketOrdersHistoryPayload]()})
+	r.Register(specgen.ActionDef{Action: "orders.feed", Description: "Order activity feed",
+		RequestType: t[socketOrdersFeedPayload]()})
 	r.Register(specgen.ActionDef{Action: "order.get", Description: "Get order details",
 		RequestType: t[socketNamePayload]()})
 	r.Register(specgen.ActionDef{Action: "order.enable", Description: "Enable an order", IsMutation: true,
@@ -242,8 +263,10 @@ func BuildActionRegistry() *specgen.Registry {
 	r.Register(specgen.ActionDef{Action: "patches.provider.delete", Description: "Delete provider patch", IsMutation: true})
 
 	// ── Workflows ────────────────────────────────────────────────
-	r.Register(specgen.ActionDef{Action: "workflow.get", Description: "Get workflow details"})
-	r.Register(specgen.ActionDef{Action: "workflow.delete", Description: "Delete a workflow", IsMutation: true})
+	r.Register(specgen.ActionDef{Action: "workflow.get", Description: "Get workflow details",
+		RequestType: t[socketWorkflowGetPayload]()})
+	r.Register(specgen.ActionDef{Action: "workflow.delete", Description: "Delete a workflow", IsMutation: true,
+		RequestType: t[socketWorkflowDeletePayload]()})
 
 	// ── Subscriptions (protocol-level) ───────────────────────────
 	r.Register(specgen.ActionDef{Action: "subscription.start", Description: "Start an event or session stream subscription"})
