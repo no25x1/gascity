@@ -157,6 +157,10 @@ func (s *Server) handler() http.Handler {
 		apiInner = withReadOnly(apiInner)
 	}
 	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isPprofPath(r.URL.Path) {
+			http.DefaultServeMux.ServeHTTP(w, r)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/svc/") {
 			// Workspace services apply their own publication and CSRF rules in
 			// handleServiceProxy; they do not inherit controller API policy.
@@ -166,6 +170,10 @@ func (s *Server) handler() http.Handler {
 		apiInner.ServeHTTP(w, r)
 	})
 	return withLogging(withRecovery(withRequestID(withCORS(root))))
+}
+
+func isPprofPath(path string) bool {
+	return path == "/debug/pprof" || strings.HasPrefix(path, "/debug/pprof/")
 }
 
 // ListenAndServe starts the HTTP listener. Blocks until stopped.

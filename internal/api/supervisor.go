@@ -80,6 +80,10 @@ func (sm *SupervisorMux) Handler() http.Handler {
 		apiInner = withReadOnly(apiInner)
 	}
 	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isPprofPath(r.URL.Path) {
+			http.DefaultServeMux.ServeHTTP(w, r)
+			return
+		}
 		if supervisorServicePath(r.URL.Path) {
 			// Workspace services apply their own publication and CSRF rules
 			// in the per-city server. Do not impose supervisor API policy on
@@ -89,10 +93,6 @@ func (sm *SupervisorMux) Handler() http.Handler {
 		}
 		apiInner.ServeHTTP(w, r)
 	})
-	// pprof: expose on a separate port for profiling
-	go func() {
-		_ = http.ListenAndServe("localhost:6060", nil) // default mux has pprof handlers
-	}()
 	return withLogging(withRecovery(withCORS(root)))
 }
 
