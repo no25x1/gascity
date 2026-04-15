@@ -295,6 +295,46 @@ func TestResolveSessionIDAllowClosed_ResolvesClosedHistoricalAlias(t *testing.T)
 	}
 }
 
+func TestResolveSessionIDAllowClosed_ResolvesClosedTemplate(t *testing.T) {
+	store := beads.NewMemStore()
+	b, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"template": "myrig/worker",
+		},
+	})
+	_ = store.Close(b.ID)
+
+	id, err := session.ResolveSessionIDAllowClosed(store, "myrig/worker")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != b.ID {
+		t.Fatalf("got %q, want %q", id, b.ID)
+	}
+}
+
+func TestResolveSessionIDAllowClosed_ResolvesClosedAgentName(t *testing.T) {
+	store := beads.NewMemStore()
+	b, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"agent_name": "myrig/worker",
+		},
+	})
+	_ = store.Close(b.ID)
+
+	id, err := session.ResolveSessionIDAllowClosed(store, "myrig/worker")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != b.ID {
+		t.Fatalf("got %q, want %q", id, b.ID)
+	}
+}
+
 func TestResolveSessionIDAllowClosed_LiveTemplateBeatsClosedSessionName(t *testing.T) {
 	store := beads.NewMemStore()
 	closed, _ := store.Create(beads.Bead{

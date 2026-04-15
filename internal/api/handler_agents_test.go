@@ -356,6 +356,52 @@ func TestAgentGetIncludesCanonicalSessionID(t *testing.T) {
 	}
 }
 
+func TestAgentGetIncludesClosedCanonicalSessionID(t *testing.T) {
+	state := newSessionFakeState(t)
+	mgr := session.NewManager(state.cityBeadStore, state.sp)
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Worker", "claude", t.TempDir(), "claude", nil, session.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Close(info.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "test-get-closed-session-id",
+		Action: "agent.get",
+		Payload: map[string]interface{}{
+			"name": "myrig/worker",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+
+	var body agentResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Session == nil {
+		t.Fatal("Session = nil, want closed canonical session details")
+	}
+	if body.Session.ID != info.ID {
+		t.Fatalf("Session.ID = %q, want %q", body.Session.ID, info.ID)
+	}
+	if body.Session.Name != "" {
+		t.Fatalf("Session.Name = %q, want empty for closed session", body.Session.Name)
+	}
+}
+
 func TestAgentGetNotFound(t *testing.T) {
 	state := newFakeState(t)
 	srv := New(state)

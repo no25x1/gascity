@@ -62,6 +62,8 @@ func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (s
 	var openHistoricalAliasMatches []beads.Bead
 	var closedSessionNameMatches []beads.Bead
 	var closedAliasMatches []beads.Bead
+	var closedTemplateMatches []beads.Bead
+	var closedAgentNameMatches []beads.Bead
 	var closedHistoricalAliasMatches []beads.Bead
 	for _, b := range all {
 		if !IsSessionBeadOrRepairable(b) {
@@ -97,6 +99,10 @@ func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (s
 		switch {
 		case alias == identifier:
 			closedAliasMatches = append(closedAliasMatches, b)
+		case template == identifier:
+			closedTemplateMatches = append(closedTemplateMatches, b)
+		case agentName == identifier:
+			closedAgentNameMatches = append(closedAgentNameMatches, b)
 		case historicalAliasMatch:
 			closedHistoricalAliasMatches = append(closedHistoricalAliasMatches, b)
 		case sessionName == identifier:
@@ -124,11 +130,16 @@ func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (s
 	for _, matches := range [][]beads.Bead{
 		closedSessionNameMatches,
 		closedAliasMatches,
-		closedHistoricalAliasMatches,
 	} {
 		if len(matches) > 0 {
 			return chooseSessionMatch(identifier, matches)
 		}
+	}
+	if match, ok := choosePreferredTemplateMatch(closedTemplateMatches, closedAgentNameMatches); ok {
+		return match.ID, nil
+	}
+	if len(closedHistoricalAliasMatches) > 0 {
+		return chooseSessionMatch(identifier, closedHistoricalAliasMatches)
 	}
 	return "", fmt.Errorf("%w: %q", ErrSessionNotFound, identifier)
 }

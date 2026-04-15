@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
@@ -154,7 +155,7 @@ func (s *Server) resolveAgentSessionInfo(agentName, sessionName string, running 
 	var info *sessionInfo
 
 	if store := s.state.CityBeadStore(); store != nil {
-		if id, err := s.resolveSessionIDAllowClosedWithConfig(store, agentName); err == nil {
+		if id, ok := resolveAgentSessionIDFromStore(store, agentName, sessionName); ok {
 			info = &sessionInfo{ID: id}
 		}
 	}
@@ -172,6 +173,19 @@ func (s *Server) resolveAgentSessionInfo(agentName, sessionName string, running 
 	}
 	info.Attached = sp.IsAttached(sessionName)
 	return info
+}
+
+func resolveAgentSessionIDFromStore(store beads.Store, agentName, sessionName string) (string, bool) {
+	for _, identifier := range []string{agentName, sessionName} {
+		identifier = strings.TrimSpace(identifier)
+		if identifier == "" {
+			continue
+		}
+		if id, err := session.ResolveSessionIDAllowClosed(store, identifier); err == nil {
+			return id, true
+		}
+	}
+	return "", false
 }
 
 func (s *Server) applyAgentAction(name, action string) error {
