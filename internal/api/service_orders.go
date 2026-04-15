@@ -4,6 +4,7 @@ package api
 type OrderService interface {
 	Check() map[string]any
 	History(scopedName string, limit int, before string) (any, error)
+	HistoryDetail(id string) (any, error)
 	Feed(scopeKind, scopeRef string, limit int) (any, error)
 }
 
@@ -18,6 +19,10 @@ func (o *orderService) Check() map[string]any {
 
 func (o *orderService) History(scopedName string, limit int, before string) (any, error) {
 	return o.s.getOrderHistory(scopedName, limit, before)
+}
+
+func (o *orderService) HistoryDetail(id string) (any, error) {
+	return o.s.getOrderHistoryDetail(id)
 }
 
 func (o *orderService) Feed(scopeKind, scopeRef string, limit int) (any, error) {

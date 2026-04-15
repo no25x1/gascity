@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,8 +14,10 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 	"github.com/gorilla/websocket"
 )
@@ -707,6 +711,841 @@ func TestRouteMatrixParity_GET_v0_events_stream_ViaWS(t *testing.T) {
 	}
 }
 
+func TestRouteMatrixParity_GET_v0_convoys_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	if _, err := store.Create(beads.Bead{Title: "Convoy", Type: "convoy"}); err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{Title: "Task", Type: "task"}); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-convoys-list",
+		Action: "convoys.list",
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-convoys-list" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body struct {
+		Items []beads.Bead `json:"items"`
+		Total int          `json:"total"`
+	}
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode convoys.list: %v", err)
+	}
+	if body.Total != 1 || len(body.Items) != 1 {
+		t.Fatalf("body = %+v, want single convoy entry", body)
+	}
+	if body.Items[0].Type != "convoy" {
+		t.Fatalf("items[0] = %#v, want convoy bead", body.Items[0])
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_convoy_id_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	convoy, err := store.Create(beads.Bead{Title: "Convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	pid := convoy.ID
+	if _, err := store.Create(beads.Bead{Title: "Child", Type: "task", ParentID: pid}); err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-convoy-get",
+		Action: "convoy.get",
+		Payload: map[string]any{
+			"id": convoy.ID,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-convoy-get" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body struct {
+		Convoy   beads.Bead   `json:"convoy"`
+		Children []beads.Bead `json:"children"`
+		Progress struct {
+			Total  int `json:"total"`
+			Closed int `json:"closed"`
+		} `json:"progress"`
+	}
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode convoy.get: %v", err)
+	}
+	if body.Convoy.ID != convoy.ID || len(body.Children) != 1 || body.Progress.Total != 1 || body.Progress.Closed != 0 {
+		t.Fatalf("body = %+v, want convoy snapshot with one open child", body)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_convoys_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	item, err := store.Create(beads.Bead{Title: "Task", Type: "task"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-convoy-create",
+		Action: "convoy.create",
+		Payload: map[string]any{
+			"rig":   "myrig",
+			"title": "Test convoy",
+			"items": []string{item.ID},
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-convoy-create" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body beads.Bead
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode convoy.create: %v", err)
+	}
+	gotItem, err := store.Get(item.ID)
+	if err != nil {
+		t.Fatalf("get created child: %v", err)
+	}
+	if body.Type != "convoy" || gotItem.ParentID != body.ID {
+		t.Fatalf("convoy/item = %+v / %+v, want item parent linked to created convoy", body, gotItem)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_convoy_id_add_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	convoy, err := store.Create(beads.Bead{Title: "Convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	item, err := store.Create(beads.Bead{Title: "Task", Type: "task"})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-convoy-add",
+		Action: "convoy.add",
+		Payload: map[string]any{
+			"id":    convoy.ID,
+			"items": []string{item.ID},
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-convoy-add" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+	gotItem, err := store.Get(item.ID)
+	if err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if gotItem.ParentID != convoy.ID {
+		t.Fatalf("item parent = %q, want convoy %q", gotItem.ParentID, convoy.ID)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_convoy_id_remove_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	convoy, err := store.Create(beads.Bead{Title: "Convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	pid := convoy.ID
+	item, err := store.Create(beads.Bead{Title: "Task", Type: "task", ParentID: pid})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-convoy-remove",
+		Action: "convoy.remove",
+		Payload: map[string]any{
+			"id":    convoy.ID,
+			"items": []string{item.ID},
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-convoy-remove" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+	gotItem, err := store.Get(item.ID)
+	if err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if gotItem.ParentID != "" {
+		t.Fatalf("item parent = %q, want empty after remove", gotItem.ParentID)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_convoy_id_check_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	convoy, err := store.Create(beads.Bead{Title: "Convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	pid := convoy.ID
+	done, err := store.Create(beads.Bead{Title: "Done", Type: "task", ParentID: pid})
+	if err != nil {
+		t.Fatalf("create closed child: %v", err)
+	}
+	if err := store.Close(done.ID); err != nil {
+		t.Fatalf("close child: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{Title: "Open", Type: "task", ParentID: pid}); err != nil {
+		t.Fatalf("create open child: %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-convoy-check",
+		Action: "convoy.check",
+		Payload: map[string]any{
+			"id": convoy.ID,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-convoy-check" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body struct {
+		ConvoyID string `json:"convoy_id"`
+		Total    int    `json:"total"`
+		Closed   int    `json:"closed"`
+		Complete bool   `json:"complete"`
+	}
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode convoy.check: %v", err)
+	}
+	if body.ConvoyID != convoy.ID || body.Total != 2 || body.Closed != 1 || body.Complete {
+		t.Fatalf("body = %+v, want convoy_id=%q total=2 closed=1 complete=false", body, convoy.ID)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_convoy_id_close_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	convoy, err := store.Create(beads.Bead{Title: "Convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-convoy-close",
+		Action: "convoy.close",
+		Payload: map[string]any{
+			"id": convoy.ID,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-convoy-close" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+	got, err := store.Get(convoy.ID)
+	if err != nil {
+		t.Fatalf("get convoy: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("convoy status = %q, want closed", got.Status)
+	}
+}
+
+func TestRouteMatrixParity_DELETE_v0_convoy_id_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	convoy, err := store.Create(beads.Bead{Title: "Convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("create convoy: %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-convoy-delete",
+		Action: "convoy.delete",
+		Payload: map[string]any{
+			"id": convoy.ID,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-convoy-delete" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+	got, err := store.Get(convoy.ID)
+	if err != nil {
+		t.Fatalf("get convoy: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("convoy status = %q, want closed after delete", got.Status)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_workflow_id_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	root, err := state.cityBeadStore.Create(beads.Bead{
+		Title: "Workflow root",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.workflow_id":      "wf-1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workflow root: %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-workflow-get",
+		Action: "workflow.get",
+		Payload: map[string]any{
+			"id": "wf-1",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-workflow-get" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body workflowSnapshotResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode workflow.get: %v", err)
+	}
+	if body.WorkflowID != "wf-1" || body.RootBeadID != root.ID || len(body.Beads) == 0 {
+		t.Fatalf("body = %+v, want workflow wf-1 rooted at %q", body, root.ID)
+	}
+}
+
+func TestRouteMatrixParity_DELETE_v0_workflow_id_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	root, err := state.cityBeadStore.Create(beads.Bead{
+		Title: "Workflow root",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.workflow_id":      "wf-1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workflow root: %v", err)
+	}
+	if _, err := state.cityBeadStore.Create(beads.Bead{
+		Title: "Workflow child",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.root_bead_id": root.ID,
+		},
+	}); err != nil {
+		t.Fatalf("create workflow child: %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-workflow-delete",
+		Action: "workflow.delete",
+		Payload: map[string]any{
+			"id": "wf-1",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-workflow-delete" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body struct {
+		WorkflowID string `json:"workflow_id"`
+		Closed     int    `json:"closed"`
+		Deleted    int    `json:"deleted"`
+	}
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode workflow.delete: %v", err)
+	}
+	if body.WorkflowID != "wf-1" || body.Closed != 2 || body.Deleted != 0 {
+		t.Fatalf("body = %+v, want wf-1 closed=2 deleted=0", body)
+	}
+	gotRoot, err := state.cityBeadStore.Get(root.ID)
+	if err != nil {
+		t.Fatalf("get workflow root: %v", err)
+	}
+	if gotRoot.Status != "closed" {
+		t.Fatalf("workflow root status = %q, want closed", gotRoot.Status)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_orders_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	enabled := true
+	state.autos = []orders.Order{
+		{Name: "daily", Formula: "mol-daily", Gate: "cooldown", Interval: "1h", Enabled: &enabled},
+		{Name: "smoke", Exec: "echo ok", Gate: "manual"},
+	}
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-orders-list",
+		Action: "orders.list",
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-orders-list" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body struct {
+		Orders []orderResponse `json:"orders"`
+	}
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode orders.list: %v", err)
+	}
+	if len(body.Orders) != 2 {
+		t.Fatalf("orders = %+v, want 2 entries", body.Orders)
+	}
+	if body.Orders[0].Name != "daily" || body.Orders[0].Type != "formula" || !body.Orders[0].Enabled {
+		t.Fatalf("orders[0] = %+v, want enabled daily formula order", body.Orders[0])
+	}
+	if body.Orders[1].Name != "smoke" || body.Orders[1].Type != "exec" || !body.Orders[1].CaptureOutput {
+		t.Fatalf("orders[1] = %+v, want exec smoke order with captured output", body.Orders[1])
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_orders_feed_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	state.autos = []orders.Order{
+		{Name: "daily", Formula: "mol-daily", Gate: "cron", Rig: "myrig", Pool: "reviewers"},
+	}
+	routeMatrixCreateWorkflowRun(t, state.stores["myrig"], "mol-daily", "wf-order-feed", "myrig/claude", "rig", "myrig")
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-orders-feed",
+		Action: "orders.feed",
+		Payload: map[string]any{
+			"scope_kind": "rig",
+			"scope_ref":  "myrig",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-orders-feed" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body struct {
+		Items []monitorFeedItemResponse `json:"items"`
+	}
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode orders.feed: %v", err)
+	}
+	if len(body.Items) != 1 || body.Items[0].WorkflowID != "wf-order-feed" || body.Items[0].Type != "formula" {
+		t.Fatalf("items = %+v, want single wf-order-feed formula item", body.Items)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_orders_check_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	state.autos = []orders.Order{{Name: "daily", Exec: "echo ok", Gate: "cooldown"}}
+	if _, err := state.cityBeadStore.Create(beads.Bead{
+		Title:  "daily run",
+		Status: "closed",
+		Labels: []string{"order-run:daily", "exec-failed"},
+	}); err != nil {
+		t.Fatalf("create order run bead: %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-orders-check",
+		Action: "orders.check",
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-orders-check" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body struct {
+		Checks []struct {
+			ScopedName     string  `json:"scoped_name"`
+			LastRunOutcome *string `json:"last_run_outcome"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode orders.check: %v", err)
+	}
+	if len(body.Checks) != 1 || body.Checks[0].ScopedName != "daily" {
+		t.Fatalf("checks = %+v, want single daily check", body.Checks)
+	}
+	if body.Checks[0].LastRunOutcome == nil || *body.Checks[0].LastRunOutcome != "failed" {
+		t.Fatalf("last_run_outcome = %v, want failed", body.Checks[0].LastRunOutcome)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_orders_history_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	state.autos = []orders.Order{{Name: "daily", Exec: "echo ok", Gate: "manual"}}
+	bead, err := state.cityBeadStore.Create(beads.Bead{
+		Title:  "daily run",
+		Status: "closed",
+		Labels: []string{"order-run:daily", "exec"},
+		Metadata: map[string]string{
+			"convergence.gate_duration_ms": "42",
+			"convergence.gate_exit_code":   "0",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create order history bead: %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-orders-history",
+		Action: "orders.history",
+		Payload: map[string]any{
+			"scoped_name": "daily",
+			"limit":       10,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-orders-history" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body []struct {
+		BeadID     string  `json:"bead_id"`
+		Name       string  `json:"name"`
+		ScopedName string  `json:"scoped_name"`
+		HasOutput  bool    `json:"has_output"`
+		ExitCode   *string `json:"exit_code"`
+	}
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode orders.history: %v", err)
+	}
+	if len(body) != 1 {
+		t.Fatalf("history = %+v, want single entry", body)
+	}
+	if body[0].BeadID != bead.ID || body[0].Name != "daily" || body[0].ScopedName != "daily" || !body[0].HasOutput {
+		t.Fatalf("history[0] = %+v, want bead=%q daily has_output=true", body[0], bead.ID)
+	}
+	if body[0].ExitCode == nil || *body[0].ExitCode != "0" {
+		t.Fatalf("exit_code = %v, want 0", body[0].ExitCode)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_order_history_bead_id_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	bead, err := state.cityBeadStore.Create(beads.Bead{
+		Title:  "daily run",
+		Status: "closed",
+		Labels: []string{"order-run:daily", "exec"},
+		Metadata: map[string]string{
+			"convergence.gate_stdout": "hello",
+			"convergence.gate_stderr": "world",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create order history detail bead: %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-order-history-detail",
+		Action: "order.history.detail",
+		Payload: map[string]any{
+			"id": bead.ID,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-order-history-detail" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body struct {
+		BeadID string   `json:"bead_id"`
+		Labels []string `json:"labels"`
+		Output string   `json:"output"`
+	}
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode order.history.detail: %v", err)
+	}
+	if body.BeadID != bead.ID {
+		t.Fatalf("bead_id = %q, want %q", body.BeadID, bead.ID)
+	}
+	if !strings.Contains(body.Output, "hello") || !strings.Contains(body.Output, "world") {
+		t.Fatalf("output = %q, want merged stdout/stderr", body.Output)
+	}
+	if len(body.Labels) != 2 {
+		t.Fatalf("labels = %+v, want original bead labels", body.Labels)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_order_name_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	state.autos = []orders.Order{{Name: "daily", Formula: "mol-daily", Gate: "cooldown", Interval: "1h"}}
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-order-get",
+		Action: "order.get",
+		Payload: map[string]any{
+			"name": "daily",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-order-get" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body orderResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode order.get: %v", err)
+	}
+	if body.Name != "daily" || body.Type != "formula" || body.Interval != "1h" {
+		t.Fatalf("body = %+v, want daily formula order with interval 1h", body)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_order_name_enable_ViaWS(t *testing.T) {
+	state, _, conn := openRouteMatrixMutatorSocket(t)
+	state.autos = []orders.Order{{Name: "daily", Exec: "echo ok", Gate: "cooldown"}}
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-order-enable",
+		Action: "order.enable",
+		Payload: map[string]any{
+			"name": "daily",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-order-enable" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+	if len(state.cfg.Orders.Overrides) != 1 || state.cfg.Orders.Overrides[0].Enabled == nil || !*state.cfg.Orders.Overrides[0].Enabled {
+		t.Fatalf("order overrides = %+v, want single enabled daily override", state.cfg.Orders.Overrides)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_order_name_disable_ViaWS(t *testing.T) {
+	state, _, conn := openRouteMatrixMutatorSocket(t)
+	state.autos = []orders.Order{{Name: "daily", Exec: "echo ok", Gate: "cooldown"}}
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-order-disable",
+		Action: "order.disable",
+		Payload: map[string]any{
+			"name": "daily",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-order-disable" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+	if len(state.cfg.Orders.Overrides) != 1 || state.cfg.Orders.Overrides[0].Enabled == nil || *state.cfg.Orders.Overrides[0].Enabled {
+		t.Fatalf("order overrides = %+v, want single disabled daily override", state.cfg.Orders.Overrides)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_formulas_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+	routeMatrixWriteWorkflowFormula(t, formulaDir, "daily")
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-formulas-list",
+		Action: "formulas.list",
+		Payload: map[string]any{
+			"scope_kind": "city",
+			"scope_ref":  "test-city",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-formulas-list" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body struct {
+		Items   []formulaSummaryResponse `json:"items"`
+		Partial bool                     `json:"partial"`
+	}
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode formulas.list: %v", err)
+	}
+	if body.Partial {
+		t.Fatal("partial = true, want false")
+	}
+	if len(body.Items) != 1 || body.Items[0].Name != "daily" {
+		t.Fatalf("items = %+v, want single daily formula", body.Items)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_formulas_feed_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	routeMatrixCreateWorkflowRun(t, state.cityBeadStore, "daily", "wf-formula-feed", "mayor", "city", "test-city")
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-formulas-feed",
+		Action: "formulas.feed",
+		Payload: map[string]any{
+			"scope_kind": "city",
+			"scope_ref":  "test-city",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-formulas-feed" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body struct {
+		Items []monitorFeedItemResponse `json:"items"`
+	}
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode formulas.feed: %v", err)
+	}
+	if len(body.Items) != 1 || body.Items[0].WorkflowID != "wf-formula-feed" {
+		t.Fatalf("items = %+v, want single wf-formula-feed item", body.Items)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_formulas_name_runs_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+	routeMatrixWriteWorkflowFormula(t, formulaDir, "daily")
+	routeMatrixCreateWorkflowRun(t, state.cityBeadStore, "daily", "wf-daily-run", "mayor", "city", "test-city")
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-formula-runs",
+		Action: "formula.runs",
+		Payload: map[string]any{
+			"name":       "daily",
+			"scope_kind": "city",
+			"scope_ref":  "test-city",
+			"limit":      2,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-formula-runs" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body formulaRunsResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode formula.runs: %v", err)
+	}
+	if body.Formula != "daily" || body.RunCount != 1 || len(body.RecentRuns) != 1 {
+		t.Fatalf("body = %+v, want daily run_count=1 recent_runs=1", body)
+	}
+	if body.RecentRuns[0].WorkflowID != "wf-daily-run" {
+		t.Fatalf("recent_runs[0] = %+v, want wf-daily-run", body.RecentRuns[0])
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_formulas_name_ViaWS(t *testing.T) {
+	detail := routeMatrixFormulaDetail(t)
+	if detail.Name != "daily" || detail.Description != "Preview BD-123" {
+		t.Fatalf("detail = %+v, want daily preview formula with substituted description", detail)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_formula_name_ViaWS(t *testing.T) {
+	detail := routeMatrixFormulaDetail(t)
+	if len(detail.Steps) != 1 || detail.Steps[0]["title"] != "Prep BD-123" {
+		t.Fatalf("steps = %+v, want single substituted Prep BD-123 step", detail.Steps)
+	}
+	if len(detail.Preview.Nodes) != 1 || detail.Preview.Nodes[0].ID != "daily.prep" {
+		t.Fatalf("preview.nodes = %+v, want single daily.prep node", detail.Preview.Nodes)
+	}
+}
+
 func TestRouteMatrixParity_GET_v0_sessions_ViaWS(t *testing.T) {
 	fs := newSessionFakeState(t)
 	createTestSession(t, fs.cityBeadStore, fs.sp, "Session A")
@@ -737,6 +1576,35 @@ func TestRouteMatrixParity_GET_v0_sessions_ViaWS(t *testing.T) {
 	}
 }
 
+func TestRouteMatrixParity_POST_v0_sessions_ViaWS(t *testing.T) {
+	fs := newSessionFakeState(t)
+	_, _, conn := wsSetup(t, fs)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-session-create",
+		Action: "session.create",
+		Payload: map[string]any{
+			"kind": "agent",
+			"name": "myrig/worker",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-session-create" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body sessionResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode session.create: %v", err)
+	}
+	if body.Template != "myrig/worker" || body.Title != "myrig/worker" || body.Running {
+		t.Fatalf("body = %+v, want async-created myrig/worker session with running=false", body)
+	}
+}
+
 func TestRouteMatrixParity_GET_v0_session_id_ViaWS(t *testing.T) {
 	fs := newSessionFakeState(t)
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Session A")
@@ -763,6 +1631,68 @@ func TestRouteMatrixParity_GET_v0_session_id_ViaWS(t *testing.T) {
 	}
 	if body.ID != info.ID || body.Title != "Session A" {
 		t.Fatalf("body = %+v, want id=%q title=Session A", body, info.ID)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_session_id_transcript_ViaWS(t *testing.T) {
+	conn, info := openRouteMatrixAgentOutputSocket(t)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-session-transcript",
+		Action: "session.transcript",
+		Payload: map[string]any{
+			"id":    info.ID,
+			"turns": 0,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-session-transcript" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body sessionTranscriptResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode session.transcript: %v", err)
+	}
+	if body.ID != info.ID || len(body.Turns) != 2 {
+		t.Fatalf("body = %+v, want closed transcript with 2 turns", body)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_session_id_stream_ViaWS(t *testing.T) {
+	conn, info := openRouteMatrixAgentOutputSocket(t)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-session-stream",
+		Action: "subscription.start",
+		Payload: map[string]any{
+			"kind":   "session.stream",
+			"target": info.ID,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-session-stream" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var turnEvt wsEventEnvelope
+	readWSJSON(t, conn, &turnEvt)
+	if turnEvt.Type != "event" || turnEvt.EventType != "turn" {
+		t.Fatalf("turn event = %#v, want turn event", turnEvt)
+	}
+	var activityEvt wsEventEnvelope
+	readWSJSON(t, conn, &activityEvt)
+	if activityEvt.Type != "event" || activityEvt.EventType != "activity" {
+		t.Fatalf("activity event = %#v, want activity event", activityEvt)
+	}
+	if !strings.Contains(string(activityEvt.Payload), `"idle"`) {
+		t.Fatalf("activity payload = %s, want idle state", activityEvt.Payload)
 	}
 }
 
@@ -797,6 +1727,70 @@ func TestRouteMatrixParity_GET_v0_session_id_pending_ViaWS(t *testing.T) {
 	}
 	if !body.Supported || body.Pending == nil || body.Pending.RequestID != "req-1" {
 		t.Fatalf("body = %+v, want supported pending req-1", body)
+	}
+}
+
+func TestRouteMatrixParity_PATCH_v0_session_id_ViaWS(t *testing.T) {
+	fs := newSessionFakeState(t)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Original")
+	_, _, conn := wsSetup(t, fs)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-session-patch",
+		Action: "session.patch",
+		Payload: map[string]any{
+			"id":    info.ID,
+			"title": "Updated Title",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-session-patch" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body sessionResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode session.patch: %v", err)
+	}
+	if body.Title != "Updated Title" {
+		t.Fatalf("body = %+v, want updated title", body)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_session_id_submit_ViaWS(t *testing.T) {
+	fs := newSessionFakeState(t)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Submit Me")
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	if err := mgr.Suspend(info.ID); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	_, _, conn := wsSetup(t, fs)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-session-submit",
+		Action: "session.submit",
+		Payload: map[string]any{
+			"id":      info.ID,
+			"message": "hello",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-session-submit" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode session.submit: %v", err)
+	}
+	if body["status"] != "accepted" || body["id"] != info.ID || body["queued"] != false {
+		t.Fatalf("body = %+v, want accepted non-queued submit for %q", body, info.ID)
 	}
 }
 
@@ -874,6 +1868,302 @@ func TestRouteMatrixParity_POST_v0_session_id_respond_ViaWS(t *testing.T) {
 	}
 	if got := fs.sp.Responses[info.SessionName]; len(got) != 1 || got[0].Action != "approve" {
 		t.Fatalf("responses = %#v, want single approve", got)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_session_id_stop_ViaWS(t *testing.T) {
+	fs := newSessionFakeState(t)
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.Create(context.Background(), "helper", "Codex", "codex", t.TempDir(), "codex", nil, session.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := fs.cityBeadStore.Update(info.ID, beads.UpdateOpts{Metadata: map[string]string{"pool_managed": "true"}}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	_, _, conn := wsSetup(t, fs)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-session-stop",
+		Action: "session.stop",
+		Payload: map[string]any{
+			"id": info.ID,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-session-stop" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+	sawEscape := false
+	for _, call := range fs.sp.Calls {
+		if call.Method == "SendKeys" && call.Name == info.SessionName && call.Message == "Escape" {
+			sawEscape = true
+			break
+		}
+	}
+	if !sawEscape {
+		t.Fatalf("calls = %#v, want SendKeys(Escape)", fs.sp.Calls)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_session_id_kill_ViaWS(t *testing.T) {
+	fs := newSessionFakeState(t)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Kill Me")
+	_, _, conn := wsSetup(t, fs)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-session-kill",
+		Action: "session.kill",
+		Payload: map[string]any{
+			"id": info.ID,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-session-kill" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+	if fs.sp.IsRunning(info.SessionName) {
+		t.Fatalf("session %q should not be running after session.kill", info.SessionName)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_session_id_suspend_ViaWS(t *testing.T) {
+	fs := newSessionFakeState(t)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "To Suspend")
+	_, _, conn := wsSetup(t, fs)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-session-suspend",
+		Action: "session.suspend",
+		Payload: map[string]any{
+			"id": info.ID,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-session-suspend" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	got, err := mgr.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.State != session.StateSuspended {
+		t.Fatalf("state = %q, want suspended", got.State)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_session_id_close_ViaWS(t *testing.T) {
+	fs := newSessionFakeState(t)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "To Close")
+	_, _, conn := wsSetup(t, fs)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-session-close",
+		Action: "session.close",
+		Payload: map[string]any{
+			"id": info.ID,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-session-close" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	sessions, err := mgr.List("", "")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("sessions after close = %d, want 0", len(sessions))
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_session_id_wake_ViaWS(t *testing.T) {
+	fs := newSessionFakeState(t)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Held Session")
+	if err := fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{
+		"held_until":   "9999-12-31T23:59:59Z",
+		"wait_hold":    "true",
+		"sleep_intent": "wait-hold",
+		"sleep_reason": "wait-hold",
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch: %v", err)
+	}
+	_, _, conn := wsSetup(t, fs)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-session-wake",
+		Action: "session.wake",
+		Payload: map[string]any{
+			"id": info.ID,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-session-wake" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+	b, err := fs.cityBeadStore.Get(info.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if b.Metadata["held_until"] != "" || b.Metadata["wait_hold"] != "" || b.Metadata["sleep_intent"] != "" || b.Metadata["sleep_reason"] != "" {
+		t.Fatalf("metadata after wake = %+v, want hold fields cleared", b.Metadata)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_session_id_rename_ViaWS(t *testing.T) {
+	fs := newSessionFakeState(t)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Original")
+	_, _, conn := wsSetup(t, fs)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-session-rename",
+		Action: "session.rename",
+		Payload: map[string]any{
+			"id":    info.ID,
+			"title": "Renamed",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-session-rename" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body sessionResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode session.rename: %v", err)
+	}
+	if body.Title != "Renamed" {
+		t.Fatalf("body = %+v, want renamed title", body)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_session_id_agents_ViaWS(t *testing.T) {
+	conn, info := openRouteMatrixSessionAgentsSocket(t)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-session-agents-list",
+		Action: "session.agents.list",
+		Payload: map[string]any{
+			"id": info.ID,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-session-agents-list" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body struct {
+		Agents []struct {
+			AgentID         string `json:"agent_id"`
+			ParentToolUseID string `json:"parent_tool_use_id"`
+		} `json:"agents"`
+	}
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode session.agents.list: %v", err)
+	}
+	if len(body.Agents) != 1 || body.Agents[0].AgentID != "myagent" || body.Agents[0].ParentToolUseID != "toolu_111" {
+		t.Fatalf("agents = %+v, want single myagent/toolu_111 mapping", body.Agents)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_session_id_agents_agent_id_ViaWS(t *testing.T) {
+	conn, info := openRouteMatrixSessionAgentsSocket(t)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-session-agent-get",
+		Action: "session.agent.get",
+		Payload: map[string]any{
+			"id":       info.ID,
+			"agent_id": "myagent",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-session-agent-get" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body struct {
+		Messages []json.RawMessage `json:"messages"`
+		Status   string            `json:"status"`
+	}
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode session.agent.get: %v", err)
+	}
+	if body.Status != "completed" || len(body.Messages) != 4 {
+		t.Fatalf("body = %+v, want completed agent transcript with 4 messages", body)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_sling_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	_, _, conn := wsSetup(t, state)
+
+	oldRunner := slingCommandRunner
+	defer func() { slingCommandRunner = oldRunner }()
+
+	var gotArgs []string
+	slingCommandRunner = func(_ context.Context, _ string, args []string) (string, string, error) {
+		gotArgs = append([]string(nil), args...)
+		return "Slung BD-42 → myrig/worker\n", "", nil
+	}
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-sling",
+		Action: "sling.run",
+		Payload: map[string]any{
+			"target": "myrig/worker",
+			"bead":   "BD-42",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-sling" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body slingResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode sling.run: %v", err)
+	}
+	if body.Status != "slung" || body.Target != "myrig/worker" || body.Bead != "BD-42" {
+		t.Fatalf("body = %+v, want direct sling response for BD-42", body)
+	}
+	wantArgs := []string{"--city", state.CityPath(), "sling", "myrig/worker", "BD-42"}
+	if len(gotArgs) != len(wantArgs) {
+		t.Fatalf("args = %#v, want %#v", gotArgs, wantArgs)
+	}
+	for i := range wantArgs {
+		if gotArgs[i] != wantArgs[i] {
+			t.Fatalf("args = %#v, want %#v", gotArgs, wantArgs)
+		}
 	}
 }
 
@@ -1948,4 +3238,126 @@ func routeMatrixListMail(t *testing.T, conn *websocket.Conn, agent, status strin
 		t.Fatalf("mail.list total/items mismatch = %d/%d", body.Total, len(body.Items))
 	}
 	return body.Items
+}
+
+func routeMatrixCreateWorkflowRun(t *testing.T, store beads.Store, formulaName, workflowID, target, scopeKind, scopeRef string) {
+	t.Helper()
+
+	root, err := store.Create(beads.Bead{
+		Title: "Workflow root",
+		Ref:   formulaName,
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+			"gc.workflow_id":      workflowID,
+			"gc.run_target":       target,
+			"gc.scope_kind":       scopeKind,
+			"gc.scope_ref":        scopeRef,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workflow root: %v", err)
+	}
+	inProgress := "in_progress"
+	assignee := target
+	if err := store.Update(root.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &assignee}); err != nil {
+		t.Fatalf("set workflow in_progress: %v", err)
+	}
+}
+
+func routeMatrixWriteWorkflowFormula(t *testing.T, dir, name string) {
+	t.Helper()
+	writeTestFormula(t, dir, name, `
+description = "Preview {{issue}}"
+formula = "`+name+`"
+version = 2
+
+[vars]
+[vars.issue]
+description = "Issue bead ID"
+required = true
+
+[[steps]]
+id = "prep"
+title = "Prep {{issue}}"
+`)
+}
+
+func routeMatrixFormulaDetail(t *testing.T) formulaDetailResponse {
+	t.Helper()
+
+	state := newFakeState(t)
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+	routeMatrixWriteWorkflowFormula(t, formulaDir, "daily")
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-formula-detail",
+		Action: "formula.get",
+		Payload: map[string]any{
+			"name":       "daily",
+			"scope_kind": "city",
+			"scope_ref":  "test-city",
+			"target":     "worker",
+			"vars": map[string]string{
+				"issue": "BD-123",
+			},
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-formula-detail" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var detail formulaDetailResponse
+	if err := json.Unmarshal(resp.Result, &detail); err != nil {
+		t.Fatalf("decode formula.get: %v", err)
+	}
+	return detail
+}
+
+func openRouteMatrixSessionAgentsSocket(t *testing.T) (*websocket.Conn, session.Info) {
+	t.Helper()
+
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Agents", "claude", t.TempDir(), "claude", nil, session.ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, info.WorkDir, info.SessionKey+".jsonl",
+		`{"uuid":"1","type":"assistant","message":{"role":"assistant","content":"parent"}}`,
+	)
+
+	projectDir := filepath.Join(searchBase, sessionlog.ProjectSlug(info.WorkDir))
+	subagentsDir := filepath.Join(projectDir, info.SessionKey, "subagents")
+	if err := os.MkdirAll(subagentsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(subagents): %v", err)
+	}
+	agentPath := filepath.Join(subagentsDir, "agent-myagent.jsonl")
+	content := strings.Join([]string{
+		`{"uuid":"a1","type":"system","parentToolUseId":"toolu_111"}`,
+		`{"uuid":"a2","parentUuid":"a1","type":"user","message":{"role":"user","content":"do task"}}`,
+		`{"uuid":"a3","parentUuid":"a2","type":"assistant","message":{"role":"assistant","content":"done"}}`,
+		`{"uuid":"a4","parentUuid":"a3","type":"result","message":{"role":"result"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(agentPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile(agent transcript): %v", err)
+	}
+
+	ts := httptest.NewServer(srv.handler())
+	t.Cleanup(ts.Close)
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	t.Cleanup(func() { _ = conn.Close() })
+	drainWSHello(t, conn)
+	return conn, info
 }

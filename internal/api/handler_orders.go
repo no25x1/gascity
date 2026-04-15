@@ -258,6 +258,41 @@ func (s *Server) getOrderHistory(scopedName string, limit int, before string) (a
 	return entries, nil
 }
 
+func (s *Server) getOrderHistoryDetail(beadID string) (any, error) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return nil, &httpError{status: 503, code: "unavailable", message: "no bead store configured"}
+	}
+	if beadID == "" {
+		return nil, &httpError{status: 400, code: "invalid", message: "id is required"}
+	}
+
+	b, err := store.Get(beadID)
+	if err != nil {
+		return nil, err
+	}
+
+	output := ""
+	if b.Metadata != nil {
+		if stdout := b.Metadata["convergence.gate_stdout"]; stdout != "" {
+			output = stdout
+		}
+		if stderr := b.Metadata["convergence.gate_stderr"]; stderr != "" {
+			if output != "" {
+				output += "\n"
+			}
+			output += stderr
+		}
+	}
+
+	return map[string]any{
+		"bead_id":    b.ID,
+		"created_at": b.CreatedAt.Format(time.RFC3339),
+		"labels":     b.Labels,
+		"output":     output,
+	}, nil
+}
+
 // checkOrders evaluates gate conditions for all orders and returns the result.
 func (s *Server) checkOrders() map[string]any {
 	aa := s.state.Orders()

@@ -102,14 +102,6 @@ func init() {
 		Description:       "Get order history detail",
 		RequiresCityScope: true,
 	}, func(_ context.Context, s *Server, payload socketIDPayload) (any, error) {
-		store := s.state.CityBeadStore()
-		if store == nil {
-			return nil, httpError{status: 503, code: "unavailable", message: "no bead store configured"}
-		}
-		bead, err := store.Get(payload.ID)
-		if err != nil {
-			return nil, err
-		}
-		return bead, nil
+		return s.Orders.HistoryDetail(payload.ID)
 	})
 }
