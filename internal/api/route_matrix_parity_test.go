@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -537,6 +538,311 @@ func TestRouteMatrixParity_GET_v0_beads_index_wait_ViaWSWatch(t *testing.T) {
 	}
 }
 
+func TestRouteMatrixParity_GET_v0_mail_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	if _, err := state.cityMailProv.Send("mayor", "worker", "First", "body1"); err != nil {
+		t.Fatalf("Send(first): %v", err)
+	}
+	if _, err := state.cityMailProv.Send("mayor", "worker", "Second", "body2"); err != nil {
+		t.Fatalf("Send(second): %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	items := routeMatrixListMail(t, conn, "worker", "")
+	if len(items) != 2 {
+		t.Fatalf("mail items = %d, want 2 unread messages", len(items))
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_mail_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-mail-send",
+		Action: "mail.send",
+		Payload: map[string]any{
+			"from":    "mayor",
+			"to":      "worker",
+			"subject": "Review needed",
+			"body":    "Please check gc-456",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-mail-send" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body mail.Message
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode mail.send: %v", err)
+	}
+	if body.Subject != "Review needed" || body.To != "myrig/worker" {
+		t.Fatalf("body = %+v, want subject Review needed to myrig/worker", body)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_mail_count_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	if _, err := state.cityMailProv.Send("a", "b", "msg1", "body1"); err != nil {
+		t.Fatalf("Send(msg1): %v", err)
+	}
+	if _, err := state.cityMailProv.Send("a", "b", "msg2", "body2"); err != nil {
+		t.Fatalf("Send(msg2): %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-mail-count",
+		Action: "mail.count",
+		Payload: map[string]any{
+			"agent": "b",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-mail-count" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body map[string]int
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode mail.count: %v", err)
+	}
+	if body["unread"] != 2 || body["total"] != 2 {
+		t.Fatalf("body = %+v, want unread=2 total=2", body)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_mail_id_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	msg, err := state.cityMailProv.Send("mayor", "worker", "Subject", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-mail-get",
+		Action: "mail.get",
+		Payload: map[string]any{
+			"id": msg.ID,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-mail-get" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body mail.Message
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode mail.get: %v", err)
+	}
+	if body.ID != msg.ID || body.Subject != "Subject" {
+		t.Fatalf("body = %+v, want id=%q subject=Subject", body, msg.ID)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_mail_id_read_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	msg, err := state.cityMailProv.Send("mayor", "worker", "Read me", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-mail-read",
+		Action: "mail.read",
+		Payload: map[string]any{
+			"id": msg.ID,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-mail-read" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+	if got := routeMatrixListMail(t, conn, "worker", ""); len(got) != 0 {
+		t.Fatalf("unread mail after read = %d, want 0", len(got))
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_mail_id_mark_unread_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	msg, err := state.cityMailProv.Send("mayor", "worker", "Unread me", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if err := state.cityMailProv.MarkRead(msg.ID); err != nil {
+		t.Fatalf("MarkRead: %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-mail-mark-unread",
+		Action: "mail.mark_unread",
+		Payload: map[string]any{
+			"id": msg.ID,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-mail-mark-unread" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+	if got := routeMatrixListMail(t, conn, "worker", ""); len(got) != 1 {
+		t.Fatalf("unread mail after mark_unread = %d, want 1", len(got))
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_mail_id_archive_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	msg, err := state.cityMailProv.Send("mayor", "worker", "Archive me", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-mail-archive",
+		Action: "mail.archive",
+		Payload: map[string]any{
+			"id": msg.ID,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-mail-archive" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+	if got := routeMatrixListMail(t, conn, "worker", "all"); len(got) != 0 {
+		t.Fatalf("mail after archive = %d, want 0", len(got))
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_mail_thread_id_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	msg, err := state.cityMailProv.Send("alice", "bob", "Thread test", "body")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if _, err := state.cityMailProv.Reply(msg.ID, "bob", "Re: Thread test", "reply body"); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-mail-thread",
+		Action: "mail.thread",
+		Payload: map[string]any{
+			"id": msg.ThreadID,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-mail-thread" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body struct {
+		Items []mail.Message `json:"items"`
+		Total int            `json:"total"`
+	}
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode mail.thread: %v", err)
+	}
+	if body.Total != 2 || len(body.Items) != 2 {
+		t.Fatalf("body = %+v, want thread size 2", body)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_mail_id_reply_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	msg, err := state.cityMailProv.Send("mayor", "worker", "Initial", "content")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-mail-reply",
+		Action: "mail.reply",
+		Payload: map[string]any{
+			"id":      msg.ID,
+			"from":    "worker",
+			"subject": "Re: Initial",
+			"body":    "Done!",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-mail-reply" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body mail.Message
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode mail.reply: %v", err)
+	}
+	if body.ThreadID == "" || body.ReplyTo != msg.ID {
+		t.Fatalf("body = %+v, want thread id + reply_to=%q", body, msg.ID)
+	}
+}
+
+func TestRouteMatrixParity_DELETE_v0_mail_id_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	msg, err := state.cityMailProv.Send("mayor", "worker", "Delete me", "content")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-mail-delete",
+		Action: "mail.delete",
+		Payload: map[string]any{
+			"id": msg.ID,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-mail-delete" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body map[string]string
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode mail.delete: %v", err)
+	}
+	if body["status"] != "deleted" {
+		t.Fatalf("body = %+v, want status=deleted", body)
+	}
+	if got := routeMatrixListMail(t, conn, "worker", "all"); len(got) != 0 {
+		t.Fatalf("mail after delete = %d, want 0", len(got))
+	}
+}
+
 func TestRouteMatrixParity_GET_v0_packs_ViaWS(t *testing.T) {
 	state := newFakeState(t)
 	state.cfg.Packs = map[string]config.PackSource{
@@ -768,4 +1074,40 @@ func resolveAgentSessionID(t *testing.T, conn *websocket.Conn, agentName string)
 		t.Fatalf("agent.get session = %+v, want canonical session id", body.Session)
 	}
 	return body.Session.ID
+}
+
+func routeMatrixListMail(t *testing.T, conn *websocket.Conn, agent, status string) []mail.Message {
+	t.Helper()
+
+	payload := map[string]any{}
+	if agent != "" {
+		payload["agent"] = agent
+	}
+	if status != "" {
+		payload["status"] = status
+	}
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:    "request",
+		ID:      "route-mail-list-helper",
+		Action:  "mail.list",
+		Payload: payload,
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-mail-list-helper" {
+		t.Fatalf("mail.list response = %#v, want correlated response", resp)
+	}
+
+	var body struct {
+		Items []mail.Message `json:"items"`
+		Total int            `json:"total"`
+	}
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode mail.list: %v", err)
+	}
+	if body.Total != len(body.Items) {
+		t.Fatalf("mail.list total/items mismatch = %d/%d", body.Total, len(body.Items))
+	}
+	return body.Items
 }
