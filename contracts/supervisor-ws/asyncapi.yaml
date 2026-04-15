@@ -245,6 +245,10 @@ channels:
         $ref: '#/components/messages/ApiListResponse'
   actions/cities.list/request:
     description: List managed cities (supervisor)
+  actions/cities.list/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/ApiListResponse'
   actions/city.get/request:
     description: Get city details
   actions/city.get/response:

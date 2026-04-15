@@ -3,9 +3,11 @@ package api
 import "context"
 
 func init() {
-	RegisterMeta("cities.list", ActionDef{
+	RegisterSupervisorVoidAction("cities.list", ActionDef{
 		Description: "List managed cities (supervisor)",
 		ServerRoles: actionServerRoleSupervisor,
+	}, func(_ context.Context, sm *SupervisorMux) (listResponse, error) {
+		return sm.citiesList(), nil
 	})
 
 	RegisterVoidAction("status.get", ActionDef{

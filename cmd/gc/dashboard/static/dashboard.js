@@ -5,10 +5,10 @@
     // Section 1: City Scope + WS Connection
     // ================================================================
 
-    var _selectedCity = new URLSearchParams(window.location.search).get('city') || '';
-
-    var _wsUrl = (window.location.protocol === 'https:' ? 'wss://' : 'ws://') +
-        window.location.host + '/v0/ws';
+    var _bootstrap = window.__GC_BOOTSTRAP__ || {};
+    var _selectedCity = new URLSearchParams(window.location.search).get('city') ||
+        _bootstrap.initialCityScope || '';
+    var _wsUrl = buildWebSocketURL(_bootstrap.apiBaseURL);
 
     window.wsConnected = false;
     Object.defineProperty(window, 'sseConnected', {
@@ -67,6 +67,11 @@
     }
 
     function connectWebSocket() {
+        if (!_wsUrl) {
+            updateConnectionStatus('error');
+            handleError(new Error('dashboard bootstrap missing apiBaseURL'), 'bootstrap');
+            return;
+        }
         if (_ws) {
             _ws.close();
         }
@@ -152,6 +157,10 @@
             el.textContent = 'Reconnecting...';
             el.className = 'connection-reconnecting';
             break;
+        case 'error':
+            el.textContent = 'Connection failed';
+            el.className = 'connection-reconnecting';
+            break;
         default:
             el.textContent = 'Connecting...';
             el.className = '';
@@ -168,6 +177,21 @@
         var div = document.createElement('div');
         div.textContent = str;
         return div.innerHTML;
+    }
+
+    function buildWebSocketURL(apiBaseURL) {
+        if (!apiBaseURL) return '';
+        try {
+            var url = new URL(apiBaseURL, window.location.href);
+            url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+            url.pathname = url.pathname.replace(/\/+$/, '') + '/v0/ws';
+            url.search = '';
+            url.hash = '';
+            return url.toString();
+        } catch (err) {
+            handleError(err, 'bootstrap.apiBaseURL');
+            return '';
+        }
     }
 
     function handleError(err, context) {

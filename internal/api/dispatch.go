@@ -23,6 +23,7 @@ type ActionDef struct {
 
 // actionHandler is the raw dispatch signature used internally by the framework.
 type actionHandler func(s *Server, req *socketRequestEnvelope) (socketActionResult, *socketErrorEnvelope)
+type supervisorActionHandler func(sm *SupervisorMux, req *socketRequestEnvelope) (socketActionResult, *socketErrorEnvelope)
 
 // actionEntry combines metadata with a runtime handler. The RequestType and
 // ResponseType fields are populated by the generic RegisterAction helper so the
@@ -36,7 +37,8 @@ type actionEntry struct {
 	ServerRoles       actionServerRoles
 	RequestType       reflect.Type // nil for void actions
 	ResponseType      reflect.Type
-	Handler           actionHandler // nil = legacy fallback during migration
+	Handler           actionHandler
+	SupervisorHandler supervisorActionHandler
 }
 
 type actionServerRoles uint8
@@ -122,6 +124,28 @@ func RegisterVoidAction[Out any](name string, def ActionDef, handler func(contex
 	}
 }
 
+// RegisterSupervisorVoidAction registers a supervisor-scoped action that takes
+// no payload. The action still participates in the shared registry used for
+// capabilities and spec generation.
+func RegisterSupervisorVoidAction[Out any](name string, def ActionDef, handler func(context.Context, *SupervisorMux) (Out, error)) {
+	actionTableMu.Lock()
+	defer actionTableMu.Unlock()
+	actionTable[name] = &actionEntry{
+		Name:         name,
+		Description:  def.Description,
+		IsMutation:   def.IsMutation,
+		ServerRoles:  normalizeActionServerRoles(def.ServerRoles),
+		ResponseType: reflect.TypeOf((*Out)(nil)).Elem(),
+		SupervisorHandler: func(sm *SupervisorMux, req *socketRequestEnvelope) (socketActionResult, *socketErrorEnvelope) {
+			result, err := handler(req.dispatchCtx, sm)
+			if err != nil {
+				return socketActionResult{}, socketErrorFor(req.ID, err)
+			}
+			return socketActionResult{Result: result}, nil
+		},
+	}
+}
+
 // registerRawAction registers an action with direct access to the request
 // envelope. Use this only when the handler needs framework-level fields
 // like req.dispatchIndex. Prefer RegisterAction for all other cases.
@@ -136,22 +160,6 @@ func registerRawAction(name string, def ActionDef, handler actionHandler) {
 		SupportsWatch:     def.SupportsWatch,
 		ServerRoles:       normalizeActionServerRoles(def.ServerRoles),
 		Handler:           handler,
-	}
-}
-
-// RegisterMeta registers action metadata without a handler. Used during
-// incremental migration — the action appears in capabilities and spec
-// but dispatch falls back to the legacy switch.
-func RegisterMeta(name string, def ActionDef) {
-	actionTableMu.Lock()
-	defer actionTableMu.Unlock()
-	actionTable[name] = &actionEntry{
-		Name:              name,
-		Description:       def.Description,
-		IsMutation:        def.IsMutation,
-		RequiresCityScope: def.RequiresCityScope,
-		SupportsWatch:     def.SupportsWatch,
-		ServerRoles:       normalizeActionServerRoles(def.ServerRoles),
 	}
 }
 
@@ -232,6 +240,19 @@ func (s *Server) dispatchAction(req *socketRequestEnvelope) (socketActionResult,
 	}
 
 	return result, apiErr
+}
+
+func (sm *SupervisorMux) dispatchSupervisorAction(req *socketRequestEnvelope) (socketActionResult, *socketErrorEnvelope, bool) {
+	entry, ok := actionTable[req.Action]
+	if !ok || !entry.supportsRole(actionServerRoleSupervisor) || entry.SupervisorHandler == nil {
+		return socketActionResult{}, nil, false
+	}
+	if sm.readOnly && entry.IsMutation {
+		return socketActionResult{}, newSocketError(req.ID, "read_only",
+			"mutations disabled: server bound to non-localhost address"), true
+	}
+	result, apiErr := entry.SupervisorHandler(sm, req)
+	return result, apiErr, true
 }
 
 // ActionTableRegistry builds a specgen.Registry from the action table.

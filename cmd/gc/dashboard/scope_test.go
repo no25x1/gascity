@@ -1,8 +1,10 @@
 package dashboard
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gorilla/websocket"
@@ -97,4 +99,77 @@ func TestValidateAPI(t *testing.T) {
 			t.Fatal("ValidateAPI() succeeded for unhealthy server")
 		}
 	})
+}
+
+func TestNewDashboardMuxServesBootstrapScript(t *testing.T) {
+	mux, err := NewDashboardMux("http://127.0.0.1:7860", "bright-lights")
+	if err != nil {
+		t.Fatalf("NewDashboardMux: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/bootstrap.js", nil)
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/javascript; charset=utf-8" {
+		t.Fatalf("content-type = %q, want application/javascript; charset=utf-8", got)
+	}
+
+	body := strings.TrimSpace(rec.Body.String())
+	const prefix = "window.__GC_BOOTSTRAP__ = "
+	if !strings.HasPrefix(body, prefix) || !strings.HasSuffix(body, ";") {
+		t.Fatalf("bootstrap script = %q, want JS assignment", body)
+	}
+
+	var cfg struct {
+		APIBaseURL       string `json:"apiBaseURL"`
+		InitialCityScope string `json:"initialCityScope"`
+	}
+	raw := strings.TrimSuffix(strings.TrimPrefix(body, prefix), ";")
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		t.Fatalf("unmarshal bootstrap JSON: %v", err)
+	}
+	if cfg.APIBaseURL != "http://127.0.0.1:7860" {
+		t.Fatalf("apiBaseURL = %q, want http://127.0.0.1:7860", cfg.APIBaseURL)
+	}
+	if cfg.InitialCityScope != "bright-lights" {
+		t.Fatalf("initialCityScope = %q, want bright-lights", cfg.InitialCityScope)
+	}
+}
+
+func TestNewDashboardMuxRootIncludesBootstrapScript(t *testing.T) {
+	mux, err := NewDashboardMux("http://127.0.0.1:7860", "")
+	if err != nil {
+		t.Fatalf("NewDashboardMux: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `<script src="/bootstrap.js"></script>`) {
+		t.Fatalf("index body missing bootstrap script:\n%s", body)
+	}
+}
+
+func TestNewDashboardMuxDoesNotProxyAPIPaths(t *testing.T) {
+	mux, err := NewDashboardMux("http://127.0.0.1:7860", "")
+	if err != nil {
+		t.Fatalf("NewDashboardMux: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v0/ws", nil)
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
 }

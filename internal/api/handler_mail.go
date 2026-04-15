@@ -370,8 +370,8 @@ func sortedProviderNames(providers map[string]mail.Provider) []string {
 	return deduped
 }
 
-// recordMailEvent emits a mail SSE event so WebSocket/SSE consumers receive
-// real-time updates for API-initiated operations (not just CLI-initiated ones).
+// recordMailEvent emits a mail event so websocket subscribers receive real-time
+// updates for API-initiated operations as well as CLI-initiated ones.
 // Best-effort: silently skips if no event provider is configured.
 func (s *Server) recordMailEvent(eventType, actor, subject, rig string, msg *mail.Message) {
 	ep := s.state.EventProvider()

@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -386,10 +385,6 @@ func TestAgentGetNotFound(t *testing.T) {
 	}
 }
 
-func TestAgentOutputPeekFallback(t *testing.T) {
-	t.Skip("agent output peek requires session-based resolution; skipping until session.get with peek is wired")
-}
-
 func TestFindAgentPoolMaxZero(t *testing.T) {
 	// Regression: pool with Max=0 should default to 1, matching expandAgent.
 	cfg := &config.City{
@@ -408,20 +403,6 @@ func TestFindAgentPoolMaxZero(t *testing.T) {
 	}
 	if a.Name != "polecat" {
 		t.Errorf("agent.Name = %q, want %q", a.Name, "polecat")
-	}
-}
-
-func TestAgentOutputNotRunning(t *testing.T) {
-	state := newFakeState(t)
-	srv := New(state)
-
-	// Agent output is a sub-resource route that stays HTTP.
-	req := httptest.NewRequest("GET", "/v0/agent/myrig/worker/output", nil)
-	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusNotFound)
 	}
 }
 

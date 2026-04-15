@@ -362,10 +362,7 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (socketActionRe
 }
 
 func (sm *SupervisorMux) handleSocketRequest(req *socketRequestEnvelope) (socketActionResult, *socketErrorEnvelope) {
-	// Supervisor-level actions (no city scope required).
 	switch req.Action {
-	case "cities.list":
-		return socketActionResult{Result: sm.citiesList()}, nil
 	case "events.list":
 		// Global events.list without scope aggregates from all cities.
 		if req.Scope == nil || req.Scope.City == "" {
@@ -375,6 +372,9 @@ func (sm *SupervisorMux) handleSocketRequest(req *socketRequestEnvelope) (socket
 			}
 			return socketActionResult{Result: result}, nil
 		}
+	}
+	if result, apiErr, handled := sm.dispatchSupervisorAction(req); handled {
+		return result, apiErr
 	}
 
 	// City-scoped actions.

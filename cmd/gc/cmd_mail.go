@@ -1349,8 +1349,8 @@ func mailEventRig() string {
 	return os.Getenv("GC_RIG")
 }
 
-// mailEventPayload builds a JSON payload for mail events so SSE consumers
-// (e.g. dashboard clients) can route updates to the correct rig.
+// mailEventPayload builds a JSON payload for mail events so websocket event
+// consumers can route updates to the correct rig.
 // For sent/replied events, pass the full message; for state changes pass nil.
 func mailEventPayload(msg *mail.Message) json.RawMessage {
 	m := map[string]any{"rig": mailEventRig()}
