@@ -1,6 +1,5 @@
 
 interface ApiSocketBeadGraphPayload {
-  rootId?: string;
-  additionalProperties?: Map<string, any>;
+  root_id?: string;
 }
 export { ApiSocketBeadGraphPayload };

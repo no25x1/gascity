@@ -94,6 +94,21 @@ func (c *Client) GetService(name string) (workspacesvc.Status, error) {
 	return resp, nil
 }
 
+// GetAgentOutput fetches the route-faithful one-shot agent output payload.
+// Passing nil for tail preserves the server default; 0 requests zero replayed turns.
+func (c *Client) GetAgentOutput(name string, tail *int, before string) (agentOutputResponse, error) {
+	payload := socketAgentOutputPayload{
+		Name:   name,
+		Tail:   tail,
+		Before: before,
+	}
+	var resp agentOutputResponse
+	if _, err := c.doSocketJSON("agent.output.get", nil, payload, &resp); err != nil {
+		return agentOutputResponse{}, err
+	}
+	return resp, nil
+}
+
 // RestartService restarts a service.
 func (c *Client) RestartService(name string) error {
 	_, err := c.doSocketJSON("service.restart", nil, socketNamePayload{Name: name}, nil)

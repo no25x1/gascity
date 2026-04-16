@@ -1,10 +1,9 @@
 
 interface ApiExtmsgGroupLookupRequest {
-  accountId?: string;
-  conversationId?: string;
+  account_id?: string;
+  conversation_id?: string;
   kind?: string;
   provider?: string;
-  scopeId?: string;
-  additionalProperties?: Map<string, any>;
+  scope_id?: string;
 }
 export { ApiExtmsgGroupLookupRequest };

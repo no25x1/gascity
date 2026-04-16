@@ -12,7 +12,7 @@ interface ApiRequestEnvelope {
   /**
    * Deduplication key for mutation replay
    */
-  idempotencyKey?: string;
+  idempotency_key?: string;
   /**
    * Action-specific request payload
    */
@@ -21,8 +21,7 @@ interface ApiRequestEnvelope {
   /**
    * Must be 'request'
    */
-  reservedType?: string;
+  type?: string;
   watch?: ApiWatchParams;
-  additionalProperties?: Map<string, any>;
 }
 export { ApiRequestEnvelope };

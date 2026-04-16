@@ -3,8 +3,7 @@ interface RuntimePendingInteraction {
   kind?: string;
   metadata?: Map<string, string>;
   options?: string[];
-  reservedPrompt?: string;
-  requestId?: string;
-  additionalProperties?: Map<string, any>;
+  prompt?: string;
+  request_id?: string;
 }
 export { RuntimePendingInteraction };

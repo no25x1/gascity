@@ -1,7 +1,6 @@
 
 interface ApiSocketProviderCreatePayload {
-  reservedName?: string;
+  name?: string;
   spec?: Map<string, any>;
-  additionalProperties?: Map<string, any>;
 }
 export { ApiSocketProviderCreatePayload };

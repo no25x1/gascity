@@ -3,7 +3,6 @@ interface ApiSubscriptionStopPayload {
   /**
    * Subscription to stop
    */
-  subscriptionId?: string;
-  additionalProperties?: Map<string, any>;
+  subscription_id?: string;
 }
 export { ApiSubscriptionStopPayload };

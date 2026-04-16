@@ -1,7 +1,6 @@
 
 interface ApiBeadAssignResponse {
   assignee?: string;
-  reservedStatus?: string;
-  additionalProperties?: Map<string, any>;
+  status?: string;
 }
 export { ApiBeadAssignResponse };

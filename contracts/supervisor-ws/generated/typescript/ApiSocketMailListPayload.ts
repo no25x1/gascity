@@ -4,7 +4,6 @@ interface ApiSocketMailListPayload {
   cursor?: string;
   limit?: number | null;
   rig?: string;
-  reservedStatus?: string;
-  additionalProperties?: Map<string, any>;
+  status?: string;
 }
 export { ApiSocketMailListPayload };

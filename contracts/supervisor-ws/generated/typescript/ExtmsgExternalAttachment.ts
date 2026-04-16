@@ -1,8 +1,7 @@
 
 interface ExtmsgExternalAttachment {
-  mimeType?: string;
-  providerId?: string;
+  mime_type?: string;
+  provider_id?: string;
   url?: string;
-  additionalProperties?: Map<string, any>;
 }
 export { ExtmsgExternalAttachment };

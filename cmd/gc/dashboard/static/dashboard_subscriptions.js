@@ -2,7 +2,7 @@ export function createDashboardSubscriptions(options) {
     var state = options.state;
 
     function subscribeEvents() {
-        var payload = {kind: 'events'};
+        var payload = {kind: 'events.stream'};
         if (state.lastEventCursor) {
             if (state.selectedCity) {
                 payload.after_seq = parseInt(state.lastEventCursor, 10) || 0;

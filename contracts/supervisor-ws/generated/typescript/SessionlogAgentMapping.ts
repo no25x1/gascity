@@ -1,7 +1,6 @@
 
 interface SessionlogAgentMapping {
-  agentId?: string;
-  parentToolUseId?: string;
-  additionalProperties?: Map<string, any>;
+  agent_id?: string;
+  parent_tool_use_id?: string;
 }
 export { SessionlogAgentMapping };

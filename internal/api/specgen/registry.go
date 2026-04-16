@@ -88,6 +88,18 @@ type EnvelopeTypes struct {
 	Event             interface{} // *api.EventEnvelope
 	SubscriptionStart interface{} // *api.SubscriptionStartPayload
 	SubscriptionStop  interface{} // *api.SubscriptionStopPayload
+	ExtraChannels     []ChannelDef
+}
+
+// ChannelDef describes an additional protocol channel sample to reflect into
+// AsyncAPI. This is used for typed sub-protocol surfaces such as individual
+// stream kinds, while the runtime wire protocol can still use shared envelopes.
+type ChannelDef struct {
+	Name        string
+	Description string
+	Summary     string
+	Publish     interface{}
+	Subscribe   interface{}
 }
 
 // ActionNames returns sorted action names for the AsyncAPI enum.

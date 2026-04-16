@@ -1,11 +1,10 @@
 
 interface ExtmsgConversationRef {
-  accountId?: string;
-  conversationId?: string;
+  account_id?: string;
+  conversation_id?: string;
   kind?: string;
-  parentConversationId?: string;
+  parent_conversation_id?: string;
   provider?: string;
-  scopeId?: string;
-  additionalProperties?: Map<string, any>;
+  scope_id?: string;
 }
 export { ExtmsgConversationRef };

@@ -1,6 +1,5 @@
 
 interface ApiSocketNamePayload {
-  reservedName?: string;
-  additionalProperties?: Map<string, any>;
+  name?: string;
 }
 export { ApiSocketNamePayload };

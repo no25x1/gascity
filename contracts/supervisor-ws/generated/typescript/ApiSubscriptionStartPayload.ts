@@ -3,27 +3,26 @@ interface ApiSubscriptionStartPayload {
   /**
    * Resume from this cursor
    */
-  afterCursor?: string;
+  after_cursor?: string;
   /**
    * Resume from this event sequence
    */
-  afterSeq?: number;
+  after_seq?: number;
   /**
    * Stream format: 'text', 'raw', 'jsonl'
    */
   format?: string;
   /**
-   * Subscription type: 'events' or 'session.stream'
+   * Subscription type: 'events.stream', 'session.stream', or 'agent.output.stream'
    */
   kind?: string;
   /**
-   * Session ID or name (for session.stream)
+   * Stream target identifier (session ID/name or agent name)
    */
   target?: string;
   /**
    * Most recent N turns (0=all)
    */
   turns?: number;
-  additionalProperties?: Map<string, any>;
 }
 export { ApiSubscriptionStartPayload };

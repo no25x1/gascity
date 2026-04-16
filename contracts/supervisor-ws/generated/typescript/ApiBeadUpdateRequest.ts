@@ -6,10 +6,9 @@ interface ApiBeadUpdateRequest {
   labels?: string[];
   metadata?: Map<string, string>;
   priority?: Map<string, any>;
-  removeLabels?: string[];
-  reservedStatus?: string | null;
+  remove_labels?: string[];
+  status?: string | null;
   title?: string | null;
-  reservedType?: string | null;
-  additionalProperties?: Map<string, any>;
+  type?: string | null;
 }
 export { ApiBeadUpdateRequest };

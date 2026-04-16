@@ -1,7 +1,6 @@
 import {ExtmsgConversationRef} from './ExtmsgConversationRef';
 interface ApiExtmsgUnbindRequest {
   conversation?: ExtmsgConversationRef;
-  sessionId?: string;
-  additionalProperties?: Map<string, any>;
+  session_id?: string;
 }
 export { ApiExtmsgUnbindRequest };

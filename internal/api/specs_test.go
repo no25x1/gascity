@@ -138,9 +138,18 @@ func TestAsyncAPISpecContainsExpectedProtocolChannels(t *testing.T) {
 	sort.Strings(gotProtocol)
 
 	wantProtocol := []string{
+		"protocol/agent-output-stream/start",
+		"protocol/agent-output-stream/turn-event",
 		"protocol/error",
 		"protocol/event",
+		"protocol/events-stream/event",
+		"protocol/events-stream/start",
 		"protocol/hello",
+		"protocol/session-stream/activity-event",
+		"protocol/session-stream/message-event",
+		"protocol/session-stream/pending-event",
+		"protocol/session-stream/start",
+		"protocol/session-stream/turn-event",
 		"protocol/subscription-start",
 		"protocol/subscription-stop",
 	}
@@ -168,14 +177,14 @@ func TestAsyncAPISpecSubscriptionResumeSchema(t *testing.T) {
 	assertSchemaProperty(t, schema.Properties, "after_seq", "integer", "Resume from this event sequence")
 	assertSchemaProperty(t, schema.Properties, "format", "string", "Stream format")
 	assertSchemaProperty(t, schema.Properties, "kind", "string", "Subscription type")
-	assertSchemaProperty(t, schema.Properties, "target", "string", "Session ID or name")
+	assertSchemaProperty(t, schema.Properties, "target", "string", "Stream target identifier")
 	assertSchemaProperty(t, schema.Properties, "turns", "integer", "Most recent N turns")
 
 	if got := schema.Properties["after_seq"].Minimum; got != 0 {
 		t.Fatalf("ApiSubscriptionStartPayload.after_seq minimum = %v, want 0", got)
 	}
-	if desc := schema.Properties["kind"].Description; !strings.Contains(desc, "events") || !strings.Contains(desc, "session.stream") {
-		t.Fatalf("ApiSubscriptionStartPayload.kind description = %q, want events + session.stream", desc)
+	if desc := schema.Properties["kind"].Description; !strings.Contains(desc, subscriptionKindEventsStream) || !strings.Contains(desc, subscriptionKindSessionStream) || !strings.Contains(desc, subscriptionKindAgentOutputStream) {
+		t.Fatalf("ApiSubscriptionStartPayload.kind description = %q, want %s + %s + %s", desc, subscriptionKindEventsStream, subscriptionKindSessionStream, subscriptionKindAgentOutputStream)
 	}
 	if desc := schema.Properties["format"].Description; !strings.Contains(desc, "text") || !strings.Contains(desc, "raw") || !strings.Contains(desc, "jsonl") {
 		t.Fatalf("ApiSubscriptionStartPayload.format description = %q, want text/raw/jsonl", desc)
@@ -191,6 +200,15 @@ func TestAsyncAPISpecEventAndHelloSchemas(t *testing.T) {
 	}
 	assertSchemaProperty(t, eventSchema.Properties, "cursor", "string", "Resume cursor for reconnection")
 	assertSchemaProperty(t, eventSchema.Properties, "subscription_id", "string", "Subscription that produced this event")
+	if _, ok := doc.Components.Schemas["ApiEventsStreamSubscriptionPayload"]; !ok {
+		t.Fatal("asyncapi missing ApiEventsStreamSubscriptionPayload schema")
+	}
+	if _, ok := doc.Components.Schemas["ApiSessionStreamTurnEventEnvelope"]; !ok {
+		t.Fatal("asyncapi missing ApiSessionStreamTurnEventEnvelope schema")
+	}
+	if _, ok := doc.Components.Schemas["ApiAgentOutputStreamTurnEventEnvelope"]; !ok {
+		t.Fatal("asyncapi missing ApiAgentOutputStreamTurnEventEnvelope schema")
+	}
 
 	helloSchema, ok := doc.Components.Schemas["ApiHelloEnvelope"]
 	if !ok {
@@ -202,18 +220,18 @@ func TestAsyncAPISpecEventAndHelloSchemas(t *testing.T) {
 }
 
 type asyncAPIDoc struct {
-	Channels map[string]any `yaml:"channels"`
+	Channels   map[string]any `yaml:"channels"`
 	Components struct {
 		Schemas map[string]asyncAPISchema `yaml:"schemas"`
 	} `yaml:"components"`
 }
 
 type asyncAPISchema struct {
-	Description string                     `yaml:"description"`
-	Type        any                        `yaml:"type"`
-	Minimum     any                        `yaml:"minimum"`
-	Properties  map[string]asyncAPISchema  `yaml:"properties"`
-	Items       *asyncAPISchema            `yaml:"items"`
+	Description string                    `yaml:"description"`
+	Type        any                       `yaml:"type"`
+	Minimum     any                       `yaml:"minimum"`
+	Properties  map[string]asyncAPISchema `yaml:"properties"`
+	Items       *asyncAPISchema           `yaml:"items"`
 }
 
 func fetchAsyncAPIDoc(t *testing.T) asyncAPIDoc {

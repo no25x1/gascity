@@ -1,8 +1,7 @@
 
 interface ExtmsgExternalActor {
-  displayName?: string;
+  display_name?: string;
   id?: string;
-  isBot?: boolean;
-  additionalProperties?: Map<string, any>;
+  is_bot?: boolean;
 }
 export { ExtmsgExternalActor };

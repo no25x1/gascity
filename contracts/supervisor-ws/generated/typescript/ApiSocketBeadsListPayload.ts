@@ -5,8 +5,7 @@ interface ApiSocketBeadsListPayload {
   label?: string;
   limit?: number | null;
   rig?: string;
-  reservedStatus?: string;
-  reservedType?: string;
-  additionalProperties?: Map<string, any>;
+  status?: string;
+  type?: string;
 }
 export { ApiSocketBeadsListPayload };

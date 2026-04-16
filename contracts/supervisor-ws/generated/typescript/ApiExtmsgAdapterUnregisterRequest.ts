@@ -1,7 +1,6 @@
 
 interface ApiExtmsgAdapterUnregisterRequest {
-  accountId?: string;
+  account_id?: string;
   provider?: string;
-  additionalProperties?: Map<string, any>;
 }
 export { ApiExtmsgAdapterUnregisterRequest };

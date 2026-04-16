@@ -2244,7 +2244,126 @@ import { createDashboardTransport } from './dashboard_transport.js';
     });
 
     // --- Agent Log Drawer ---
-    var _logDrawerSessionId = null;
+    var _logDrawerAgentName = null;
+    var _logDrawerBefore = null;
+    var _logDrawerSubscriptionId = '';
+    var _logDrawerMessages = [];
+
+    function normalizeLogDrawerMessages(data) {
+        if (!data) {
+            return [];
+        }
+        if (typeof data === 'string') {
+            return data.split('\n').filter(Boolean);
+        }
+        if (Array.isArray(data)) {
+            return data.map(function(item) {
+                return typeof item === 'string' ? item : (item.text || item.content || JSON.stringify(item));
+            });
+        }
+        if (data.turns) {
+            return data.turns.map(function(item) {
+                return item.text || item.content || JSON.stringify(item);
+            });
+        }
+        if (data.messages) {
+            return data.messages.map(function(item) {
+                return typeof item === 'string' ? item : (item.text || item.content || JSON.stringify(item));
+            });
+        }
+        if (data.transcript) {
+            return typeof data.transcript === 'string' ? data.transcript.split('\n').filter(Boolean) : data.transcript;
+        }
+        return [];
+    }
+
+    function arraysEqual(left, right) {
+        if (left.length !== right.length) {
+            return false;
+        }
+        for (var i = 0; i < left.length; i++) {
+            if (left[i] !== right[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    function mergeLogDrawerMessages(existing, incoming) {
+        if (existing.length === 0) {
+            return incoming.slice();
+        }
+        if (incoming.length === 0) {
+            return existing.slice();
+        }
+        if (arraysEqual(incoming, existing.slice(Math.max(0, existing.length-incoming.length)))) {
+            return existing.slice();
+        }
+        if (incoming.length >= existing.length && arraysEqual(incoming.slice(0, existing.length), existing)) {
+            return existing.concat(incoming.slice(existing.length));
+        }
+        return existing.concat(incoming);
+    }
+
+    function renderLogDrawerMessages() {
+        var messagesEl = document.getElementById('log-drawer-messages');
+        var countEl = document.getElementById('log-drawer-count');
+        if (messagesEl) {
+            var html = '';
+            for (var i = 0; i < _logDrawerMessages.length; i++) {
+                html += '<div class="log-message">' + escapeHtml(_logDrawerMessages[i]) + '</div>';
+            }
+            messagesEl.innerHTML = html;
+        }
+        if (countEl) {
+            countEl.textContent = String(_logDrawerMessages.length);
+        }
+    }
+
+    function stopLogDrawerStream() {
+        var subID = _logDrawerSubscriptionId;
+        _logDrawerSubscriptionId = '';
+        if (!subID) {
+            return;
+        }
+        wsRequest('subscription.stop', {subscription_id: subID}).catch(function() {
+            // Best-effort cleanup during close/reconnect.
+        });
+    }
+
+    function startLogDrawerStream() {
+        if (!_logDrawerAgentName || _logDrawerSubscriptionId) {
+            return;
+        }
+        wsRequest('subscription.start', {
+            kind: 'agent.output.stream',
+            target: _logDrawerAgentName
+        }).then(function(result) {
+            _logDrawerSubscriptionId = result && result.subscription_id ? result.subscription_id : '';
+        }).catch(function(err) {
+            handleError(err, 'log-drawer-stream');
+        });
+    }
+
+    function handleLogDrawerEvent(msg) {
+        if (!_logDrawerSubscriptionId || !msg || msg.subscription_id !== _logDrawerSubscriptionId) {
+            return false;
+        }
+        if (msg.event_type !== 'turn') {
+            return true;
+        }
+        var incoming = normalizeLogDrawerMessages(msg.payload);
+        if (incoming.length === 0) {
+            return true;
+        }
+        _logDrawerMessages = mergeLogDrawerMessages(_logDrawerMessages, incoming);
+        renderLogDrawerMessages();
+        var body = document.getElementById('log-drawer-body');
+        if (body) {
+            body.scrollTop = body.scrollHeight;
+        }
+        return true;
+    }
 
     function openLogDrawer(agentName) {
         var drawer = document.getElementById('agent-log-drawer');
@@ -2262,45 +2381,21 @@ import { createDashboardTransport } from './dashboard_transport.js';
         if (countEl) countEl.textContent = '0';
         if (statusEl) statusEl.textContent = 'Loading...';
 
-        // Find session for this agent.
-        wsRequest('sessions.list', {state: 'active', peek: true})
-            .then(function(data) {
-                var sessions = data.items || [];
-                var session = sessions.find(function(s) {
-                    return (s.template || s.title || '') === agentName;
-                });
-                if (!session) {
-                    if (loadingEl) loadingEl.textContent = 'No session found for ' + agentName;
-                    return;
-                }
+        _logDrawerAgentName = agentName;
+        _logDrawerBefore = null;
+        _logDrawerMessages = [];
+        stopLogDrawerStream();
 
-                _logDrawerSessionId = session.id;
-                return wsRequest('session.transcript', {id: session.id});
-            })
+        wsRequest('agent.output.get', {name: agentName})
             .then(function(data) {
                 if (!data) return;
                 if (loadingEl) loadingEl.style.display = 'none';
                 if (statusEl) statusEl.textContent = '';
 
-                var messages = [];
-                if (typeof data === 'string') {
-                    messages = data.split('\n').filter(Boolean);
-                } else if (Array.isArray(data)) {
-                    messages = data;
-                } else if (data.messages) {
-                    messages = data.messages;
-                } else if (data.transcript) {
-                    messages = typeof data.transcript === 'string' ? data.transcript.split('\n').filter(Boolean) : data.transcript;
-                }
+                _logDrawerMessages = normalizeLogDrawerMessages(data);
 
-                if (countEl) countEl.textContent = String(messages.length);
-
-                var html = '';
-                for (var i = 0; i < messages.length; i++) {
-                    var msg = typeof messages[i] === 'string' ? messages[i] : (messages[i].text || messages[i].content || JSON.stringify(messages[i]));
-                    html += '<div class="log-message">' + escapeHtml(msg) + '</div>';
-                }
-                if (messagesEl) messagesEl.innerHTML = html;
+                _logDrawerBefore = data.pagination && data.pagination.truncated_before_message ? data.pagination.truncated_before_message : null;
+                renderLogDrawerMessages();
 
                 // Scroll to bottom.
                 var body = document.getElementById('log-drawer-body');
@@ -2308,9 +2403,10 @@ import { createDashboardTransport } from './dashboard_transport.js';
 
                 // Show "load older" button.
                 var olderBtn = document.getElementById('log-drawer-older-btn');
-                if (olderBtn && messages.length >= 50) {
-                    olderBtn.style.display = 'inline-block';
+                if (olderBtn) {
+                    olderBtn.style.display = _logDrawerBefore ? 'inline-block' : 'none';
                 }
+                startLogDrawerStream();
             })
             .catch(function(err) {
                 if (loadingEl) loadingEl.textContent = 'Error: ' + err.message;
@@ -2321,31 +2417,30 @@ import { createDashboardTransport } from './dashboard_transport.js';
     on('log-drawer-close-btn', 'click', function() {
         var drawer = document.getElementById('agent-log-drawer');
         if (drawer) drawer.style.display = 'none';
-        _logDrawerSessionId = null;
+        stopLogDrawerStream();
+        _logDrawerAgentName = null;
+        _logDrawerBefore = null;
+        _logDrawerMessages = [];
     });
 
     on('log-drawer-older-btn', 'click', function() {
-        if (!_logDrawerSessionId) return;
-        // Fetch older transcript messages.
+        if (!_logDrawerAgentName || !_logDrawerBefore) return;
         var messagesEl = document.getElementById('log-drawer-messages');
-        var existingCount = messagesEl ? messagesEl.children.length : 0;
-        wsRequest('session.transcript', {id: _logDrawerSessionId, before: existingCount})
+        var countEl = document.getElementById('log-drawer-count');
+        var olderBtn = document.getElementById('log-drawer-older-btn');
+        wsRequest('agent.output.get', {name: _logDrawerAgentName, before: _logDrawerBefore})
             .then(function(data) {
                 if (!data) return;
-                var messages = [];
-                if (typeof data === 'string') {
-                    messages = data.split('\n').filter(Boolean);
-                } else if (Array.isArray(data)) {
-                    messages = data;
-                } else if (data.messages) {
-                    messages = data.messages;
-                }
+                var messages = normalizeLogDrawerMessages(data);
+                _logDrawerBefore = data.pagination && data.pagination.truncated_before_message ? data.pagination.truncated_before_message : null;
                 var html = '';
                 for (var i = 0; i < messages.length; i++) {
-                    var msg = typeof messages[i] === 'string' ? messages[i] : (messages[i].text || messages[i].content || JSON.stringify(messages[i]));
-                    html += '<div class="log-message">' + escapeHtml(msg) + '</div>';
+                    html += '<div class="log-message">' + escapeHtml(messages[i]) + '</div>';
                 }
+                _logDrawerMessages = messages.concat(_logDrawerMessages);
                 if (messagesEl) messagesEl.insertAdjacentHTML('afterbegin', html);
+                if (countEl) countEl.textContent = String(_logDrawerMessages.length);
+                if (olderBtn) olderBtn.style.display = _logDrawerBefore ? 'inline-block' : 'none';
             })
             .catch(function(err) { handleError(err, 'log-drawer-older'); });
     });
@@ -2551,12 +2646,20 @@ import { createDashboardTransport } from './dashboard_transport.js';
         updateCityTabs: updateCityTabs,
         onHello: function(msg) {
             palette.buildCommandsFromCapabilities(msg.capabilities);
+            _logDrawerSubscriptionId = '';
             return _resolveDefaultCity(msg).then(function() {
                 subscriptions.subscribeEvents();
-                return loadDashboard();
+                return loadDashboard().then(function() {
+                    if (_logDrawerAgentName) {
+                        startLogDrawerStream();
+                    }
+                });
             });
         },
         onEvent: function(msg) {
+            if (handleLogDrawerEvent(msg)) {
+                return;
+            }
             subscriptions.handleWSEvent(msg);
         }
     });

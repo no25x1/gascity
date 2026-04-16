@@ -369,7 +369,7 @@ func (s *Server) socketHello() socketHelloEnvelope {
 		ServerRole:        "city",
 		ReadOnly:          s.readOnly,
 		Capabilities:      actionTableCapabilities(actionServerRoleCity),
-		SubscriptionKinds: []string{"events", "session.stream"},
+		SubscriptionKinds: []string{subscriptionKindEventsStream, subscriptionKindSessionStream, subscriptionKindAgentOutputStream},
 	}
 }
 
@@ -380,7 +380,7 @@ func (sm *SupervisorMux) socketHello() socketHelloEnvelope {
 		ServerRole:        "supervisor",
 		ReadOnly:          sm.readOnly,
 		Capabilities:      actionTableCapabilities(actionServerRoleSupervisor),
-		SubscriptionKinds: []string{"events", "session.stream"},
+		SubscriptionKinds: []string{subscriptionKindEventsStream, subscriptionKindSessionStream, subscriptionKindAgentOutputStream},
 	}
 }
 

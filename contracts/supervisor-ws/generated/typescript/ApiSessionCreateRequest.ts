@@ -4,11 +4,10 @@ interface ApiSessionCreateRequest {
   async?: boolean;
   kind?: string;
   message?: string;
-  reservedName?: string;
+  name?: string;
   options?: Map<string, string>;
-  projectId?: string;
-  sessionName?: string | null;
+  project_id?: string;
+  session_name?: string | null;
   title?: string;
-  additionalProperties?: Map<string, any>;
 }
 export { ApiSessionCreateRequest };

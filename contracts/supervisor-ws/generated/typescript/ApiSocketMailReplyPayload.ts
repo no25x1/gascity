@@ -1,10 +1,9 @@
 
 interface ApiSocketMailReplyPayload {
   body?: string;
-  reservedFrom?: string;
+  from?: string;
   id?: string;
   rig?: string;
   subject?: string;
-  additionalProperties?: Map<string, any>;
 }
 export { ApiSocketMailReplyPayload };

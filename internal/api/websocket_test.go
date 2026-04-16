@@ -549,12 +549,10 @@ func TestServerWebSocketEventSubscription(t *testing.T) {
 	drainWSHello(t, conn)
 
 	writeWSJSON(t, conn, wsRequestEnvelope{
-		Type:   "request",
-		ID:     "sub-1",
-		Action: "subscription.start",
-		Payload: map[string]any{
-			"kind": "events",
-		},
+		Type:    "request",
+		ID:      "sub-1",
+		Action:  "subscription.start",
+		Payload: EventsStreamSubscriptionPayload{Kind: subscriptionKindEventsStream},
 	})
 
 	var resp wsResponseEnvelope
@@ -569,8 +567,8 @@ func TestServerWebSocketEventSubscription(t *testing.T) {
 	if err := json.Unmarshal(resp.Result, &result); err != nil {
 		t.Fatalf("unmarshal subscription result: %v", err)
 	}
-	if result.SubscriptionID == "" || result.Kind != "events" {
-		t.Fatalf("subscription result = %#v, want subscription_id + kind events", result)
+	if result.SubscriptionID == "" || result.Kind != subscriptionKindEventsStream {
+		t.Fatalf("subscription result = %#v, want subscription_id + kind %s", result, subscriptionKindEventsStream)
 	}
 
 	state.eventProv.Record(events.Event{Type: events.BeadCreated, Actor: "tester"})
@@ -1406,12 +1404,10 @@ func TestSupervisorWebSocketGlobalEventSubscription(t *testing.T) {
 	drainWSHello(t, conn)
 
 	writeWSJSON(t, conn, wsRequestEnvelope{
-		Type:   "request",
-		ID:     "sub-global",
-		Action: "subscription.start",
-		Payload: map[string]any{
-			"kind": "events",
-		},
+		Type:    "request",
+		ID:      "sub-global",
+		Action:  "subscription.start",
+		Payload: EventsStreamSubscriptionPayload{Kind: subscriptionKindEventsStream},
 	})
 
 	var resp wsResponseEnvelope
@@ -1491,13 +1487,10 @@ func TestServerWebSocketSessionStreamClosedSessionSnapshot(t *testing.T) {
 	drainWSHello(t, conn)
 
 	writeWSJSON(t, conn, wsRequestEnvelope{
-		Type:   "request",
-		ID:     "sub-session",
-		Action: "subscription.start",
-		Payload: map[string]any{
-			"kind":   "session.stream",
-			"target": info.ID,
-		},
+		Type:    "request",
+		ID:      "sub-session",
+		Action:  "subscription.start",
+		Payload: SessionStreamSubscriptionPayload{Kind: subscriptionKindSessionStream, Target: info.ID},
 	})
 
 	var resp wsResponseEnvelope
@@ -1564,14 +1557,10 @@ func TestServerWebSocketSessionStreamClosedSessionSnapshotHonorsTurns(t *testing
 	drainWSHello(t, conn)
 
 	writeWSJSON(t, conn, wsRequestEnvelope{
-		Type:   "request",
-		ID:     "sub-session-tail",
-		Action: "subscription.start",
-		Payload: map[string]any{
-			"kind":   "session.stream",
-			"target": info.ID,
-			"turns":  1,
-		},
+		Type:    "request",
+		ID:      "sub-session-tail",
+		Action:  "subscription.start",
+		Payload: SessionStreamSubscriptionPayload{Kind: subscriptionKindSessionStream, Target: info.ID, Turns: 1},
 	})
 
 	var resp wsResponseEnvelope
@@ -1627,14 +1616,10 @@ func TestServerWebSocketSessionStreamClosedSessionSnapshotResumesAfterCursor(t *
 	drainWSHello(t, conn)
 
 	writeWSJSON(t, conn, wsRequestEnvelope{
-		Type:   "request",
-		ID:     "sub-session-resume",
-		Action: "subscription.start",
-		Payload: map[string]any{
-			"kind":         "session.stream",
-			"target":       info.ID,
-			"after_cursor": "2",
-		},
+		Type:    "request",
+		ID:      "sub-session-resume",
+		Action:  "subscription.start",
+		Payload: SessionStreamSubscriptionPayload{Kind: subscriptionKindSessionStream, Target: info.ID, AfterCursor: "2"},
 	})
 
 	var resp wsResponseEnvelope
@@ -1691,14 +1676,10 @@ func TestServerWebSocketSessionStreamRejectsInvalidFormat(t *testing.T) {
 	drainWSHello(t, conn)
 
 	writeWSJSON(t, conn, wsRequestEnvelope{
-		Type:   "request",
-		ID:     "sub-session-invalid-format",
-		Action: "subscription.start",
-		Payload: map[string]any{
-			"kind":   "session.stream",
-			"target": info.ID,
-			"format": "bogus",
-		},
+		Type:    "request",
+		ID:      "sub-session-invalid-format",
+		Action:  "subscription.start",
+		Payload: SessionStreamSubscriptionPayload{Kind: subscriptionKindSessionStream, Target: info.ID, Format: "bogus"},
 	})
 
 	var errResp wsErrorEnvelope
@@ -1750,13 +1731,10 @@ func TestSupervisorWebSocketSessionStreamUsesImplicitSingleCity(t *testing.T) {
 	drainWSHello(t, conn)
 
 	writeWSJSON(t, conn, wsRequestEnvelope{
-		Type:   "request",
-		ID:     "sub-session-supervisor",
-		Action: "subscription.start",
-		Payload: map[string]any{
-			"kind":   "session.stream",
-			"target": info.ID,
-		},
+		Type:    "request",
+		ID:      "sub-session-supervisor",
+		Action:  "subscription.start",
+		Payload: SessionStreamSubscriptionPayload{Kind: subscriptionKindSessionStream, Target: info.ID},
 	})
 
 	var resp wsResponseEnvelope
@@ -1928,12 +1906,10 @@ func TestServerWebSocketSubscriptionStopOK(t *testing.T) {
 
 	// Start a subscription.
 	writeWSJSON(t, conn, wsRequestEnvelope{
-		Type:   "request",
-		ID:     "sub-start",
-		Action: "subscription.start",
-		Payload: map[string]any{
-			"kind": "events",
-		},
+		Type:    "request",
+		ID:      "sub-start",
+		Action:  "subscription.start",
+		Payload: EventsStreamSubscriptionPayload{Kind: subscriptionKindEventsStream},
 	})
 	var subResp wsResponseEnvelope
 	readWSJSON(t, conn, &subResp)
@@ -2512,12 +2488,10 @@ func TestWSWriteErrorCancelsSession(t *testing.T) {
 	// Start an event subscription so the server has an active session that
 	// will try to write events to us.
 	writeWSJSON(t, conn, wsRequestEnvelope{
-		Type:   "request",
-		ID:     "sub-write-err",
-		Action: "subscription.start",
-		Payload: map[string]any{
-			"kind": "events",
-		},
+		Type:    "request",
+		ID:      "sub-write-err",
+		Action:  "subscription.start",
+		Payload: EventsStreamSubscriptionPayload{Kind: subscriptionKindEventsStream},
 	})
 
 	var subResp wsResponseEnvelope

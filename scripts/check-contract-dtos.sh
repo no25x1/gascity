@@ -11,6 +11,7 @@ cleanup() {
 trap cleanup EXIT
 
 cp "$CONTRACT_DIR/package.json" "$CONTRACT_DIR/package-lock.json" "$CONTRACT_DIR/asyncapi.yaml" "$TMP_DIR/"
+cp -rf "$CONTRACT_DIR/scripts" "$TMP_DIR/"
 
 pushd "$TMP_DIR" >/dev/null
 if ! npm ci --silent >"$TMP_DIR/npm-ci.stdout.log" 2>"$TMP_DIR/npm-ci.stderr.log"; then

@@ -5,6 +5,5 @@ interface ApiSocketSessionsListPayload {
   peek?: boolean;
   state?: string;
   template?: string;
-  additionalProperties?: Map<string, any>;
 }
 export { ApiSocketSessionsListPayload };

@@ -2,13 +2,13 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gorilla/websocket"
@@ -17,16 +17,82 @@ import (
 const (
 	socketPingInterval = 15 * time.Second
 	socketPongWait     = 45 * time.Second
+
+	subscriptionKindEventsStream      = "events.stream"
+	subscriptionKindSessionStream     = "session.stream"
+	subscriptionKindAgentOutputStream = "agent.output.stream"
 )
+
+type subscriptionKindPayload struct {
+	Kind string `json:"kind"`
+}
 
 // SubscriptionStartPayload is the payload for subscription.start.
 type SubscriptionStartPayload struct {
-	Kind        string `json:"kind" description:"Subscription type: 'events' or 'session.stream'"`
+	Kind        string `json:"kind" description:"Subscription type: 'events.stream', 'session.stream', or 'agent.output.stream'"`
 	AfterSeq    uint64 `json:"after_seq,omitempty" description:"Resume from this event sequence"`
 	AfterCursor string `json:"after_cursor,omitempty" description:"Resume from this cursor"`
-	Target      string `json:"target,omitempty" description:"Session ID or name (for session.stream)"`
+	Target      string `json:"target,omitempty" description:"Stream target identifier (session ID/name or agent name)"`
 	Format      string `json:"format,omitempty" description:"Stream format: 'text', 'raw', 'jsonl'"`
 	Turns       int    `json:"turns,omitempty" description:"Most recent N turns (0=all)"`
+}
+
+// EventsStreamSubscriptionPayload is the typed request payload for the
+// route-faithful events.stream subscription kind.
+type EventsStreamSubscriptionPayload struct {
+	Kind        string `json:"kind" description:"Must be 'events.stream'"`
+	AfterSeq    uint64 `json:"after_seq,omitempty" description:"Resume from this event sequence"`
+	AfterCursor string `json:"after_cursor,omitempty" description:"Resume from this cursor"`
+}
+
+// ToSubscriptionStartPayload converts the typed payload to the runtime
+// protocol payload for subscription.start.
+func (p EventsStreamSubscriptionPayload) ToSubscriptionStartPayload() SubscriptionStartPayload {
+	return SubscriptionStartPayload{
+		Kind:        subscriptionKindEventsStream,
+		AfterSeq:    p.AfterSeq,
+		AfterCursor: p.AfterCursor,
+	}
+}
+
+// SessionStreamSubscriptionPayload is the typed request payload for the
+// route-faithful session.stream subscription kind.
+type SessionStreamSubscriptionPayload struct {
+	Kind        string `json:"kind" description:"Must be 'session.stream'"`
+	AfterCursor string `json:"after_cursor,omitempty" description:"Resume from this cursor"`
+	Target      string `json:"target" description:"Session ID or session name"`
+	Format      string `json:"format,omitempty" description:"Stream format: 'text', 'raw', 'jsonl'"`
+	Turns       int    `json:"turns,omitempty" description:"Most recent N turns (0=all)"`
+}
+
+// ToSubscriptionStartPayload converts the typed payload to the runtime
+// protocol payload for subscription.start.
+func (p SessionStreamSubscriptionPayload) ToSubscriptionStartPayload() SubscriptionStartPayload {
+	return SubscriptionStartPayload{
+		Kind:        subscriptionKindSessionStream,
+		AfterCursor: p.AfterCursor,
+		Target:      p.Target,
+		Format:      p.Format,
+		Turns:       p.Turns,
+	}
+}
+
+// AgentOutputStreamSubscriptionPayload is the typed request payload for the
+// route-faithful agent.output.stream subscription kind.
+type AgentOutputStreamSubscriptionPayload struct {
+	Kind        string `json:"kind" description:"Must be 'agent.output.stream'"`
+	AfterCursor string `json:"after_cursor,omitempty" description:"Resume from this cursor"`
+	Target      string `json:"target" description:"Agent name"`
+}
+
+// ToSubscriptionStartPayload converts the typed payload to the runtime
+// protocol payload for subscription.start.
+func (p AgentOutputStreamSubscriptionPayload) ToSubscriptionStartPayload() SubscriptionStartPayload {
+	return SubscriptionStartPayload{
+		Kind:        subscriptionKindAgentOutputStream,
+		AfterCursor: p.AfterCursor,
+		Target:      p.Target,
+	}
 }
 
 // SubscriptionStopPayload is the payload for subscription.stop.
@@ -42,6 +108,81 @@ type EventEnvelope struct {
 	Index          uint64 `json:"index,omitempty" description:"Event sequence number"`
 	Cursor         string `json:"cursor,omitempty" description:"Resume cursor for reconnection"`
 	Payload        any    `json:"payload,omitempty" description:"Event-specific payload"`
+}
+
+// EventsStreamPayload is the typed payload emitted by events.stream.
+type EventsStreamPayload struct {
+	events.Event
+	City     string                   `json:"city,omitempty"`
+	Workflow *workflowEventProjection `json:"workflow,omitempty"`
+}
+
+// EventsStreamEventEnvelope is the typed event envelope for events.stream.
+type EventsStreamEventEnvelope struct {
+	Type           string              `json:"type" description:"Must be 'event'"`
+	SubscriptionID string              `json:"subscription_id" description:"Subscription that produced this event"`
+	EventType      string              `json:"event_type" description:"Event type (e.g. 'bead.created')"`
+	Index          uint64              `json:"index,omitempty" description:"Event sequence number"`
+	Cursor         string              `json:"cursor,omitempty" description:"Resume cursor for reconnection"`
+	Payload        EventsStreamPayload `json:"payload" description:"Events stream payload"`
+}
+
+// SessionStreamTurnEventEnvelope is the typed event envelope for turn events
+// emitted by session.stream.
+type SessionStreamTurnEventEnvelope struct {
+	Type           string                    `json:"type" description:"Must be 'event'"`
+	SubscriptionID string                    `json:"subscription_id" description:"Subscription that produced this event"`
+	EventType      string                    `json:"event_type" description:"Must be 'turn'"`
+	Index          uint64                    `json:"index,omitempty" description:"Event sequence number"`
+	Cursor         string                    `json:"cursor,omitempty" description:"Resume cursor for reconnection"`
+	Payload        sessionTranscriptResponse `json:"payload" description:"Session transcript payload"`
+}
+
+// SessionStreamMessageEventEnvelope is the typed event envelope for raw message
+// events emitted by session.stream.
+type SessionStreamMessageEventEnvelope struct {
+	Type           string                       `json:"type" description:"Must be 'event'"`
+	SubscriptionID string                       `json:"subscription_id" description:"Subscription that produced this event"`
+	EventType      string                       `json:"event_type" description:"Must be 'message'"`
+	Index          uint64                       `json:"index,omitempty" description:"Event sequence number"`
+	Cursor         string                       `json:"cursor,omitempty" description:"Resume cursor for reconnection"`
+	Payload        sessionRawTranscriptResponse `json:"payload" description:"Raw session transcript payload"`
+}
+
+// StreamActivityPayload is the typed payload emitted for activity updates.
+type StreamActivityPayload struct {
+	Activity string `json:"activity" description:"Session activity state"`
+}
+
+// SessionStreamActivityEventEnvelope is the typed event envelope for activity
+// updates emitted by session.stream.
+type SessionStreamActivityEventEnvelope struct {
+	Type           string                `json:"type" description:"Must be 'event'"`
+	SubscriptionID string                `json:"subscription_id" description:"Subscription that produced this event"`
+	EventType      string                `json:"event_type" description:"Must be 'activity'"`
+	Index          uint64                `json:"index,omitempty" description:"Event sequence number"`
+	Payload        StreamActivityPayload `json:"payload" description:"Session activity payload"`
+}
+
+// SessionStreamPendingEventEnvelope is the typed event envelope for pending
+// interactions emitted by session.stream.
+type SessionStreamPendingEventEnvelope struct {
+	Type           string                     `json:"type" description:"Must be 'event'"`
+	SubscriptionID string                     `json:"subscription_id" description:"Subscription that produced this event"`
+	EventType      string                     `json:"event_type" description:"Must be 'pending'"`
+	Index          uint64                     `json:"index,omitempty" description:"Event sequence number"`
+	Payload        runtime.PendingInteraction `json:"payload" description:"Pending interaction payload"`
+}
+
+// AgentOutputStreamTurnEventEnvelope is the typed event envelope for turn
+// events emitted by agent.output.stream.
+type AgentOutputStreamTurnEventEnvelope struct {
+	Type           string              `json:"type" description:"Must be 'event'"`
+	SubscriptionID string              `json:"subscription_id" description:"Subscription that produced this event"`
+	EventType      string              `json:"event_type" description:"Must be 'turn'"`
+	Index          uint64              `json:"index,omitempty" description:"Event sequence number"`
+	Cursor         string              `json:"cursor,omitempty" description:"Resume cursor for reconnection"`
+	Payload        agentOutputResponse `json:"payload" description:"Agent output payload"`
 }
 
 // Backward-compatible aliases.
@@ -140,17 +281,34 @@ func (s *Server) startSocketSubscription(ctx context.Context, sess *socketSessio
 				"scope.city "+req.Scope.City+" does not match this city "+cityName)
 		}
 	}
-	var payload socketSubscriptionStartPayload
-	if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+	var kindPayload subscriptionKindPayload
+	if err := decodeSocketPayload(req.Payload, &kindPayload); err != nil {
 		return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 	}
-	switch payload.Kind {
-	case "events":
+	switch kindPayload.Kind {
+	case subscriptionKindEventsStream:
+		var payload EventsStreamSubscriptionPayload
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
 		return s.startEventSubscription(ctx, sess, req, payload)
-	case "session.stream":
+	case subscriptionKindSessionStream:
+		var payload SessionStreamSubscriptionPayload
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
 		return s.startSessionStreamSubscription(ctx, sess, req, payload)
+	case subscriptionKindAgentOutputStream:
+		var payload AgentOutputStreamSubscriptionPayload
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
+		if payload.Target == "" {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", "target is required")
+		}
+		return s.startAgentOutputStreamSubscription(ctx, sess, req, payload)
 	default:
-		return socketActionResult{}, newSocketError(req.ID, "not_found", "unknown subscription kind: "+payload.Kind)
+		return socketActionResult{}, newSocketError(req.ID, "not_found", "unknown subscription kind: "+kindPayload.Kind)
 	}
 }
 
@@ -159,12 +317,16 @@ func (s *Server) stopSocketSubscription(sess *socketSession, req *socketRequestE
 }
 
 func (sm *SupervisorMux) startSocketSubscription(ctx context.Context, sess *socketSession, req *socketRequestEnvelope) (socketActionResult, *socketErrorEnvelope) {
-	var payload socketSubscriptionStartPayload
-	if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+	var kindPayload subscriptionKindPayload
+	if err := decodeSocketPayload(req.Payload, &kindPayload); err != nil {
 		return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 	}
-	switch payload.Kind {
-	case "events":
+	switch kindPayload.Kind {
+	case subscriptionKindEventsStream:
+		var payload EventsStreamSubscriptionPayload
+		if err := decodeSocketPayload(req.Payload, &payload); err != nil {
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+		}
 		if req.Scope != nil && req.Scope.City != "" {
 			cityName, apiErr := sm.resolveSocketCityTarget(req.Scope)
 			if apiErr != nil {
@@ -185,7 +347,19 @@ func (sm *SupervisorMux) startSocketSubscription(ctx context.Context, sess *sock
 			return result, apiErr
 		}
 		return sm.startGlobalEventSubscription(ctx, sess, req, payload)
-	case "session.stream":
+	case subscriptionKindSessionStream, subscriptionKindAgentOutputStream:
+		switch kindPayload.Kind {
+		case subscriptionKindSessionStream:
+			typed := SessionStreamSubscriptionPayload{}
+			if err := decodeSocketPayload(req.Payload, &typed); err != nil {
+				return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+			}
+		case subscriptionKindAgentOutputStream:
+			typed := AgentOutputStreamSubscriptionPayload{}
+			if err := decodeSocketPayload(req.Payload, &typed); err != nil {
+				return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
+			}
+		}
 		cityName, apiErr := sm.resolveSocketCityTarget(req.Scope)
 		if apiErr != nil {
 			apiErr.ID = req.ID
@@ -204,7 +378,7 @@ func (sm *SupervisorMux) startSocketSubscription(ctx context.Context, sess *sock
 		}
 		return result, apiErr
 	default:
-		return socketActionResult{}, newSocketError(req.ID, "not_found", "unknown subscription kind: "+payload.Kind)
+		return socketActionResult{}, newSocketError(req.ID, "not_found", "unknown subscription kind: "+kindPayload.Kind)
 	}
 }
 
@@ -226,7 +400,7 @@ func stopSocketSubscriptionImpl(sess *socketSession, req *socketRequestEnvelope)
 	return socketActionResult{Result: map[string]string{"status": "ok", "subscription_id": payload.SubscriptionID}}, nil
 }
 
-func (s *Server) startEventSubscription(parent context.Context, sess *socketSession, req *socketRequestEnvelope, payload socketSubscriptionStartPayload) (socketActionResult, *socketErrorEnvelope) {
+func (s *Server) startEventSubscription(parent context.Context, sess *socketSession, req *socketRequestEnvelope, payload EventsStreamSubscriptionPayload) (socketActionResult, *socketErrorEnvelope) {
 	ep := s.state.EventProvider()
 	if ep == nil {
 		return socketActionResult{}, newSocketError(req.ID, "unavailable", "events not enabled")
@@ -239,28 +413,28 @@ func (s *Server) startEventSubscription(parent context.Context, sess *socketSess
 		return socketActionResult{}, newSocketError(req.ID, "internal", "failed to start event watcher: "+err.Error())
 	}
 	sess.registerSubscription(subID, cancel)
-	log.Printf("api: ws subscription started id=%s kind=%s", subID, payload.Kind)
+	log.Printf("api: ws subscription started id=%s kind=%s", subID, subscriptionKindEventsStream)
 	telemetry.RecordWebSocketSubscription(context.Background(), 1)
 	return socketActionResult{
-		Result: map[string]string{"subscription_id": subID, "kind": payload.Kind},
+		Result: map[string]string{"subscription_id": subID, "kind": subscriptionKindEventsStream},
 		AfterWrite: func() {
 			go func() {
 				defer watcher.Close() //nolint:errcheck
 				defer cancel()
 				defer sess.unregisterSubscription(subID)
-				defer log.Printf("api: ws subscription ended id=%s kind=%s", subID, payload.Kind)
+				defer log.Printf("api: ws subscription ended id=%s kind=%s", subID, subscriptionKindEventsStream)
 				defer telemetry.RecordWebSocketSubscription(context.Background(), -1)
 				for {
 					event, err := watcher.Next()
 					if err != nil {
 						return
 					}
-					envelope := socketEventEnvelope{
+					envelope := EventsStreamEventEnvelope{
 						Type:           "event",
 						SubscriptionID: subID,
 						EventType:      event.Type,
 						Index:          event.Seq,
-						Payload: eventStreamEnvelope{
+						Payload: EventsStreamPayload{
 							Event:    event,
 							Workflow: projectWorkflowEvent(s.state, event),
 						},
@@ -274,7 +448,7 @@ func (s *Server) startEventSubscription(parent context.Context, sess *socketSess
 	}, nil
 }
 
-func (sm *SupervisorMux) startGlobalEventSubscription(parent context.Context, sess *socketSession, req *socketRequestEnvelope, payload socketSubscriptionStartPayload) (socketActionResult, *socketErrorEnvelope) {
+func (sm *SupervisorMux) startGlobalEventSubscription(parent context.Context, sess *socketSession, req *socketRequestEnvelope, payload EventsStreamSubscriptionPayload) (socketActionResult, *socketErrorEnvelope) {
 	subID := sess.newSubscriptionID()
 	subCtx, cancel := context.WithCancel(parent)
 	mw, err := sm.buildMultiplexer().Watch(subCtx, events.ParseCursor(payload.AfterCursor))
@@ -283,20 +457,20 @@ func (sm *SupervisorMux) startGlobalEventSubscription(parent context.Context, se
 		return socketActionResult{}, newSocketError(req.ID, "internal", "failed to start global event watcher: "+err.Error())
 	}
 	sess.registerSubscription(subID, cancel)
-	log.Printf("api: ws subscription started id=%s kind=global-events", subID)
+	log.Printf("api: ws subscription started id=%s kind=%s", subID, subscriptionKindEventsStream)
 	telemetry.RecordWebSocketSubscription(context.Background(), 1)
 	cursors := events.ParseCursor(payload.AfterCursor)
 	if cursors == nil {
 		cursors = make(map[string]uint64)
 	}
 	return socketActionResult{
-		Result: map[string]string{"subscription_id": subID, "kind": payload.Kind},
+		Result: map[string]string{"subscription_id": subID, "kind": subscriptionKindEventsStream},
 		AfterWrite: func() {
 			go func() {
 				defer mw.Close() //nolint:errcheck
 				defer cancel()
 				defer sess.unregisterSubscription(subID)
-				defer log.Printf("api: ws subscription ended id=%s kind=global-events", subID)
+				defer log.Printf("api: ws subscription ended id=%s kind=%s", subID, subscriptionKindEventsStream)
 				defer telemetry.RecordWebSocketSubscription(context.Background(), -1)
 				for {
 					tagged, err := mw.Next()
@@ -308,14 +482,15 @@ func (sm *SupervisorMux) startGlobalEventSubscription(parent context.Context, se
 					if state := sm.resolver.CityState(tagged.City); state != nil {
 						workflow = projectWorkflowEvent(state, tagged.Event)
 					}
-					envelope := socketEventEnvelope{
+					envelope := EventsStreamEventEnvelope{
 						Type:           "event",
 						SubscriptionID: subID,
 						EventType:      tagged.Type,
 						Cursor:         events.FormatCursor(cursors),
-						Payload: taggedEventStreamEnvelope{
-							TaggedEvent: tagged,
-							Workflow:    workflow,
+						Payload: EventsStreamPayload{
+							Event:    tagged.Event,
+							City:     tagged.City,
+							Workflow: workflow,
 						},
 					}
 					if err := sess.conn.writeJSON(envelope); err != nil {
@@ -327,7 +502,7 @@ func (sm *SupervisorMux) startGlobalEventSubscription(parent context.Context, se
 	}, nil
 }
 
-func (s *Server) startSessionStreamSubscription(parent context.Context, sess *socketSession, req *socketRequestEnvelope, payload socketSubscriptionStartPayload) (socketActionResult, *socketErrorEnvelope) {
+func (s *Server) startSessionStreamSubscription(parent context.Context, sess *socketSession, req *socketRequestEnvelope, payload SessionStreamSubscriptionPayload) (socketActionResult, *socketErrorEnvelope) {
 	store := s.state.CityBeadStore()
 	if store == nil {
 		return socketActionResult{}, newSocketError(req.ID, "unavailable", "no bead store configured")
@@ -391,13 +566,12 @@ func (s *Server) startSessionStreamSubscription(parent context.Context, sess *so
 				if running {
 					s.streamSessionPeekRawWithEmitter(subCtx, emitter, info)
 				} else {
-					data, _ := json.Marshal(sessionRawTranscriptResponse{
+					_ = emitter.emit("message", 1, sessionRawTranscriptResponse{
 						ID:       info.ID,
 						Template: info.Template,
 						Format:   "raw",
 						Messages: []sessionRawMessage{},
 					})
-					_ = emitter.emit("message", 1, data)
 				}
 			default:
 				s.streamSessionPeekWithEmitter(subCtx, emitter, info)
@@ -406,7 +580,7 @@ func (s *Server) startSessionStreamSubscription(parent context.Context, sess *so
 	}
 
 	return socketActionResult{
-		Result:     map[string]string{"subscription_id": subID, "kind": payload.Kind},
+		Result:     map[string]string{"subscription_id": subID, "kind": subscriptionKindSessionStream},
 		AfterWrite: start,
 	}, nil
 }

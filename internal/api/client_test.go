@@ -307,6 +307,54 @@ func TestClientGetService(t *testing.T) {
 	}
 }
 
+func TestClientGetAgentOutput(t *testing.T) {
+	tail := 25
+	srv := wsTestServer(t, func(action string, req map[string]any, conn *websocket.Conn) {
+		id, _ := req["id"].(string)
+		if action != "agent.output.get" {
+			t.Errorf("action = %q, want agent.output.get", action)
+		}
+		payload, _ := req["payload"].(map[string]any)
+		if got := payload["name"]; got != "crew/worker" {
+			t.Errorf("name = %#v, want crew/worker", got)
+		}
+		if got := payload["tail"]; got != float64(25) {
+			t.Errorf("tail = %#v, want 25", got)
+		}
+		if got := payload["before"]; got != "msg-25" {
+			t.Errorf("before = %#v, want msg-25", got)
+		}
+		_ = conn.WriteJSON(map[string]any{
+			"type": "response",
+			"id":   id,
+			"result": map[string]any{
+				"agent":  "crew/worker",
+				"format": "conversation",
+				"turns": []map[string]any{
+					{"role": "assistant", "text": "hello"},
+				},
+			},
+		})
+	})
+	defer srv.Close()
+	c := NewClient(srv.URL)
+	defer c.Close()
+
+	resp, err := c.GetAgentOutput("crew/worker", &tail, "msg-25")
+	if err != nil {
+		t.Fatalf("GetAgentOutput: %v", err)
+	}
+	if resp.Agent != "crew/worker" {
+		t.Fatalf("agent = %q, want crew/worker", resp.Agent)
+	}
+	if resp.Format != "conversation" {
+		t.Fatalf("format = %q, want conversation", resp.Format)
+	}
+	if len(resp.Turns) != 1 || resp.Turns[0].Text != "hello" {
+		t.Fatalf("turns = %#v, want assistant hello", resp.Turns)
+	}
+}
+
 func TestClientListCities(t *testing.T) {
 	srv := wsTestServer(t, func(action string, req map[string]any, conn *websocket.Conn) {
 		id, _ := req["id"].(string)
@@ -711,8 +759,8 @@ func TestClientSubscribeEvents(t *testing.T) {
 		switch action {
 		case "subscription.start":
 			payload, _ := req["payload"].(map[string]any)
-			if payload["kind"] != "events" {
-				t.Errorf("kind = %v, want events", payload["kind"])
+			if payload["kind"] != subscriptionKindEventsStream {
+				t.Errorf("kind = %v, want %s", payload["kind"], subscriptionKindEventsStream)
 			}
 			_ = conn.WriteJSON(map[string]any{
 				"type":   "response",
@@ -933,8 +981,8 @@ func TestClientResubscribesEventsAfterReconnect(t *testing.T) {
 				t.Errorf("first action = %q, want subscription.start", req.Action)
 				return
 			}
-			if got := req.Payload["kind"]; got != "events" {
-				t.Errorf("first kind = %v, want events", got)
+			if got := req.Payload["kind"]; got != subscriptionKindEventsStream {
+				t.Errorf("first kind = %v, want %s", got, subscriptionKindEventsStream)
 			}
 			if _, ok := req.Payload["after_seq"]; ok {
 				t.Errorf("first payload unexpectedly had after_seq: %#v", req.Payload)
@@ -964,8 +1012,8 @@ func TestClientResubscribesEventsAfterReconnect(t *testing.T) {
 				t.Errorf("second action = %q, want subscription.start", req.Action)
 				return
 			}
-			if got := req.Payload["kind"]; got != "events" {
-				t.Errorf("second kind = %v, want events", got)
+			if got := req.Payload["kind"]; got != subscriptionKindEventsStream {
+				t.Errorf("second kind = %v, want %s", got, subscriptionKindEventsStream)
 			}
 			if got := req.Payload["after_seq"]; got != float64(41) {
 				t.Errorf("second after_seq = %#v, want 41", got)
@@ -1090,8 +1138,8 @@ func TestClientResubscribesEventsWithCursorAfterReconnect(t *testing.T) {
 				t.Errorf("first action = %q, want subscription.start", req.Action)
 				return
 			}
-			if got := req.Payload["kind"]; got != "events" {
-				t.Errorf("first kind = %v, want events", got)
+			if got := req.Payload["kind"]; got != subscriptionKindEventsStream {
+				t.Errorf("first kind = %v, want %s", got, subscriptionKindEventsStream)
 			}
 			if _, ok := req.Payload["after_cursor"]; ok {
 				t.Errorf("first payload unexpectedly had after_cursor: %#v", req.Payload)
@@ -1122,8 +1170,8 @@ func TestClientResubscribesEventsWithCursorAfterReconnect(t *testing.T) {
 				t.Errorf("second action = %q, want subscription.start", req.Action)
 				return
 			}
-			if got := req.Payload["kind"]; got != "events" {
-				t.Errorf("second kind = %v, want events", got)
+			if got := req.Payload["kind"]; got != subscriptionKindEventsStream {
+				t.Errorf("second kind = %v, want %s", got, subscriptionKindEventsStream)
 			}
 			if got := req.Payload["after_cursor"]; got != "alpha=41" {
 				t.Errorf("second after_cursor = %#v, want alpha=41", got)

@@ -383,7 +383,7 @@ func TestRouteMatrixParity_GET_v0_agent_name_ViaWS(t *testing.T) {
 	if err := state.sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	info, err := state.cityBeadStore.Create(beads.Bead{
+	_, err := state.cityBeadStore.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession, "template:myrig/worker"},
 		Metadata: map[string]string{
@@ -419,8 +419,8 @@ func TestRouteMatrixParity_GET_v0_agent_name_ViaWS(t *testing.T) {
 	if body.Name != "myrig/worker" {
 		t.Fatalf("name = %q, want myrig/worker", body.Name)
 	}
-	if body.Session == nil || body.Session.ID != info.ID || body.Session.Name != sessionName {
-		t.Fatalf("session = %+v, want id=%q name=%q", body.Session, info.ID, sessionName)
+	if body.Session == nil || body.Session.Name != sessionName {
+		t.Fatalf("session = %+v, want name=%q", body.Session, sessionName)
 	}
 }
 
@@ -522,21 +522,13 @@ func TestRouteMatrixParity_POST_v0_agent_name_suspend_ViaWS(t *testing.T) {
 }
 
 func TestRouteMatrixParity_GET_v0_agent_name_output_ViaWS(t *testing.T) {
-	conn, info := openRouteMatrixAgentOutputSocket(t)
-
-	sessionID := resolveAgentSessionID(t, conn, "myrig/worker")
-	if sessionID != info.ID {
-		t.Fatalf("resolved session id = %q, want %q", sessionID, info.ID)
-	}
+	conn := openRouteMatrixAgentOutputSocket(t)
 
 	writeWSJSON(t, conn, wsRequestEnvelope{
-		Type:   "request",
-		ID:     "route-agent-output",
-		Action: "session.transcript",
-		Payload: map[string]any{
-			"id":    sessionID,
-			"turns": 0,
-		},
+		Type:    "request",
+		ID:      "route-agent-output",
+		Action:  "agent.output.get",
+		Payload: socketAgentOutputPayload{Name: "myrig/worker", Tail: intPtr(0)},
 	})
 
 	var resp wsResponseEnvelope
@@ -545,15 +537,15 @@ func TestRouteMatrixParity_GET_v0_agent_name_output_ViaWS(t *testing.T) {
 		t.Fatalf("response = %#v, want correlated response", resp)
 	}
 
-	var body sessionTranscriptResponse
+	var body agentOutputResponse
 	if err := json.Unmarshal(resp.Result, &body); err != nil {
-		t.Fatalf("decode transcript: %v", err)
+		t.Fatalf("decode agent output: %v", err)
 	}
-	if body.ID != info.ID {
-		t.Fatalf("transcript id = %q, want %q", body.ID, info.ID)
+	if body.Agent != "myrig/worker" {
+		t.Fatalf("agent = %q, want myrig/worker", body.Agent)
 	}
 	if body.Format != "conversation" {
-		t.Fatalf("transcript format = %q, want conversation", body.Format)
+		t.Fatalf("format = %q, want conversation", body.Format)
 	}
 	if len(body.Turns) != 2 {
 		t.Fatalf("turn count = %d, want 2", len(body.Turns))
@@ -564,21 +556,13 @@ func TestRouteMatrixParity_GET_v0_agent_name_output_ViaWS(t *testing.T) {
 }
 
 func TestRouteMatrixParity_GET_v0_agent_name_output_stream_ViaWS(t *testing.T) {
-	conn, info := openRouteMatrixAgentOutputSocket(t)
-
-	sessionID := resolveAgentSessionID(t, conn, "myrig/worker")
-	if sessionID != info.ID {
-		t.Fatalf("resolved session id = %q, want %q", sessionID, info.ID)
-	}
+	conn := openRouteMatrixAgentOutputSocket(t)
 
 	writeWSJSON(t, conn, wsRequestEnvelope{
-		Type:   "request",
-		ID:     "route-agent-output-stream",
-		Action: "subscription.start",
-		Payload: map[string]any{
-			"kind":   "session.stream",
-			"target": sessionID,
-		},
+		Type:    "request",
+		ID:      "route-agent-output-stream",
+		Action:  "subscription.start",
+		Payload: AgentOutputStreamSubscriptionPayload{Kind: subscriptionKindAgentOutputStream, Target: "myrig/worker"},
 	})
 
 	var resp wsResponseEnvelope
@@ -587,22 +571,13 @@ func TestRouteMatrixParity_GET_v0_agent_name_output_stream_ViaWS(t *testing.T) {
 		t.Fatalf("subscription response = %#v, want correlated response", resp)
 	}
 
-	var turnEvt wsEventEnvelope
+	var turnEvt AgentOutputStreamTurnEventEnvelope
 	readWSJSON(t, conn, &turnEvt)
 	if turnEvt.Type != "event" || turnEvt.EventType != "turn" {
 		t.Fatalf("turn event = %#v, want turn event", turnEvt)
 	}
-	if !strings.Contains(string(turnEvt.Payload), `"hello"`) || !strings.Contains(string(turnEvt.Payload), `"world"`) {
-		t.Fatalf("turn payload = %s, want transcript snapshot", turnEvt.Payload)
-	}
-
-	var activityEvt wsEventEnvelope
-	readWSJSON(t, conn, &activityEvt)
-	if activityEvt.Type != "event" || activityEvt.EventType != "activity" {
-		t.Fatalf("activity event = %#v, want activity event", activityEvt)
-	}
-	if !strings.Contains(string(activityEvt.Payload), `"idle"`) {
-		t.Fatalf("activity payload = %s, want closed-session idle state", activityEvt.Payload)
+	if len(turnEvt.Payload.Turns) != 2 || turnEvt.Payload.Turns[0].Text != "hello" || turnEvt.Payload.Turns[1].Text != "world" {
+		t.Fatalf("turn payload = %+v, want transcript snapshot", turnEvt.Payload)
 	}
 }
 
@@ -675,12 +650,10 @@ func TestRouteMatrixParity_GET_v0_events_stream_ViaWS(t *testing.T) {
 	drainWSHello(t, conn)
 
 	writeWSJSON(t, conn, wsRequestEnvelope{
-		Type:   "request",
-		ID:     "route-events-stream",
-		Action: "subscription.start",
-		Payload: map[string]any{
-			"kind": "events",
-		},
+		Type:    "request",
+		ID:      "route-events-stream",
+		Action:  "subscription.start",
+		Payload: EventsStreamSubscriptionPayload{Kind: subscriptionKindEventsStream},
 	})
 
 	var resp wsResponseEnvelope
@@ -691,7 +664,7 @@ func TestRouteMatrixParity_GET_v0_events_stream_ViaWS(t *testing.T) {
 
 	alpha.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "alpha-mayor"})
 
-	var evt wsEventEnvelope
+	var evt EventsStreamEventEnvelope
 	readWSJSON(t, conn, &evt)
 	if evt.Type != "event" || evt.EventType != events.SessionWoke {
 		t.Fatalf("event = %#v, want session.woke event", evt)
@@ -699,16 +672,8 @@ func TestRouteMatrixParity_GET_v0_events_stream_ViaWS(t *testing.T) {
 	if evt.Cursor == "" {
 		t.Fatal("global event cursor empty")
 	}
-
-	var payload struct {
-		City string `json:"city"`
-		Type string `json:"type"`
-	}
-	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
-		t.Fatalf("decode event payload: %v", err)
-	}
-	if payload.City != "alpha" || payload.Type != events.SessionWoke {
-		t.Fatalf("payload = %+v, want city alpha type %q", payload, events.SessionWoke)
+	if evt.Payload.City != "alpha" || evt.Payload.Type != events.SessionWoke {
+		t.Fatalf("payload = %+v, want city alpha type %q", evt.Payload, events.SessionWoke)
 	}
 }
 
@@ -1703,7 +1668,7 @@ func TestRouteMatrixParity_GET_v0_session_id_ViaWS(t *testing.T) {
 }
 
 func TestRouteMatrixParity_GET_v0_session_id_transcript_ViaWS(t *testing.T) {
-	conn, info := openRouteMatrixAgentOutputSocket(t)
+	conn, info := openRouteMatrixSessionTranscriptSocket(t)
 
 	writeWSJSON(t, conn, wsRequestEnvelope{
 		Type:   "request",
@@ -1731,7 +1696,7 @@ func TestRouteMatrixParity_GET_v0_session_id_transcript_ViaWS(t *testing.T) {
 }
 
 func TestRouteMatrixParity_GET_v0_session_id_stream_ViaWS(t *testing.T) {
-	conn, info := openRouteMatrixAgentOutputSocket(t)
+	conn, info := openRouteMatrixSessionTranscriptSocket(t)
 
 	writeWSJSON(t, conn, wsRequestEnvelope{
 		Type:   "request",
@@ -3950,7 +3915,30 @@ func (a *routeMatrixExtMsgAdapter) EnsureChildConversation(context.Context, extm
 	return nil, extmsg.ErrAdapterUnsupported
 }
 
-func openRouteMatrixAgentOutputSocket(t *testing.T) (*websocket.Conn, session.Info) {
+func openRouteMatrixAgentOutputSocket(t *testing.T) *websocket.Conn {
+	t.Helper()
+
+	fs := newFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+	rigDir := t.TempDir()
+	fs.cfg.Rigs = []config.Rig{{Name: "myrig", Path: rigDir}}
+	writeSessionJSONL(t, searchBase, rigDir,
+		`{"uuid":"1","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"hello\"}","timestamp":"2025-01-01T00:00:00Z"}`,
+		`{"uuid":"2","parentUuid":"1","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"world\"}","timestamp":"2025-01-01T00:00:01Z"}`,
+	)
+
+	ts := httptest.NewServer(srv.handler())
+	t.Cleanup(ts.Close)
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	t.Cleanup(func() { _ = conn.Close() })
+	drainWSHello(t, conn)
+	return conn
+}
+
+func openRouteMatrixSessionTranscriptSocket(t *testing.T) (*websocket.Conn, session.Info) {
 	t.Helper()
 
 	fs := newSessionFakeState(t)
@@ -3984,34 +3972,6 @@ func openRouteMatrixAgentOutputSocket(t *testing.T) (*websocket.Conn, session.In
 	t.Cleanup(func() { _ = conn.Close() })
 	drainWSHello(t, conn)
 	return conn, info
-}
-
-func resolveAgentSessionID(t *testing.T, conn *websocket.Conn, agentName string) string {
-	t.Helper()
-
-	writeWSJSON(t, conn, wsRequestEnvelope{
-		Type:   "request",
-		ID:     "route-agent-get",
-		Action: "agent.get",
-		Payload: map[string]any{
-			"name": agentName,
-		},
-	})
-
-	var resp wsResponseEnvelope
-	readWSJSON(t, conn, &resp)
-	if resp.Type != "response" || resp.ID != "route-agent-get" {
-		t.Fatalf("agent.get response = %#v, want correlated response", resp)
-	}
-
-	var body agentResponse
-	if err := json.Unmarshal(resp.Result, &body); err != nil {
-		t.Fatalf("decode agent.get: %v", err)
-	}
-	if body.Session == nil || body.Session.ID == "" {
-		t.Fatalf("agent.get session = %+v, want canonical session id", body.Session)
-	}
-	return body.Session.ID
 }
 
 func openRouteMatrixMutatorSocket(t *testing.T) (*fakeMutatorState, *httptest.Server, *websocket.Conn) {

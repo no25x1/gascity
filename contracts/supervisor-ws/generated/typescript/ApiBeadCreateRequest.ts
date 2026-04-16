@@ -6,7 +6,6 @@ interface ApiBeadCreateRequest {
   priority?: number | null;
   rig?: string;
   title?: string;
-  reservedType?: string;
-  additionalProperties?: Map<string, any>;
+  type?: string;
 }
 export { ApiBeadCreateRequest };

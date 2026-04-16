@@ -1,8 +1,7 @@
 
 interface ApiWorkflowDepResponse {
-  reservedFrom?: string;
+  from?: string;
   kind?: string;
   to?: string;
-  additionalProperties?: Map<string, any>;
 }
 export { ApiWorkflowDepResponse };

@@ -8,6 +8,5 @@ interface ApiWatchParams {
    * Maximum wait duration (e.g. '30s')
    */
   wait?: string;
-  additionalProperties?: Map<string, any>;
 }
 export { ApiWatchParams };

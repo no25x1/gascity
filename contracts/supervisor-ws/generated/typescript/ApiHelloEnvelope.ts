@@ -11,19 +11,18 @@ interface ApiHelloEnvelope {
   /**
    * True if mutations are disabled
    */
-  readOnly?: boolean;
+  read_only?: boolean;
   /**
    * 'city' or 'supervisor'
    */
-  serverRole?: string;
+  server_role?: string;
   /**
    * Supported subscription types
    */
-  subscriptionKinds?: string[];
+  subscription_kinds?: string[];
   /**
    * Must be 'hello'
    */
-  reservedType?: string;
-  additionalProperties?: Map<string, any>;
+  type?: string;
 }
 export { ApiHelloEnvelope };

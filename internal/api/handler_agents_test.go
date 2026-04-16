@@ -303,12 +303,12 @@ func TestAgentGet(t *testing.T) {
 	}
 }
 
-func TestAgentGetIncludesCanonicalSessionID(t *testing.T) {
+func TestAgentGetIncludesRunningSessionDetails(t *testing.T) {
 	state := newSessionFakeState(t)
 	sessionName := "myrig--worker"
 	state.sp.Start(context.Background(), sessionName, runtime.Config{}) //nolint:errcheck
 
-	bead, err := state.cityBeadStore.Create(beads.Bead{
+	_, err := state.cityBeadStore.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession, "template:myrig/worker"},
 		Metadata: map[string]string{
@@ -346,17 +346,14 @@ func TestAgentGetIncludesCanonicalSessionID(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	if body.Session == nil {
-		t.Fatal("Session = nil, want canonical session details")
-	}
-	if body.Session.ID != bead.ID {
-		t.Fatalf("Session.ID = %q, want %q", body.Session.ID, bead.ID)
+		t.Fatal("Session = nil, want running session details")
 	}
 	if body.Session.Name != sessionName {
 		t.Fatalf("Session.Name = %q, want %q", body.Session.Name, sessionName)
 	}
 }
 
-func TestAgentGetIncludesClosedCanonicalSessionID(t *testing.T) {
+func TestAgentGetOmitsClosedSessionDetails(t *testing.T) {
 	state := newSessionFakeState(t)
 	mgr := session.NewManager(state.cityBeadStore, state.sp)
 	info, err := mgr.Create(context.Background(), "myrig/worker", "Worker", "claude", t.TempDir(), "claude", nil, session.ProviderResume{}, runtime.Config{})
@@ -391,14 +388,8 @@ func TestAgentGetIncludesClosedCanonicalSessionID(t *testing.T) {
 	if err := json.Unmarshal(resp.Result, &body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if body.Session == nil {
-		t.Fatal("Session = nil, want closed canonical session details")
-	}
-	if body.Session.ID != info.ID {
-		t.Fatalf("Session.ID = %q, want %q", body.Session.ID, info.ID)
-	}
-	if body.Session.Name != "" {
-		t.Fatalf("Session.Name = %q, want empty for closed session", body.Session.Name)
+	if body.Session != nil {
+		t.Fatalf("Session = %+v, want nil for closed session", body.Session)
 	}
 }
 

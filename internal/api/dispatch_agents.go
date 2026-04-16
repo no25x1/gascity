@@ -20,6 +20,12 @@ type socketAgentUpdatePayload struct {
 	Suspended *bool  `json:"suspended,omitempty"`
 }
 
+type socketAgentOutputPayload struct {
+	Name   string `json:"name"`
+	Tail   *int   `json:"tail,omitempty"`
+	Before string `json:"before,omitempty"`
+}
+
 func init() {
 	RegisterAction("agents.list", ActionDef{
 		Description:       "List agents",
@@ -49,12 +55,22 @@ func init() {
 		return resp, nil
 	})
 
+	RegisterAction("agent.output.get", ActionDef{
+		Description:       "Get agent output",
+		RequiresCityScope: true,
+	}, func(_ context.Context, s *Server, payload socketAgentOutputPayload) (agentOutputResponse, error) {
+		if payload.Name == "" {
+			return agentOutputResponse{}, httpError{status: 400, code: "invalid", message: "name is required"}
+		}
+		return s.Agents.Output(payload.Name, normalizeAgentOutputQuery(payload.Tail, payload.Before))
+	})
+
 	RegisterAction("agent.suspend", ActionDef{
 		Description:       "Suspend an agent",
 		IsMutation:        true,
 		RequiresCityScope: true,
 	}, func(_ context.Context, s *Server, payload socketNamePayload) (map[string]string, error) {
-		if err := s.Agents.ApplyAction(payload.Name,"suspend"); err != nil {
+		if err := s.Agents.ApplyAction(payload.Name, "suspend"); err != nil {
 			return nil, err
 		}
 		return map[string]string{"status": "ok"}, nil
@@ -65,7 +81,7 @@ func init() {
 		IsMutation:        true,
 		RequiresCityScope: true,
 	}, func(_ context.Context, s *Server, payload socketNamePayload) (map[string]string, error) {
-		if err := s.Agents.ApplyAction(payload.Name,"resume"); err != nil {
+		if err := s.Agents.ApplyAction(payload.Name, "resume"); err != nil {
 			return nil, err
 		}
 		return map[string]string{"status": "ok"}, nil

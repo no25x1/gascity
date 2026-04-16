@@ -1,6 +1,6 @@
 
 interface ApiOrderResponse {
-  captureOutput?: boolean;
+  capture_output?: boolean;
   check?: string;
   description?: string;
   enabled?: boolean;
@@ -8,15 +8,14 @@ interface ApiOrderResponse {
   formula?: string;
   gate?: string;
   interval?: string;
-  reservedName?: string;
+  name?: string;
   on?: string;
   pool?: string;
   rig?: string;
   schedule?: string;
-  scopedName?: string;
+  scoped_name?: string;
   timeout?: string;
-  timeoutMs?: number;
-  reservedType?: string;
-  additionalProperties?: Map<string, any>;
+  timeout_ms?: number;
+  type?: string;
 }
 export { ApiOrderResponse };

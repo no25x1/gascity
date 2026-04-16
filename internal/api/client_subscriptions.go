@@ -21,11 +21,8 @@ type SubscriptionEvent struct {
 // callback until ctx is cancelled or Unsubscribe is called. Returns the
 // subscription ID assigned by the server.
 func (c *Client) SubscribeEvents(ctx context.Context, afterSeq uint64, callback func(SubscriptionEvent)) (string, error) {
-	payload := SubscriptionStartPayload{Kind: "events"}
-	if afterSeq > 0 {
-		payload.AfterSeq = afterSeq
-	}
-	return c.startSubscription(ctx, payload, callback)
+	payload := EventsStreamSubscriptionPayload{Kind: subscriptionKindEventsStream, AfterSeq: afterSeq}
+	return c.startSubscription(ctx, payload.ToSubscriptionStartPayload(), callback)
 }
 
 // SubscribeSessionStream starts a session stream subscription and delivers
@@ -33,13 +30,23 @@ func (c *Client) SubscribeEvents(ctx context.Context, afterSeq uint64, callback 
 // Format is optional ("text", "jsonl", etc.). Turns controls how many recent
 // turns to replay (0 = all).
 func (c *Client) SubscribeSessionStream(ctx context.Context, target, format string, turns int, callback func(SubscriptionEvent)) (string, error) {
-	payload := SubscriptionStartPayload{
-		Kind:   "session.stream",
+	payload := SessionStreamSubscriptionPayload{
+		Kind:   subscriptionKindSessionStream,
 		Target: target,
 		Format: format,
 		Turns:  turns,
 	}
-	return c.startSubscription(ctx, payload, callback)
+	return c.startSubscription(ctx, payload.ToSubscriptionStartPayload(), callback)
+}
+
+// SubscribeAgentOutputStream starts an agent output stream subscription and
+// delivers route-faithful turn events keyed by agent name.
+func (c *Client) SubscribeAgentOutputStream(ctx context.Context, agentName string, callback func(SubscriptionEvent)) (string, error) {
+	payload := AgentOutputStreamSubscriptionPayload{
+		Kind:   subscriptionKindAgentOutputStream,
+		Target: agentName,
+	}
+	return c.startSubscription(ctx, payload.ToSubscriptionStartPayload(), callback)
 }
 
 func (c *Client) startSubscription(ctx context.Context, payload SubscriptionStartPayload, callback func(SubscriptionEvent)) (string, error) {
@@ -356,14 +363,14 @@ func (c *Client) subscriptionStillActive(subscriptionID string, ctx context.Cont
 func (c *Client) resumePayload(sub *clientSubscription) SubscriptionStartPayload {
 	payload := cloneSubscriptionStartPayload(sub.payload)
 	switch payload.Kind {
-	case "events":
+	case subscriptionKindEventsStream:
 		if sub.lastCursor != "" {
 			payload.AfterCursor = sub.lastCursor
 			payload.AfterSeq = 0
 		} else if sub.lastIndex > 0 {
 			payload.AfterSeq = sub.lastIndex
 		}
-	case "session.stream":
+	case subscriptionKindSessionStream, subscriptionKindAgentOutputStream:
 		if sub.lastCursor != "" {
 			payload.AfterCursor = sub.lastCursor
 			payload.AfterSeq = 0

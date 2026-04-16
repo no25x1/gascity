@@ -2,7 +2,6 @@ import {ExtmsgConversationRef} from './ExtmsgConversationRef';
 interface ApiExtmsgTranscriptAckRequest {
   conversation?: ExtmsgConversationRef;
   sequence?: number;
-  sessionId?: string;
-  additionalProperties?: Map<string, any>;
+  session_id?: string;
 }
 export { ApiExtmsgTranscriptAckRequest };

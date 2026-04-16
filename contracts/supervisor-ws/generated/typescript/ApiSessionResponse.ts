@@ -1,18 +1,18 @@
 import {SessionSubmissionCapabilities} from './SessionSubmissionCapabilities';
 interface ApiSessionResponse {
-  activeBead?: string;
+  active_bead?: string;
   activity?: string;
   alias?: string;
   attached?: boolean;
-  configuredNamedSession?: boolean;
-  contextPct?: number | null;
-  contextWindow?: number | null;
-  createdAt?: string;
-  displayName?: string;
+  configured_named_session?: boolean;
+  context_pct?: number | null;
+  context_window?: number | null;
+  created_at?: string;
+  display_name?: string;
   id?: string;
   kind?: string;
-  lastActive?: string;
-  lastOutput?: string;
+  last_active?: string;
+  last_output?: string;
   metadata?: Map<string, string>;
   model?: string;
   options?: Map<string, string>;
@@ -21,11 +21,10 @@ interface ApiSessionResponse {
   reason?: string;
   rig?: string;
   running?: boolean;
-  sessionName?: string;
+  session_name?: string;
   state?: string;
-  submissionCapabilities?: SessionSubmissionCapabilities;
+  submission_capabilities?: SessionSubmissionCapabilities;
   template?: string;
   title?: string;
-  additionalProperties?: Map<string, any>;
 }
 export { ApiSessionResponse };

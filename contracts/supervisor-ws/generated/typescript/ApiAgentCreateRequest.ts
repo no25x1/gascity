@@ -1,9 +1,8 @@
 
 interface ApiAgentCreateRequest {
   dir?: string;
-  reservedName?: string;
+  name?: string;
   provider?: string;
   scope?: string;
-  additionalProperties?: Map<string, any>;
 }
 export { ApiAgentCreateRequest };

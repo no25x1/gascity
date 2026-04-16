@@ -24,19 +24,19 @@ func tailSlice[T any](items []T, n int) []T {
 }
 
 type sessionStreamEmitter struct {
-	event     func(eventType string, id uint64, cursor string, data []byte) error
+	event     func(eventType string, id uint64, cursor string, payload any) error
 	keepalive func() error
 }
 
-func (e sessionStreamEmitter) emit(eventType string, id uint64, data []byte) error {
-	return e.emitWithCursor(eventType, id, "", data)
+func (e sessionStreamEmitter) emit(eventType string, id uint64, payload any) error {
+	return e.emitWithCursor(eventType, id, "", payload)
 }
 
-func (e sessionStreamEmitter) emitWithCursor(eventType string, id uint64, cursor string, data []byte) error {
+func (e sessionStreamEmitter) emitWithCursor(eventType string, id uint64, cursor string, payload any) error {
 	if e.event == nil {
 		return nil
 	}
-	return e.event(eventType, id, cursor, data)
+	return e.event(eventType, id, cursor, payload)
 }
 
 func (e sessionStreamEmitter) comment() error {
@@ -48,18 +48,107 @@ func (e sessionStreamEmitter) comment() error {
 
 func newSocketSessionStreamEmitter(sess *socketSession, subscriptionID string) sessionStreamEmitter {
 	return sessionStreamEmitter{
-		event: func(eventType string, id uint64, cursor string, data []byte) error {
-			payload := json.RawMessage(append([]byte(nil), data...))
-			return sess.conn.writeJSON(socketEventEnvelope{
-				Type:           "event",
-				SubscriptionID: subscriptionID,
-				EventType:      eventType,
-				Index:          id,
-				Cursor:         cursor,
-				Payload:        payload,
-			})
+		event: func(eventType string, id uint64, cursor string, payload any) error {
+			return writeTypedSessionStreamEvent(sess, subscriptionID, eventType, id, cursor, payload)
 		},
 	}
+}
+
+func newSocketAgentOutputStreamEmitter(sess *socketSession, subscriptionID string) sessionStreamEmitter {
+	return sessionStreamEmitter{
+		event: func(eventType string, id uint64, cursor string, payload any) error {
+			return writeTypedAgentOutputStreamEvent(sess, subscriptionID, eventType, id, cursor, payload)
+		},
+	}
+}
+
+func writeTypedSessionStreamEvent(sess *socketSession, subscriptionID, eventType string, id uint64, cursor string, payload any) error {
+	switch eventType {
+	case "turn":
+		typed, ok := payload.(sessionTranscriptResponse)
+		if !ok {
+			break
+		}
+		return sess.conn.writeJSON(SessionStreamTurnEventEnvelope{
+			Type:           "event",
+			SubscriptionID: subscriptionID,
+			EventType:      "turn",
+			Index:          id,
+			Cursor:         cursor,
+			Payload:        typed,
+		})
+	case "message":
+		typed, ok := payload.(sessionRawTranscriptResponse)
+		if !ok {
+			break
+		}
+		return sess.conn.writeJSON(SessionStreamMessageEventEnvelope{
+			Type:           "event",
+			SubscriptionID: subscriptionID,
+			EventType:      "message",
+			Index:          id,
+			Cursor:         cursor,
+			Payload:        typed,
+		})
+	case "activity":
+		typed, ok := payload.(StreamActivityPayload)
+		if !ok {
+			break
+		}
+		return sess.conn.writeJSON(SessionStreamActivityEventEnvelope{
+			Type:           "event",
+			SubscriptionID: subscriptionID,
+			EventType:      "activity",
+			Index:          id,
+			Payload:        typed,
+		})
+	case "pending":
+		typed, ok := payload.(runtime.PendingInteraction)
+		if !ok {
+			break
+		}
+		return sess.conn.writeJSON(SessionStreamPendingEventEnvelope{
+			Type:           "event",
+			SubscriptionID: subscriptionID,
+			EventType:      "pending",
+			Index:          id,
+			Payload:        typed,
+		})
+	}
+	return sess.conn.writeJSON(socketEventEnvelope{
+		Type:           "event",
+		SubscriptionID: subscriptionID,
+		EventType:      eventType,
+		Index:          id,
+		Cursor:         cursor,
+		Payload:        payload,
+	})
+}
+
+func writeTypedAgentOutputStreamEvent(sess *socketSession, subscriptionID, eventType string, id uint64, cursor string, payload any) error {
+	switch eventType {
+	case "turn":
+		typed, ok := payload.(agentOutputResponse)
+		if !ok {
+			break
+		}
+		return sess.conn.writeJSON(AgentOutputStreamTurnEventEnvelope{
+			Type:           "event",
+			SubscriptionID: subscriptionID,
+			EventType:      "turn",
+			Index:          id,
+			Cursor:         cursor,
+			Payload:        typed,
+		})
+	}
+	return sess.conn.writeJSON(socketEventEnvelope{
+		Type:           "event",
+		SubscriptionID: subscriptionID,
+		EventType:      eventType,
+		Index:          id,
+		Cursor:         cursor,
+		Payload:        payload,
+	})
 }
 
 func (s *Server) emitClosedSessionSnapshotWithEmitter(emitter sessionStreamEmitter, info session.Info, logPath string, tail int, afterCursor string) {
@@ -107,20 +196,15 @@ func (s *Server) emitClosedSessionSnapshotWithEmitter(emitter sessionStreamEmitt
 		}
 	}
 
-	data, err := json.Marshal(sessionTranscriptResponse{
+	if err := emitter.emitWithCursor("turn", 1, cursor, sessionTranscriptResponse{
 		ID:       info.ID,
 		Template: info.Template,
 		Format:   "conversation",
 		Turns:    turns,
-	})
-	if err != nil {
+	}); err != nil {
 		return
 	}
-	if err := emitter.emitWithCursor("turn", 1, cursor, data); err != nil {
-		return
-	}
-	actData, _ := json.Marshal(map[string]string{"activity": "idle"})
-	_ = emitter.emit("activity", 2, actData)
+	_ = emitter.emit("activity", 2, StreamActivityPayload{Activity: "idle"})
 }
 
 func (s *Server) emitClosedSessionSnapshotRawWithEmitter(emitter sessionStreamEmitter, info session.Info, logPath string, tail int, afterCursor string) {
@@ -171,20 +255,15 @@ func (s *Server) emitClosedSessionSnapshotRawWithEmitter(emitter sessionStreamEm
 		}
 	}
 
-	data, err := json.Marshal(sessionRawTranscriptResponse{
+	if err := emitter.emitWithCursor("message", 1, cursor, sessionRawTranscriptResponse{
 		ID:       info.ID,
 		Template: info.Template,
 		Format:   "raw",
 		Messages: rawMessages,
-	})
-	if err != nil {
+	}); err != nil {
 		return
 	}
-	if err := emitter.emitWithCursor("message", 1, cursor, data); err != nil {
-		return
-	}
-	actData, _ := json.Marshal(map[string]string{"activity": "idle"})
-	_ = emitter.emit("activity", 2, actData)
+	_ = emitter.emit("activity", 2, StreamActivityPayload{Activity: "idle"})
 }
 
 func (s *Server) streamSessionTranscriptLogRawWithEmitter(ctx context.Context, emitter sessionStreamEmitter, info session.Info, logPath string, initialTail int, afterCursor string) {
@@ -280,13 +359,12 @@ func (s *Server) streamSessionTranscriptLogRawWithEmitter(ctx context.Context, e
 
 			if len(toSend) > 0 {
 				seq++
-				data, err := json.Marshal(sessionRawTranscriptResponse{
+				if emitter.emitWithCursor("message", seq, emittedCursor, sessionRawTranscriptResponse{
 					ID:       info.ID,
 					Template: info.Template,
 					Format:   "raw",
 					Messages: toSend,
-				})
-				if err == nil && emitter.emitWithCursor("message", seq, emittedCursor, data) != nil {
+				}) != nil {
 					return
 				}
 			}
@@ -300,8 +378,7 @@ func (s *Server) streamSessionTranscriptLogRawWithEmitter(ctx context.Context, e
 		if activity != "" && activity != lastActivity {
 			lastActivity = activity
 			seq++
-			actData, _ := json.Marshal(map[string]string{"activity": activity})
-			if emitter.emit("activity", seq, actData) != nil {
+			if emitter.emit("activity", seq, StreamActivityPayload{Activity: activity}) != nil {
 				return
 			}
 		}
@@ -319,8 +396,7 @@ func (s *Server) streamSessionTranscriptLogRawWithEmitter(ctx context.Context, e
 			if lastPendingID != "" {
 				lastPendingID = ""
 				seq++
-				actData, _ := json.Marshal(map[string]string{"activity": "in-turn"})
-				_ = emitter.emit("activity", seq, actData)
+				_ = emitter.emit("activity", seq, StreamActivityPayload{Activity: "in-turn"})
 			}
 			return
 		}
@@ -329,8 +405,7 @@ func (s *Server) streamSessionTranscriptLogRawWithEmitter(ctx context.Context, e
 		}
 		lastPendingID = pending.RequestID
 		seq++
-		pendingData, _ := json.Marshal(pending)
-		_ = emitter.emit("pending", seq, pendingData)
+		_ = emitter.emit("pending", seq, *pending)
 	}
 
 	lw.Run(ctx, readAndEmit, func() { _ = emitter.comment() }, RunOpts{
@@ -429,13 +504,12 @@ func (s *Server) streamSessionTranscriptLogWithEmitter(ctx context.Context, emit
 
 			if len(toSend) > 0 {
 				seq++
-				data, err := json.Marshal(sessionTranscriptResponse{
+				if emitter.emitWithCursor("turn", seq, emittedCursor, sessionTranscriptResponse{
 					ID:       info.ID,
 					Template: info.Template,
 					Format:   "conversation",
 					Turns:    toSend,
-				})
-				if err == nil && emitter.emitWithCursor("turn", seq, emittedCursor, data) != nil {
+				}) != nil {
 					return
 				}
 			}
@@ -449,8 +523,7 @@ func (s *Server) streamSessionTranscriptLogWithEmitter(ctx context.Context, emit
 		if activity != "" && activity != lastActivity {
 			lastActivity = activity
 			seq++
-			actData, _ := json.Marshal(map[string]string{"activity": activity})
-			if emitter.emit("activity", seq, actData) != nil {
+			if emitter.emit("activity", seq, StreamActivityPayload{Activity: activity}) != nil {
 				return
 			}
 		}
@@ -489,16 +562,12 @@ func (s *Server) streamSessionPeekRawWithEmitter(ctx context.Context, emitter se
 			"role":    json.RawMessage(`"assistant"`),
 			"content": json.RawMessage(`[{"type":"text","text":` + strconv.Quote(output) + `}]`),
 		}
-		data, err := json.Marshal(sessionRawTranscriptResponse{
+		if emitter.emit("message", seq, sessionRawTranscriptResponse{
 			ID:       info.ID,
 			Template: info.Template,
 			Format:   "raw",
 			Messages: []sessionRawMessage{fakeMsg},
-		})
-		if err != nil {
-			return
-		}
-		if emitter.emit("message", seq, data) != nil {
+		}) != nil {
 			return
 		}
 
@@ -507,8 +576,7 @@ func (s *Server) streamSessionPeekRawWithEmitter(ctx context.Context, emitter se
 			if pErr == nil && pending != nil && pending.RequestID != lastPeekPendingID {
 				lastPeekPendingID = pending.RequestID
 				seq++
-				pendingData, _ := json.Marshal(pending)
-				_ = emitter.emit("pending", seq, pendingData)
+				_ = emitter.emit("pending", seq, *pending)
 			} else if pending == nil && lastPeekPendingID != "" {
 				lastPeekPendingID = ""
 			}
@@ -556,16 +624,12 @@ func (s *Server) streamSessionPeekWithEmitter(ctx context.Context, emitter sessi
 		if output != "" {
 			turns = append(turns, outputTurn{Role: "output", Text: output})
 		}
-		data, err := json.Marshal(sessionTranscriptResponse{
+		_ = emitter.emit("turn", seq, sessionTranscriptResponse{
 			ID:       info.ID,
 			Template: info.Template,
 			Format:   "text",
 			Turns:    turns,
 		})
-		if err != nil {
-			return
-		}
-		_ = emitter.emit("turn", seq, data)
 	}
 
 	emitPeek()

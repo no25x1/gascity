@@ -74,13 +74,11 @@ func TestEndToEndProtocol(t *testing.T) {
 
 	// 4. Start an event subscription.
 	_ = conn.WriteJSON(map[string]any{
-		"type":   "request",
-		"id":     "e2e-2",
-		"action": "subscription.start",
-		"scope":  map[string]string{"city": "test-city"},
-		"payload": map[string]any{
-			"kind": "events",
-		},
+		"type":    "request",
+		"id":      "e2e-2",
+		"action":  "subscription.start",
+		"scope":   map[string]string{"city": "test-city"},
+		"payload": SubscriptionStartPayload{Kind: subscriptionKindEventsStream},
 	})
 	var subResp wsResponseEnvelope
 	readWSJSON(t, conn, &subResp)

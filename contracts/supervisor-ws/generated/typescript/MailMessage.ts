@@ -2,16 +2,15 @@
 interface MailMessage {
   body?: string;
   cc?: string[];
-  createdAt?: string;
-  reservedFrom?: string;
+  created_at?: string;
+  from?: string;
   id?: string;
   priority?: number;
   read?: boolean;
-  replyTo?: string;
+  reply_to?: string;
   rig?: string;
   subject?: string;
-  threadId?: string;
+  thread_id?: string;
   to?: string;
-  additionalProperties?: Map<string, any>;
 }
 export { MailMessage };

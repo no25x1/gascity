@@ -1,7 +1,6 @@
 
 interface ApiSocketRigCreatePayload {
-  reservedName?: string;
+  name?: string;
   path?: string;
-  additionalProperties?: Map<string, any>;
 }
 export { ApiSocketRigCreatePayload };

@@ -1,8 +1,7 @@
 
 interface ApiOutputTurn {
   role?: string;
-  reservedText?: string;
+  text?: string;
   timestamp?: string;
-  additionalProperties?: Map<string, any>;
 }
 export { ApiOutputTurn };

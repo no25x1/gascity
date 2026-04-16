@@ -2,7 +2,6 @@
 interface ApiSocketOrdersHistoryPayload {
   before?: string;
   limit?: number;
-  scopedName?: string;
-  additionalProperties?: Map<string, any>;
+  scoped_name?: string;
 }
 export { ApiSocketOrdersHistoryPayload };

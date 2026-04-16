@@ -2,7 +2,6 @@ import {ExtmsgConversationRef} from './ExtmsgConversationRef';
 interface ApiExtmsgBindRequest {
   conversation?: ExtmsgConversationRef;
   metadata?: Map<string, string>;
-  sessionId?: string;
-  additionalProperties?: Map<string, any>;
+  session_id?: string;
 }
 export { ApiExtmsgBindRequest };

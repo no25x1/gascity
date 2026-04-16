@@ -669,13 +669,11 @@ func TestSupervisorPerCityEventSubscription(t *testing.T) {
 
 	// Subscribe to city-scoped events.
 	writeWSJSON(t, conn, wsRequestEnvelope{
-		Type:   "request",
-		ID:     "sub-city",
-		Action: "subscription.start",
-		Scope:  &wsScope{City: "gc-work"},
-		Payload: map[string]any{
-			"kind": "events",
-		},
+		Type:    "request",
+		ID:      "sub-city",
+		Action:  "subscription.start",
+		Scope:   &wsScope{City: "gc-work"},
+		Payload: SubscriptionStartPayload{Kind: subscriptionKindEventsStream},
 	})
 
 	var resp wsResponseEnvelope

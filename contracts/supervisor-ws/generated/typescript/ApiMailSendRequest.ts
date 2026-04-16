@@ -1,10 +1,9 @@
 
 interface ApiMailSendRequest {
   body?: string;
-  reservedFrom?: string;
+  from?: string;
   rig?: string;
   subject?: string;
   to?: string;
-  additionalProperties?: Map<string, any>;
 }
 export { ApiMailSendRequest };

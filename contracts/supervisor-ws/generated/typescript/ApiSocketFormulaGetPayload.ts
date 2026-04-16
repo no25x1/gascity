@@ -1,10 +1,9 @@
 
 interface ApiSocketFormulaGetPayload {
-  reservedName?: string;
-  scopeKind?: string;
-  scopeRef?: string;
+  name?: string;
+  scope_kind?: string;
+  scope_ref?: string;
   target?: string;
   vars?: Map<string, string>;
-  additionalProperties?: Map<string, any>;
 }
 export { ApiSocketFormulaGetPayload };

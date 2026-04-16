@@ -1,10 +1,9 @@
 
 interface ApiExtmsgParticipantUpsertRequest {
-  groupId?: string;
+  group_id?: string;
   handle?: string;
   metadata?: Map<string, string>;
-  reservedPublic?: boolean;
-  sessionId?: string;
-  additionalProperties?: Map<string, any>;
+  public?: boolean;
+  session_id?: string;
 }
 export { ApiExtmsgParticipantUpsertRequest };

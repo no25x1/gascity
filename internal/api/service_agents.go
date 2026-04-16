@@ -8,6 +8,7 @@ import (
 type AgentService interface {
 	List(qPool, qRig, qRunning string, wantPeek bool) []agentResponse
 	BuildExpandedResponse(agentCfg config.Agent, ea expandedAgent, wantPeek bool, qRunning string) (agentResponse, bool)
+	Output(name string, query agentOutputQuery) (agentOutputResponse, error)
 	ApplyAction(name, action string) error
 }
 
@@ -22,6 +23,10 @@ func (a *agentService) List(qPool, qRig, qRunning string, wantPeek bool) []agent
 
 func (a *agentService) BuildExpandedResponse(agentCfg config.Agent, ea expandedAgent, wantPeek bool, qRunning string) (agentResponse, bool) {
 	return a.s.buildExpandedAgentResponse(agentCfg, ea, wantPeek, qRunning)
+}
+
+func (a *agentService) Output(name string, query agentOutputQuery) (agentOutputResponse, error) {
+	return a.s.getAgentOutput(name, query)
 }
 
 func (a *agentService) ApplyAction(name, action string) error {

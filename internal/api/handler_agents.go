@@ -12,7 +12,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
@@ -48,7 +47,6 @@ type agentResponse struct {
 }
 
 type sessionInfo struct {
-	ID           string     `json:"id,omitempty"`
 	Name         string     `json:"name"`
 	LastActivity *time.Time `json:"last_activity,omitempty"`
 	Attached     bool       `json:"attached"`
@@ -129,7 +127,7 @@ func (s *Server) buildExpandedAgentResponse(agentCfg config.Agent, ea expandedAg
 	}
 
 	var lastActivity *time.Time
-	resp.Session = s.resolveAgentSessionInfo(ea.qualifiedName, sessionName, running, sp)
+	resp.Session = s.resolveAgentSessionInfo(sessionName, running, sp)
 	if resp.Session != nil {
 		lastActivity = resp.Session.LastActivity
 	}
@@ -151,41 +149,17 @@ func (s *Server) buildExpandedAgentResponse(agentCfg config.Agent, ea expandedAg
 	return resp, true
 }
 
-func (s *Server) resolveAgentSessionInfo(agentName, sessionName string, running bool, sp runtime.Provider) *sessionInfo {
-	var info *sessionInfo
-
-	if store := s.state.CityBeadStore(); store != nil {
-		if id, ok := resolveAgentSessionIDFromStore(store, agentName, sessionName); ok {
-			info = &sessionInfo{ID: id}
-		}
-	}
-
+func (s *Server) resolveAgentSessionInfo(sessionName string, running bool, sp runtime.Provider) *sessionInfo {
 	if !running {
-		return info
+		return nil
 	}
 
-	if info == nil {
-		info = &sessionInfo{}
-	}
-	info.Name = sessionName
+	info := &sessionInfo{Name: sessionName}
 	if t, err := sp.GetLastActivity(sessionName); err == nil && !t.IsZero() {
 		info.LastActivity = &t
 	}
 	info.Attached = sp.IsAttached(sessionName)
 	return info
-}
-
-func resolveAgentSessionIDFromStore(store beads.Store, agentName, sessionName string) (string, bool) {
-	for _, identifier := range []string{agentName, sessionName} {
-		identifier = strings.TrimSpace(identifier)
-		if identifier == "" {
-			continue
-		}
-		if id, err := session.ResolveSessionIDAllowClosed(store, identifier); err == nil {
-			return id, true
-		}
-	}
-	return "", false
 }
 
 func (s *Server) applyAgentAction(name, action string) error {

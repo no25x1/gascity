@@ -1,9 +1,8 @@
 
 interface ApiSocketWorkflowDeletePayload {
-  reservedDelete?: boolean;
+  delete?: boolean;
   id?: string;
-  scopeKind?: string;
-  scopeRef?: string;
-  additionalProperties?: Map<string, any>;
+  scope_kind?: string;
+  scope_ref?: string;
 }
 export { ApiSocketWorkflowDeletePayload };

@@ -1,7 +1,6 @@
 
 interface ApiSocketProviderUpdatePayload {
-  reservedName?: string;
+  name?: string;
   update?: Map<string, any>;
-  additionalProperties?: Map<string, any>;
 }
 export { ApiSocketProviderUpdatePayload };

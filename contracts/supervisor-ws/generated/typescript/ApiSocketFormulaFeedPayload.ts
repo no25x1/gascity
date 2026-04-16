@@ -1,8 +1,7 @@
 
 interface ApiSocketFormulaFeedPayload {
   limit?: number;
-  scopeKind?: string;
-  scopeRef?: string;
-  additionalProperties?: Map<string, any>;
+  scope_kind?: string;
+  scope_ref?: string;
 }
 export { ApiSocketFormulaFeedPayload };

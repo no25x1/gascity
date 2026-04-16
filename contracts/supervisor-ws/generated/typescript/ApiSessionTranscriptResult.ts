@@ -7,6 +7,5 @@ interface ApiSessionTranscriptResult {
   pagination?: SessionlogPaginationInfo;
   template?: string;
   turns?: ApiOutputTurn[];
-  additionalProperties?: Map<string, any>;
 }
 export { ApiSessionTranscriptResult };

@@ -1,6 +1,5 @@
 
 interface ApiMutationStatusResponse {
-  reservedStatus?: string;
-  additionalProperties?: Map<string, any>;
+  status?: string;
 }
 export { ApiMutationStatusResponse };

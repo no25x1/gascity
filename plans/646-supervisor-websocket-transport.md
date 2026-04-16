@@ -40,6 +40,10 @@ Every endpoint is **WS-only** or **HTTP-only**, never both. When migration is co
 - Specs served at well-known endpoints for client discovery
 - Go types are the source of truth; specs are derived, not hand-written
 - DTOs are generated from the checked-in specs, not hand-written independently
+- New or changed public WS surfaces must be defined as annotated Go request/response/event structs first. Do not introduce ad hoc `map[string]any`, hand-written JSON blobs, or stringly typed public payloads for contract-bearing messages.
+- Public schema/component names and generated DTO names must be explicit and stable. Anonymous generated contract names such as `AnonymousSchema_*` are not acceptable in reviewed artifacts.
+- Generated DTO fields must preserve public wire names exactly. Generator-driven renames such as `reservedName` in place of wire field `name` are contract bugs and must be fixed at the schema or generator layer before merge.
+- Public DTOs must not expose implicit open-object catch-alls such as `additionalProperties` unless unbounded key/value data is an intentional part of the public contract.
 - Checked-in contract artifacts in `contracts/http/openapi.yaml`, `contracts/supervisor-ws/asyncapi.yaml`, and `contracts/supervisor-ws/generated/*` are part of the reviewed deliverable
 - CI must fail when generated specs are stale relative to Go types or generated DTOs are stale relative to specs
 - OpenAPI covers the public HTTP survivor surface; `/debug/pprof/*` remains supported HTTP-only but outside the generated public OpenAPI contract
@@ -51,6 +55,7 @@ The implementation should follow these constraints throughout all phases:
 - TDD first: add or update failing protocol/client parity tests before each migrated transport slice, then implement until those tests pass
 - Layered architecture: keep transport code at the edge, a typed application/execution layer in the middle, and existing domain logic below it
 - Serialization only at the edges: decode WebSocket/HTTP payloads into typed DTOs at the boundary, operate on typed values internally, and encode only on the way out
+- No hand-written wire shapes for new work: when adding or restoring a WS operation, define the Go payload/result/event types first and let normal Go serialization carry them over the wire. This applies to implementation code, tests, and fixtures for the migrated surface.
 - DRY and SRP: extract shared request execution, event fan-out, scope resolution, and error mapping instead of duplicating them across HTTP and WebSocket handlers
 - KISS and YAGNI: do not add speculative chunking, browser rewrites, new auth models, or transport-specific abstractions that are not needed for current parity
 - Async notifications over polling: use subscriptions for ongoing state changes; retain one-shot watch semantics only where needed to match existing `index` + `wait` behavior
@@ -167,12 +172,13 @@ Use explicit subscribe/unsubscribe requests over the socket.
 
 Initial subscription families should match existing streaming surfaces and blocking-watch semantics:
 
-- global events feed
-- city-scoped events feed
-- session stream
+- global events feed via `events.stream`
+- city-scoped events feed via `events.stream` plus `scope.city`
+- session stream via `session.stream`
+- agent output stream via `agent.output.stream`
 - one-shot blocking query equivalents for existing `index` + `wait` patterns
 
-There is no first-class WebSocket "agent output" request or subscription concept in v1. Former agent-output behavior is preserved by resolving agent name to canonical session id via `agent.get`, then using session-scoped transcript/stream operations.
+Former streaming surfaces should remain first-class public concepts over WebSocket. `events.stream`, `session.stream`, and `agent.output.stream` are distinct public subscription kinds even if they share internal machinery. Route-faithful naming applies to the public stream inventory; it does not require renaming every existing one-shot WS action.
 
 Blocking HTTP reads such as `?index=...&wait=...` should map to one of:
 
@@ -190,6 +196,7 @@ Session stream subscriptions need explicit parameters and completion rules:
 - closed sessions emit a bounded snapshot/terminal sequence and then complete instead of remaining live forever
 - live sessions remain open and continue streaming updates with normal cursor semantics
 - `turns: N` returns the most recent N turns (0=all, 1=latest turn, 5=latest 5 turns). Used consistently for both `session.transcript` (one-shot fetch) and `subscription.start kind=session.stream` (live streaming with initial snapshot). Replaces HTTP `?tail=N`.
+- `agent.output.get` and `agent.output.stream` preserve the old agent-addressed payload family directly. They do not route through `agent.get` + session-only public surfaces.
 
 ## Migration Scope
 
@@ -199,7 +206,7 @@ The authoritative migration inventory is the merge-base working HTTP/SSE surface
 
 - supervisor/global client API: cities, global events
 - city status/config: status, config, config explain/validate
-- agents: list/get, actions, and agent-to-session resolution via `agent.get`
+- agents: list/get, actions, output, output stream
 - rigs: list/get, CRUD/actions where client-facing
 - sessions: list/get, transcript, pending, stream, messages/submit/respond/wake/kill/close/rename/agents
 - beads: list/get/graph/ready/update/assign/close/reopen/delete/create
@@ -224,7 +231,7 @@ The implementation can migrate these in phases, but the plan must inventory them
 
 ### Route disposition matrix
 
-Every former merge-base HTTP route and public subresource is classified as **WS-only** (migrated), **HTTP-only** (justified survivor), or **Removed** (dead). The route matrix is authoritative for parity. Multiple old routes may collapse to one canonical WS operation when their semantics are truly identical, but every old route still appears explicitly in the matrix and has explicit parity coverage.
+Every former merge-base HTTP route and public subresource is classified as **WS-only** (migrated), **HTTP-only** (justified survivor), or **Removed** (dead). The route matrix is authoritative for parity. Distinct old public routes do not collapse onto shared public WS surfaces. Shared implementation is fine internally, but each old route still appears explicitly in the matrix and has explicit parity coverage.
 
 #### HTTP-only survivors (9 routes)
 
@@ -246,7 +253,7 @@ Every former merge-base HTTP route and public subresource is classified as **WS-
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Status        | `status.get`                                                                                                                                                                                                                                                                                                                               |
 | City/Config   | `city.get`, `city.patch`, `config.get`, `config.explain`, `config.validate`, `cities.list`                                                                                                                                                                                                                                                 |
-| Agents        | `agents.list`, `agent.get`, `agent.create`, `agent.update`, `agent.delete`, `agent.suspend`, `agent.resume`                                                                                                                                                                                                                                |
+| Agents        | `agents.list`, `agent.get`, `agent.output.get`, `agent.create`, `agent.update`, `agent.delete`, `agent.suspend`, `agent.resume`                                                                                                                                                                                                           |
 | Rigs          | `rigs.list`, `rig.get`, `rig.create`, `rig.update`, `rig.delete`, `rig.suspend`, `rig.resume`, `rig.restart`                                                                                                                                                                                                                               |
 | Providers     | `providers.list`, `provider.get`, `provider.create`, `provider.update`, `provider.delete`                                                                                                                                                                                                                                                  |
 | Beads         | `beads.list`, `beads.ready`, `beads.graph`, `bead.get`, `bead.deps`, `bead.create`, `bead.close`, `bead.update`, `bead.reopen`, `bead.assign`, `bead.delete`                                                                                                                                                                               |
@@ -262,23 +269,31 @@ Every former merge-base HTTP route and public subresource is classified as **WS-
 | Packs         | `packs.list`                                                                                                                                                                                                                                                                                                                               |
 | Patches       | `patches.agents.list`, `patches.agent.get`, `patches.agents.set`, `patches.agent.delete`, `patches.rigs.list`, `patches.rig.get`, `patches.rigs.set`, `patches.rig.delete`, `patches.providers.list`, `patches.provider.get`, `patches.providers.set`, `patches.provider.delete`                                                           |
 | ExtMsg        | `extmsg.inbound`, `extmsg.outbound`, `extmsg.bindings.list`, `extmsg.bind`, `extmsg.unbind`, `extmsg.groups.lookup`, `extmsg.groups.ensure`, `extmsg.participant.upsert`, `extmsg.participant.remove`, `extmsg.transcript.list`, `extmsg.transcript.ack`, `extmsg.adapters.list`, `extmsg.adapters.register`, `extmsg.adapters.unregister` |
-| Subscriptions | `subscription.start` (events, session.stream), `subscription.stop`                                                                                                                                                                                                                                                                         |
+| Subscriptions | `subscription.start` (`events.stream`, `session.stream`, `agent.output.stream`), `subscription.stop`                                                                                                                                                                                                                                       |
 
-The exact WS action inventory is derived from the merge-base route matrix and role-filtered action registry. It is not maintained in this plan as a fixed count. `agent.get` must expose the canonical `session.id` whenever the agent has an addressable session. `cities.list` is supervisor-only. `subscription.start` and `subscription.stop` are first-class public protocol operations and must appear in capabilities and AsyncAPI generation like other actions.
+The exact WS action inventory is derived from the merge-base route matrix and role-filtered action registry. It is not maintained in this plan as a fixed count. `cities.list` is supervisor-only. `subscription.start` and `subscription.stop` are first-class public protocol operations and must appear in capabilities and AsyncAPI generation like other actions. Public payloads should remain field-for-field compatible with the old HTTP/SSE shapes except for outer WS framing and `scope.city`; extra fields such as `agent.get.session.id` are not part of the target contract.
+
+For the minimum correction specifically:
+
+- `agent.output.get` gets a dedicated annotated Go request payload type and a dedicated annotated Go response payload type matching the old HTTP surface
+- `agent.output.stream` emits typed WS events whose payload type matches the old SSE `data:` JSON shape
+- `events.stream`, `session.stream`, and `agent.output.stream` are represented as typed Go subscription payloads and typed event payloads, not ad hoc maps
+- the generated AsyncAPI components and generated DTOs for these restored surfaces must use explicit named types with no anonymous schema artifacts and no field-name drift from the wire contract
 
 #### Explicit compatibility mappings
 
 | Former Route                          | Canonical WS Replacement                                                                                               |
 | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `GET /v0/agent/{name}/output`         | `agent.get` to obtain canonical `session.id`, then `session.transcript`                                               |
-| `GET /v0/agent/{name}/output/stream`  | `agent.get` to obtain canonical `session.id`, then `subscription.start {kind: "session.stream", target: session.id}` |
+| `GET /v0/agent/{name}/output`         | `agent.output.get`                                                                                                     |
+| `GET /v0/agent/{name}/output/stream`  | `subscription.start {kind: "agent.output.stream", target: agent name}`                                                |
 
 #### Removed (SSE endpoints)
 
-| Former Route                  | Replacement                                   |
-| ----------------------------- | --------------------------------------------- |
-| `GET /v0/events/stream`       | `subscription.start {kind: "events"}`         |
-| `GET /v0/session/{id}/stream` | `subscription.start {kind: "session.stream"}` |
+| Former Route                          | Replacement                                                        |
+| ------------------------------------- | ------------------------------------------------------------------ |
+| `GET /v0/events/stream`               | `subscription.start {kind: "events.stream"}`                       |
+| `GET /v0/session/{id}/stream`         | `subscription.start {kind: "session.stream", target: session id}`  |
+| `GET /v0/agent/{name}/output/stream`  | `subscription.start {kind: "agent.output.stream", target: agent}`  |
 
 ## Implementation Phases
 
@@ -304,10 +319,11 @@ The exact WS action inventory is derived from the merge-base route matrix and ro
 
 - Write failing parity tests first for each migrated SSE/blocking surface
 - Migrate existing SSE/event surfaces to WebSocket subscriptions:
-  - per-city events
-  - supervisor global events
-  - session stream
-- Preserve former agent-output semantics through `agent.get` session-id resolution plus session transcript/stream behavior rather than a separate WS agent-output concept
+  - per-city events via `events.stream`
+  - supervisor global events via `events.stream`
+  - session stream via `session.stream`
+  - agent output stream via `agent.output.stream`
+- Restore former agent-output semantics as first-class public WS surfaces (`agent.output.get`, `agent.output.stream`) rather than routing through session-only public operations
 - Migrate blocking query semantics that depend on `X-GC-Index`, `index`, and `wait`
 - Add reconnect/cursor parity tests for event and session flows
 - Add `turns` and format parity tests so `session.transcript` and `subscription.start kind=session.stream` behave consistently
@@ -318,7 +334,7 @@ The exact WS action inventory is derived from the merge-base route matrix and ro
 - Write failing client parity tests first for all in-repo `internal/api.Client` call sites that move to WS
 - Replace `internal/api.Client` HTTP transport with a persistent WebSocket client with auto-reconnect and exponential backoff (1s, 2s, 4s, 8s, 16s, 30s max)
 - **No HTTP fallback** — every method goes through WS or returns an error
-- Add subscription API to Go client: `SubscribeEvents`, `SubscribeSessionStream`, `Unsubscribe`
+- Add subscription API to Go client: `SubscribeEvents`, `SubscribeSessionStream`, `SubscribeAgentOutputStream`, `Unsubscribe`
 - Add `Close()` method for clean connection shutdown
 - Distinguish protocol completeness from client wrapper completeness:
   - the route matrix defines public protocol completeness
@@ -341,6 +357,7 @@ The exact WS action inventory is derived from the merge-base route matrix and ro
 - Replace `EventSource` SSE with WS subscriptions
 - Render all data client-side from JSON (eliminate server-side HTML templates)
 - Add WS reconnect with exponential backoff in browser JS
+- Use `agent.output.get` / `agent.output.stream` for agent log surfaces rather than going through `session.transcript` / `session.stream`
 - Strip the dashboard server to static file serving plus optional startup bootstrap/config injection only — zero runtime API endpoints
 - Eliminate `/api/run` — browser calls supervisor WS actions directly
 - Eliminate all 17 `/api/*` proxy endpoints
@@ -431,6 +448,7 @@ The WebSocket transport should emit enough telemetry to debug production failure
 - per-city event subscription
 - global event subscription with composite cursor parity
 - session stream parity
+- agent output stream parity
 - `turns` and format parity between `session.transcript` and `session.stream`
 - unsubscribe behavior
 - reconnect/resume behavior
@@ -449,7 +467,10 @@ The WebSocket transport should emit enough telemetry to debug production failure
 - checked-in contract artifact freshness tests for:
   - Go types -> AsyncAPI/OpenAPI
   - specs -> generated DTOs
-- `agent.get` exposes canonical `session.id` for addressable agent sessions
+- `agent.output.get` and `agent.output.stream` match the old merge-base payload families directly
+- `agent.get` does not expose post-merge-base additions such as `session.id`
+- protocol tests and route-matrix parity tests for the migrated surface construct WS requests from typed Go payload structs rather than hand-written JSON maps whenever the request shape is part of the public contract being restored
+- contract-generation tests fail if reviewed artifacts contain anonymous generated DTO/schema names, generator-renamed public fields, or unintended `additionalProperties` on public restored-contract payloads
 - blocking query (watch) behavior preserves semantics over WS
 - standalone city-local server and supervisor mux both serve the same WS protocol correctly
 - service proxy routes remain HTTP and unaffected
@@ -462,9 +483,11 @@ The WebSocket transport should emit enough telemetry to debug production failure
 - The dashboard browser connects directly to the supervisor WebSocket endpoint
 - The dashboard server is static plus optional startup bootstrap/config injection only — zero runtime API endpoints
 - WebSocket is the exclusive client transport; HTTP remains only for justified operational endpoints
+- Route-faithful naming is required for the public stream inventory (`events.stream`, `session.stream`, `agent.output.stream`), but existing one-shot WS names that already map cleanly to old route concepts do not need a broad rename
 - AsyncAPI + OpenAPI specs are auto-generated from annotated Go types (single source of truth)
 - DTOs are generated from the checked-in specs and freshness is CI-gated
 - The Go client auto-reconnects with exponential backoff; no HTTP fallback
 - Browser auth uses Origin-based WS validation (localhost enforcement); server-rendered CSRF tokens are eliminated
+- Public payloads do not add post-merge-base fields beyond outer WS framing and `scope.city`
 - Fern is out of scope
 - `.env` is already handled elsewhere and is not part of this plan

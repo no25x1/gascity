@@ -1,10 +1,9 @@
 
 interface ApiExtmsgAdapterRegisterRequest {
-  accountId?: string;
-  callbackUrl?: string;
+  account_id?: string;
+  callback_url?: string;
   capabilities?: Map<string, any>;
-  reservedName?: string;
+  name?: string;
   provider?: string;
-  additionalProperties?: Map<string, any>;
 }
 export { ApiExtmsgAdapterRegisterRequest };

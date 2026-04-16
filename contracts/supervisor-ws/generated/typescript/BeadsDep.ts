@@ -1,8 +1,7 @@
 
 interface BeadsDep {
-  dependsOnId?: string;
-  issueId?: string;
-  reservedType?: string;
-  additionalProperties?: Map<string, any>;
+  depends_on_id?: string;
+  issue_id?: string;
+  type?: string;
 }
 export { BeadsDep };

@@ -4,7 +4,6 @@ interface ApiSocketEventsListPayload {
   cursor?: string;
   limit?: number | null;
   since?: string;
-  reservedType?: string;
-  additionalProperties?: Map<string, any>;
+  type?: string;
 }
 export { ApiSocketEventsListPayload };

@@ -1,7 +1,6 @@
 
 interface ApiSessionAgentDetailResponse {
   messages?: any[] | null;
-  reservedStatus?: string;
-  additionalProperties?: Map<string, any>;
+  status?: string;
 }
 export { ApiSessionAgentDetailResponse };

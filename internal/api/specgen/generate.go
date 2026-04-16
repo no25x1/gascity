@@ -110,6 +110,28 @@ func GenerateAsyncAPI(r *Registry, envelopes EnvelopeTypes) ([]byte, error) {
 			MessageSample: envelopes.SubscriptionStop,
 		},
 	})
+	for _, ch := range envelopes.ExtraChannels {
+		info := asyncapi.ChannelInfo{Name: ch.Name}
+		if ch.Publish != nil {
+			info.Publish = &asyncapi.MessageSample{
+				MessageEntity: asyncapispec.MessageEntity{
+					Description: ch.Description,
+					Summary:     ch.Summary,
+				},
+				MessageSample: ch.Publish,
+			}
+		}
+		if ch.Subscribe != nil {
+			info.Subscribe = &asyncapi.MessageSample{
+				MessageEntity: asyncapispec.MessageEntity{
+					Description: ch.Description,
+					Summary:     ch.Summary,
+				},
+				MessageSample: ch.Subscribe,
+			}
+		}
+		ref.AddChannel(info)
+	}
 
 	// Register per-action channels. Each action gets at least a request
 	// channel (even with no typed payload) so it appears in the spec.

@@ -15,7 +15,6 @@ interface ApiResponseEnvelope {
   /**
    * Must be 'response'
    */
-  reservedType?: string;
-  additionalProperties?: Map<string, any>;
+  type?: string;
 }
 export { ApiResponseEnvelope };

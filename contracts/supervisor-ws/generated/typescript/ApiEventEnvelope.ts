@@ -7,7 +7,7 @@ interface ApiEventEnvelope {
   /**
    * Event type (e.g. 'bead.created')
    */
-  eventType?: string;
+  event_type?: string;
   /**
    * Event sequence number
    */
@@ -19,11 +19,10 @@ interface ApiEventEnvelope {
   /**
    * Subscription that produced this event
    */
-  subscriptionId?: string;
+  subscription_id?: string;
   /**
    * Must be 'event'
    */
-  reservedType?: string;
-  additionalProperties?: Map<string, any>;
+  type?: string;
 }
 export { ApiEventEnvelope };

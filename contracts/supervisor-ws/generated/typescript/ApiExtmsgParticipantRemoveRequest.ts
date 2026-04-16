@@ -1,7 +1,6 @@
 
 interface ApiExtmsgParticipantRemoveRequest {
-  groupId?: string;
+  group_id?: string;
   handle?: string;
-  additionalProperties?: Map<string, any>;
 }
 export { ApiExtmsgParticipantRemoveRequest };

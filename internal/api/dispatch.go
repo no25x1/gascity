@@ -278,6 +278,68 @@ func EnvelopeTypes() specgen.EnvelopeTypes {
 		Event:             new(EventEnvelope),
 		SubscriptionStart: new(SubscriptionStartPayload),
 		SubscriptionStop:  new(SubscriptionStopPayload),
+		ExtraChannels: []specgen.ChannelDef{
+			{
+				Name:        "protocol/events-stream/start",
+				Summary:     "Events Stream Start Payload",
+				Description: "Typed payload for subscription.start with kind=events.stream.",
+				Publish: &EventsStreamSubscriptionPayload{
+					Kind: subscriptionKindEventsStream,
+				},
+			},
+			{
+				Name:        "protocol/session-stream/start",
+				Summary:     "Session Stream Start Payload",
+				Description: "Typed payload for subscription.start with kind=session.stream.",
+				Publish: &SessionStreamSubscriptionPayload{
+					Kind: subscriptionKindSessionStream,
+				},
+			},
+			{
+				Name:        "protocol/agent-output-stream/start",
+				Summary:     "Agent Output Stream Start Payload",
+				Description: "Typed payload for subscription.start with kind=agent.output.stream.",
+				Publish: &AgentOutputStreamSubscriptionPayload{
+					Kind: subscriptionKindAgentOutputStream,
+				},
+			},
+			{
+				Name:        "protocol/events-stream/event",
+				Summary:     "Events Stream Event Envelope",
+				Description: "Typed event envelope emitted by events.stream.",
+				Subscribe:   &EventsStreamEventEnvelope{},
+			},
+			{
+				Name:        "protocol/session-stream/turn-event",
+				Summary:     "Session Stream Turn Event Envelope",
+				Description: "Typed turn event envelope emitted by session.stream.",
+				Subscribe:   &SessionStreamTurnEventEnvelope{},
+			},
+			{
+				Name:        "protocol/session-stream/message-event",
+				Summary:     "Session Stream Message Event Envelope",
+				Description: "Typed raw message event envelope emitted by session.stream.",
+				Subscribe:   &SessionStreamMessageEventEnvelope{},
+			},
+			{
+				Name:        "protocol/session-stream/activity-event",
+				Summary:     "Session Stream Activity Event Envelope",
+				Description: "Typed activity event envelope emitted by session.stream.",
+				Subscribe:   &SessionStreamActivityEventEnvelope{},
+			},
+			{
+				Name:        "protocol/session-stream/pending-event",
+				Summary:     "Session Stream Pending Event Envelope",
+				Description: "Typed pending event envelope emitted by session.stream.",
+				Subscribe:   &SessionStreamPendingEventEnvelope{},
+			},
+			{
+				Name:        "protocol/agent-output-stream/turn-event",
+				Summary:     "Agent Output Stream Turn Event Envelope",
+				Description: "Typed turn event envelope emitted by agent.output.stream.",
+				Subscribe:   &AgentOutputStreamTurnEventEnvelope{},
+			},
+		},
 	}
 }
 

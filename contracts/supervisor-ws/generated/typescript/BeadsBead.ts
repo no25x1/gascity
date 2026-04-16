@@ -1,20 +1,19 @@
 import {BeadsDep} from './BeadsDep';
 interface BeadsBead {
   assignee?: string;
-  createdAt?: string;
+  created_at?: string;
   dependencies?: BeadsDep[];
   description?: string;
-  reservedFrom?: string;
+  from?: string;
   id?: string;
-  issueType?: string;
+  issue_type?: string;
   labels?: string[];
   metadata?: Map<string, string>;
   needs?: string[];
-  reservedParent?: string;
+  parent?: string;
   priority?: number | null;
   ref?: string;
-  reservedStatus?: string;
+  status?: string;
   title?: string;
-  additionalProperties?: Map<string, any>;
 }
 export { BeadsBead };

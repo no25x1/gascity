@@ -1,8 +1,7 @@
 
 interface ApiListResponse {
   items?: any;
-  nextCursor?: string;
+  next_cursor?: string;
   total?: number;
-  additionalProperties?: Map<string, any>;
 }
 export { ApiListResponse };

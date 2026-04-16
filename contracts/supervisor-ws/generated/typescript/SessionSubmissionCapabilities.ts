@@ -1,7 +1,6 @@
 
 interface SessionSubmissionCapabilities {
-  supportsFollowUp?: boolean;
-  supportsInterruptNow?: boolean;
-  additionalProperties?: Map<string, any>;
+  supports_follow_up?: boolean;
+  supports_interrupt_now?: boolean;
 }
 export { SessionSubmissionCapabilities };

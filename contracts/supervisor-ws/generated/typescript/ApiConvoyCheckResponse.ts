@@ -1,9 +1,8 @@
 
 interface ApiConvoyCheckResponse {
-  reservedClosed?: number;
+  closed?: number;
   complete?: boolean;
-  convoyId?: string;
+  convoy_id?: string;
   total?: number;
-  additionalProperties?: Map<string, any>;
 }
 export { ApiConvoyCheckResponse };

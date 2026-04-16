@@ -19,7 +19,6 @@ interface ApiErrorEnvelope {
   /**
    * Must be 'error'
    */
-  reservedType?: string;
-  additionalProperties?: Map<string, any>;
+  type?: string;
 }
 export { ApiErrorEnvelope };

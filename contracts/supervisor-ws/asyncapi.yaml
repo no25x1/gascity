@@ -62,6 +62,14 @@ channels:
       message:
         summary: Get agent details
         description: agent.get response payload
+  actions/agent.output.get/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketAgentOutputPayload'
+  actions/agent.output.get/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/ApiAgentOutputResponse'
   actions/agent.resume/request:
     publish:
       message:
@@ -1185,6 +1193,14 @@ channels:
         description: workflow.delete response payload
   actions/workflow.get/request:
     description: Get workflow snapshot
+  protocol/agent-output-stream/start:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiAgentOutputStreamSubscriptionPayload'
+  protocol/agent-output-stream/turn-event:
+    subscribe:
+      message:
+        $ref: '#/components/messages/ApiAgentOutputStreamTurnEventEnvelope'
   protocol/error:
     subscribe:
       message:
@@ -1193,10 +1209,38 @@ channels:
     subscribe:
       message:
         $ref: '#/components/messages/ApiEventEnvelope'
+  protocol/events-stream/event:
+    subscribe:
+      message:
+        $ref: '#/components/messages/ApiEventsStreamEventEnvelope'
+  protocol/events-stream/start:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiEventsStreamSubscriptionPayload'
   protocol/hello:
     subscribe:
       message:
         $ref: '#/components/messages/ApiHelloEnvelope'
+  protocol/session-stream/activity-event:
+    subscribe:
+      message:
+        $ref: '#/components/messages/ApiSessionStreamActivityEventEnvelope'
+  protocol/session-stream/message-event:
+    subscribe:
+      message:
+        $ref: '#/components/messages/ApiSessionStreamMessageEventEnvelope'
+  protocol/session-stream/pending-event:
+    subscribe:
+      message:
+        $ref: '#/components/messages/ApiSessionStreamPendingEventEnvelope'
+  protocol/session-stream/start:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSessionStreamSubscriptionPayload'
+  protocol/session-stream/turn-event:
+    subscribe:
+      message:
+        $ref: '#/components/messages/ApiSessionStreamTurnEventEnvelope'
   protocol/subscription-start:
     publish:
       message:
@@ -1216,6 +1260,55 @@ components:
         provider:
           type: string
         scope:
+          type: string
+      type: object
+    ApiAgentOutputResponse:
+      properties:
+        agent:
+          type: string
+        format:
+          type: string
+        pagination:
+          $ref: '#/components/schemas/SessionlogPaginationInfo'
+        turns:
+          items:
+            $ref: '#/components/schemas/ApiOutputTurn'
+          type:
+          - array
+          - "null"
+      type: object
+    ApiAgentOutputStreamSubscriptionPayload:
+      properties:
+        after_cursor:
+          description: Resume from this cursor
+          type: string
+        kind:
+          description: Must be 'agent.output.stream'
+          type: string
+        target:
+          description: Agent name
+          type: string
+      type: object
+    ApiAgentOutputStreamTurnEventEnvelope:
+      properties:
+        cursor:
+          description: Resume cursor for reconnection
+          type: string
+        event_type:
+          description: Must be 'turn'
+          type: string
+        index:
+          description: Event sequence number
+          minimum: 0
+          type: integer
+        payload:
+          $ref: '#/components/schemas/ApiAgentOutputResponse'
+          description: Agent output payload
+        subscription_id:
+          description: Subscription that produced this event
+          type: string
+        type:
+          description: Must be 'event'
           type: string
       type: object
     ApiBeadAssignResponse:
@@ -1416,6 +1509,63 @@ components:
           type: string
         type:
           description: Must be 'event'
+          type: string
+      type: object
+    ApiEventsStreamEventEnvelope:
+      properties:
+        cursor:
+          description: Resume cursor for reconnection
+          type: string
+        event_type:
+          description: Event type (e.g. 'bead.created')
+          type: string
+        index:
+          description: Event sequence number
+          minimum: 0
+          type: integer
+        payload:
+          $ref: '#/components/schemas/ApiEventsStreamPayload'
+          description: Events stream payload
+        subscription_id:
+          description: Subscription that produced this event
+          type: string
+        type:
+          description: Must be 'event'
+          type: string
+      type: object
+    ApiEventsStreamPayload:
+      properties:
+        actor:
+          type: string
+        city:
+          type: string
+        message:
+          type: string
+        payload: {}
+        seq:
+          minimum: 0
+          type: integer
+        subject:
+          type: string
+        ts:
+          format: date-time
+          type: string
+        type:
+          type: string
+        workflow:
+          $ref: '#/components/schemas/ApiWorkflowEventProjection'
+      type: object
+    ApiEventsStreamSubscriptionPayload:
+      properties:
+        after_cursor:
+          description: Resume from this cursor
+          type: string
+        after_seq:
+          description: Resume from this event sequence
+          minimum: 0
+          type: integer
+        kind:
+          description: Must be 'events.stream'
           type: string
       type: object
     ApiExtmsgAdapterRegisterRequest:
@@ -1829,6 +1979,106 @@ components:
         title:
           type: string
       type: object
+    ApiSessionStreamActivityEventEnvelope:
+      properties:
+        event_type:
+          description: Must be 'activity'
+          type: string
+        index:
+          description: Event sequence number
+          minimum: 0
+          type: integer
+        payload:
+          $ref: '#/components/schemas/ApiStreamActivityPayload'
+          description: Session activity payload
+        subscription_id:
+          description: Subscription that produced this event
+          type: string
+        type:
+          description: Must be 'event'
+          type: string
+      type: object
+    ApiSessionStreamMessageEventEnvelope:
+      properties:
+        cursor:
+          description: Resume cursor for reconnection
+          type: string
+        event_type:
+          description: Must be 'message'
+          type: string
+        index:
+          description: Event sequence number
+          minimum: 0
+          type: integer
+        payload:
+          $ref: '#/components/schemas/ApiSessionTranscriptResult'
+          description: Raw session transcript payload
+        subscription_id:
+          description: Subscription that produced this event
+          type: string
+        type:
+          description: Must be 'event'
+          type: string
+      type: object
+    ApiSessionStreamPendingEventEnvelope:
+      properties:
+        event_type:
+          description: Must be 'pending'
+          type: string
+        index:
+          description: Event sequence number
+          minimum: 0
+          type: integer
+        payload:
+          $ref: '#/components/schemas/RuntimePendingInteraction'
+          description: Pending interaction payload
+        subscription_id:
+          description: Subscription that produced this event
+          type: string
+        type:
+          description: Must be 'event'
+          type: string
+      type: object
+    ApiSessionStreamSubscriptionPayload:
+      properties:
+        after_cursor:
+          description: Resume from this cursor
+          type: string
+        format:
+          description: 'Stream format: ''text'', ''raw'', ''jsonl'''
+          type: string
+        kind:
+          description: Must be 'session.stream'
+          type: string
+        target:
+          description: Session ID or session name
+          type: string
+        turns:
+          description: Most recent N turns (0=all)
+          type: integer
+      type: object
+    ApiSessionStreamTurnEventEnvelope:
+      properties:
+        cursor:
+          description: Resume cursor for reconnection
+          type: string
+        event_type:
+          description: Must be 'turn'
+          type: string
+        index:
+          description: Event sequence number
+          minimum: 0
+          type: integer
+        payload:
+          $ref: '#/components/schemas/ApiSessionTranscriptResult'
+          description: Session transcript payload
+        subscription_id:
+          description: Subscription that produced this event
+          type: string
+        type:
+          description: Must be 'event'
+          type: string
+      type: object
     ApiSessionSubmitResponse:
       properties:
         id:
@@ -1883,6 +2133,17 @@ components:
           type:
           - object
           - "null"
+      type: object
+    ApiSocketAgentOutputPayload:
+      properties:
+        before:
+          type: string
+        name:
+          type: string
+        tail:
+          type:
+          - "null"
+          - integer
       type: object
     ApiSocketAgentUpdatePayload:
       properties:
@@ -2230,6 +2491,12 @@ components:
         scope_ref:
           type: string
       type: object
+    ApiStreamActivityPayload:
+      properties:
+        activity:
+          description: Session activity state
+          type: string
+      type: object
     ApiSubscriptionStartPayload:
       properties:
         after_cursor:
@@ -2243,10 +2510,11 @@ components:
           description: 'Stream format: ''text'', ''raw'', ''jsonl'''
           type: string
         kind:
-          description: 'Subscription type: ''events'' or ''session.stream'''
+          description: 'Subscription type: ''events.stream'', ''session.stream'',
+            or ''agent.output.stream'''
           type: string
         target:
-          description: Session ID or name (for session.stream)
+          description: Stream target identifier (session ID/name or agent name)
           type: string
         turns:
           description: Most recent N turns (0=all)
@@ -2268,6 +2536,35 @@ components:
           description: Maximum wait duration (e.g. '30s')
           type: string
       type: object
+    ApiWorkflowBeadResponse:
+      properties:
+        assignee:
+          type: string
+        attempt:
+          type:
+          - "null"
+          - integer
+        id:
+          type: string
+        kind:
+          type: string
+        logical_bead_id:
+          type: string
+        metadata:
+          additionalProperties:
+            type: string
+          type:
+          - object
+          - "null"
+        scope_ref:
+          type: string
+        status:
+          type: string
+        step_ref:
+          type: string
+        title:
+          type: string
+      type: object
     ApiWorkflowDepResponse:
       properties:
         from:
@@ -2276,6 +2573,48 @@ components:
           type: string
         to:
           type: string
+      type: object
+    ApiWorkflowEventProjection:
+      properties:
+        attempt_summary:
+          additionalProperties: {}
+          type: object
+        bead:
+          $ref: '#/components/schemas/ApiWorkflowBeadResponse'
+        changed_fields:
+          items:
+            type: string
+          type:
+          - array
+          - "null"
+        event_seq:
+          minimum: 0
+          type: integer
+        event_ts:
+          type: string
+        event_type:
+          type: string
+        logical_node_id:
+          type: string
+        requires_resync:
+          type: boolean
+        root_bead_id:
+          type: string
+        root_store_ref:
+          type: string
+        scope_kind:
+          type: string
+        scope_ref:
+          type: string
+        type:
+          type: string
+        watch_generation:
+          type: string
+        workflow_id:
+          type: string
+        workflow_seq:
+          minimum: 0
+          type: integer
       type: object
     BeadsBead:
       properties:
@@ -2477,6 +2816,21 @@ components:
         $ref: '#/components/schemas/ApiAgentCreateRequest'
       summary: Create an agent
       description: agent.create request payload
+    ApiAgentOutputResponse:
+      payload:
+        $ref: '#/components/schemas/ApiAgentOutputResponse'
+      summary: Get agent output
+      description: agent.output.get response payload
+    ApiAgentOutputStreamSubscriptionPayload:
+      payload:
+        $ref: '#/components/schemas/ApiAgentOutputStreamSubscriptionPayload'
+      summary: Agent Output Stream Start Payload
+      description: Typed payload for subscription.start with kind=agent.output.stream.
+    ApiAgentOutputStreamTurnEventEnvelope:
+      payload:
+        $ref: '#/components/schemas/ApiAgentOutputStreamTurnEventEnvelope'
+      summary: Agent Output Stream Turn Event Envelope
+      description: Typed turn event envelope emitted by agent.output.stream.
     ApiBeadAssignResponse:
       payload:
         $ref: '#/components/schemas/ApiBeadAssignResponse'
@@ -2537,6 +2891,16 @@ components:
         $ref: '#/components/schemas/ApiEventEnvelope'
       summary: Event Envelope
       description: Sent by the server for subscription events
+    ApiEventsStreamEventEnvelope:
+      payload:
+        $ref: '#/components/schemas/ApiEventsStreamEventEnvelope'
+      summary: Events Stream Event Envelope
+      description: Typed event envelope emitted by events.stream.
+    ApiEventsStreamSubscriptionPayload:
+      payload:
+        $ref: '#/components/schemas/ApiEventsStreamSubscriptionPayload'
+      summary: Events Stream Start Payload
+      description: Typed payload for subscription.start with kind=events.stream.
     ApiExtmsgAdapterRegisterRequest:
       payload:
         $ref: '#/components/schemas/ApiExtmsgAdapterRegisterRequest'
@@ -2662,6 +3026,31 @@ components:
         $ref: '#/components/schemas/ApiSessionResponse'
       summary: Rename a session
       description: session.rename response payload
+    ApiSessionStreamActivityEventEnvelope:
+      payload:
+        $ref: '#/components/schemas/ApiSessionStreamActivityEventEnvelope'
+      summary: Session Stream Activity Event Envelope
+      description: Typed activity event envelope emitted by session.stream.
+    ApiSessionStreamMessageEventEnvelope:
+      payload:
+        $ref: '#/components/schemas/ApiSessionStreamMessageEventEnvelope'
+      summary: Session Stream Message Event Envelope
+      description: Typed raw message event envelope emitted by session.stream.
+    ApiSessionStreamPendingEventEnvelope:
+      payload:
+        $ref: '#/components/schemas/ApiSessionStreamPendingEventEnvelope'
+      summary: Session Stream Pending Event Envelope
+      description: Typed pending event envelope emitted by session.stream.
+    ApiSessionStreamSubscriptionPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSessionStreamSubscriptionPayload'
+      summary: Session Stream Start Payload
+      description: Typed payload for subscription.start with kind=session.stream.
+    ApiSessionStreamTurnEventEnvelope:
+      payload:
+        $ref: '#/components/schemas/ApiSessionStreamTurnEventEnvelope'
+      summary: Session Stream Turn Event Envelope
+      description: Typed turn event envelope emitted by session.stream.
     ApiSessionSubmitResponse:
       payload:
         $ref: '#/components/schemas/ApiSessionSubmitResponse'
@@ -2677,6 +3066,11 @@ components:
         $ref: '#/components/schemas/ApiSlingBody'
       summary: Run sling dispatch
       description: sling.run request payload
+    ApiSocketAgentOutputPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketAgentOutputPayload'
+      summary: Get agent output
+      description: agent.output.get request payload
     ApiSocketAgentUpdatePayload:
       payload:
         $ref: '#/components/schemas/ApiSocketAgentUpdatePayload'

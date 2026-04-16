@@ -5,12 +5,11 @@ interface ExtmsgExternalInboundMessage {
   actor?: ExtmsgExternalActor;
   attachments?: ExtmsgExternalAttachment[];
   conversation?: ExtmsgConversationRef;
-  dedupKey?: string;
-  explicitTarget?: string;
-  providerMessageId?: string;
-  receivedAt?: string;
-  replyToMessageId?: string;
-  reservedText?: string;
-  additionalProperties?: Map<string, any>;
+  dedup_key?: string;
+  explicit_target?: string;
+  provider_message_id?: string;
+  received_at?: string;
+  reply_to_message_id?: string;
+  text?: string;
 }
 export { ExtmsgExternalInboundMessage };

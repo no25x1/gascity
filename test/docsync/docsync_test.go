@@ -760,6 +760,47 @@ func TestAsyncAPIActionsMatchGoCode(t *testing.T) {
 	}
 }
 
+func TestGeneratedTypeScriptContractsAreNamedAndStable(t *testing.T) {
+	root := repoRoot()
+	tsDir := filepath.Join(root, "contracts", "supervisor-ws", "generated", "typescript")
+
+	entries, err := os.ReadDir(tsDir)
+	if err != nil {
+		t.Fatalf("reading generated typescript dir: %v", err)
+	}
+
+	var problems []string
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".ts") {
+			continue
+		}
+		if strings.HasPrefix(entry.Name(), "AnonymousSchema_") {
+			problems = append(problems, entry.Name()+" -> anonymous generated schema file")
+			continue
+		}
+
+		data, err := os.ReadFile(filepath.Join(tsDir, entry.Name()))
+		if err != nil {
+			t.Fatalf("reading %s: %v", entry.Name(), err)
+		}
+		text := string(data)
+		if strings.Contains(text, "reservedName") {
+			problems = append(problems, entry.Name()+" -> reservedName field rename leaked into DTO")
+		}
+		if strings.Contains(text, "additionalProperties?:") || strings.Contains(text, "'additionalProperties'?:") {
+			problems = append(problems, entry.Name()+" -> unintended additionalProperties leaked into DTO")
+		}
+	}
+
+	if len(problems) > 0 {
+		sort.Strings(problems)
+		t.Errorf("generated TypeScript contract artifacts are not clean:")
+		for _, problem := range problems {
+			t.Errorf("  %s", problem)
+		}
+	}
+}
+
 // extractAsyncAPIActions parses action names from the AsyncAPI YAML.
 // The swaggest-generated spec uses channel names like "actions/agent.create/request:"
 // so we extract the action name from the channel path.
@@ -793,7 +834,8 @@ func extractGoSwitchActions(data []byte) []string {
 		action := string(match[1])
 		// Skip protocol-level actions and false positives.
 		if action == "subscription.start" || action == "subscription.stop" ||
-			action == "gc.v1alpha1" || action == "session.stream" {
+			action == "gc.v1alpha1" || action == "session.stream" ||
+			action == "events.stream" || action == "agent.output.stream" {
 			continue
 		}
 		if !seen[action] {

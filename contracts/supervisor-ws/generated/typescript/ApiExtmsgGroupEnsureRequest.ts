@@ -1,9 +1,8 @@
 import {ExtmsgConversationRef} from './ExtmsgConversationRef';
 interface ApiExtmsgGroupEnsureRequest {
-  defaultHandle?: string;
+  default_handle?: string;
   metadata?: Map<string, string>;
   mode?: string;
-  rootConversation?: ExtmsgConversationRef;
-  additionalProperties?: Map<string, any>;
+  root_conversation?: ExtmsgConversationRef;
 }
 export { ApiExtmsgGroupEnsureRequest };

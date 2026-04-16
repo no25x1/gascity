@@ -1,7 +1,6 @@
 
 interface ApiSocketSessionAgentGetPayload {
-  agentId?: string;
+  agent_id?: string;
   id?: string;
-  additionalProperties?: Map<string, any>;
 }
 export { ApiSocketSessionAgentGetPayload };

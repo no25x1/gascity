@@ -1,9 +1,8 @@
 import {ExtmsgExternalInboundMessage} from './ExtmsgExternalInboundMessage';
 interface ApiExtmsgInboundRequest {
-  accountId?: string;
+  account_id?: string;
   message?: ExtmsgExternalInboundMessage;
   payload?: string;
   provider?: string;
-  additionalProperties?: Map<string, any>;
 }
 export { ApiExtmsgInboundRequest };
