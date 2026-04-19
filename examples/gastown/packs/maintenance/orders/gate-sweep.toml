@@ -6,5 +6,6 @@
 [order]
 description = "Evaluate and close pending gates (timer, condition, GitHub)"
 trigger = "cooldown"
+gate = "cooldown"
 interval = "30s"
 exec = "$PACK_DIR/assets/scripts/gate-sweep.sh"

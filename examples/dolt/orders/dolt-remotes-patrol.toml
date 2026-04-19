@@ -1,5 +1,6 @@
 [order]
 description = "Push dolt databases to configured remotes"
 trigger = "cooldown"
+gate = "cooldown"
 interval = "15m"
 exec = "gc dolt sync"

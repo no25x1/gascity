@@ -10,6 +10,7 @@ when its cooldown trigger elapses:
 description = "Generate daily code digest across all rigs"
 formula = "mol-digest-generate"
 trigger = "cooldown"
+gate = "cooldown"
 interval = "24h"
 pool = "dog"
 ```

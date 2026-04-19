@@ -5,4 +5,5 @@
 description = "Export Dolt databases to JSONL git archive"
 exec = "$PACK_DIR/assets/scripts/jsonl-export.sh"
 trigger = "cooldown"
+gate = "cooldown"
 interval = "15m"

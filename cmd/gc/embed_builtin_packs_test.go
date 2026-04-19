@@ -95,6 +95,18 @@ func TestMaterializeBuiltinPacks(t *testing.T) {
 			t.Errorf("embedded order missing: %v", err)
 		}
 	}
+	beadsHealthOrder := filepath.Join(dir, citylayout.SystemPacksRoot, "core", "orders", "beads-health.toml")
+	if data, err := os.ReadFile(beadsHealthOrder); err != nil {
+		t.Errorf("reading embedded core order: %v", err)
+	} else {
+		got := string(data)
+		if !strings.Contains(got, `trigger = "cooldown"`) {
+			t.Errorf("embedded core order missing trigger alias:\n%s", got)
+		}
+		if !strings.Contains(got, `gate = "cooldown"`) {
+			t.Errorf("embedded core order missing rollback-safe gate alias:\n%s", got)
+		}
+	}
 
 	// Verify TOML files are not executable.
 	info, err := os.Stat(bdToml)
