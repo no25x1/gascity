@@ -68,31 +68,31 @@ id = "run"
 title = "Run the test suite"
 `, 0o644)
 
-	reviewOrder := `[order]
+reviewOrder := `[order]
 description = "Check for PRs that need review"
 formula = "review"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "5m"
 pool = "worker"
 `
-	depUpdateOrder := `[order]
+depUpdateOrder := `[order]
 description = "Check dependency updates"
 formula = "review"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "1h"
 pool = "worker"
 `
-	releaseNotesOrder := `[order]
+releaseNotesOrder := `[order]
 description = "Generate release notes"
 formula = "release-notes"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "24h"
 pool = "worker"
 `
-	testSuiteOrder := `[order]
+testSuiteOrder := `[order]
 description = "Run the test suite"
 formula = "test-suite"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "5m"
 pool = "worker"
 `

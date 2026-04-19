@@ -508,6 +508,7 @@ func qualifyPool(pool, rig string) string {
 func convertOverrides(cfgOvs []config.OrderOverride) []orders.Override {
 	out := make([]orders.Override, len(cfgOvs))
 	for i, c := range cfgOvs {
+		config.NormalizeLegacyOrderOverrideAlias(&c)
 		out[i] = orders.Override{
 			Name:     c.Name,
 			Rig:      c.Rig,

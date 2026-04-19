@@ -1549,6 +1549,20 @@ interval = "2m"
 	t.Error("wasteland-poll not found in dispatcher orders")
 }
 
+func TestConvertOverridesNormalizesLegacyGateAlias(t *testing.T) {
+	gate := "cooldown"
+	got := convertOverrides([]config.OrderOverride{{
+		Name: "digest",
+		Gate: &gate,
+	}})
+	if len(got) != 1 {
+		t.Fatalf("len(convertOverrides) = %d, want 1", len(got))
+	}
+	if got[0].Trigger == nil || *got[0].Trigger != "cooldown" {
+		t.Fatalf("Trigger = %#v, want cooldown", got[0].Trigger)
+	}
+}
+
 func TestBuildOrderDispatcherOverrideNotFoundNonFatal(t *testing.T) {
 	// Single formula layer with beads-health only.
 	// Override targets wasteland-poll (nonexistent).

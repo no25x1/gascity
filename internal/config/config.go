@@ -1040,12 +1040,20 @@ type OrderOverride struct {
 
 func normalizeLegacyOrderOverrideAliases(cfg *City) {
 	for i := range cfg.Orders.Overrides {
-		ov := &cfg.Orders.Overrides[i]
-		if ov.Trigger == nil {
-			ov.Trigger = ov.Gate
-		}
-		ov.Gate = nil
+		NormalizeLegacyOrderOverrideAlias(&cfg.Orders.Overrides[i])
 	}
+}
+
+// NormalizeLegacyOrderOverrideAlias promotes the deprecated Gate alias onto
+// Trigger when needed and clears Gate so downstream code can stay trigger-only.
+func NormalizeLegacyOrderOverrideAlias(ov *OrderOverride) {
+	if ov == nil {
+		return
+	}
+	if ov.Trigger == nil {
+		ov.Trigger = ov.Gate
+	}
+	ov.Gate = nil
 }
 
 // MaxTimeoutDuration parses MaxTimeout as a Go duration.

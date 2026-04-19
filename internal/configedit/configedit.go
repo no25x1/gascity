@@ -686,10 +686,7 @@ func normalizeOrderOverride(ov config.OrderOverride) (config.OrderOverride, erro
 	if ov.Name == "" {
 		return config.OrderOverride{}, fmt.Errorf("order override: name is required")
 	}
-	if ov.Trigger == nil {
-		ov.Trigger = ov.Gate
-	}
-	ov.Gate = nil
+	config.NormalizeLegacyOrderOverrideAlias(&ov)
 	return ov, nil
 }
 

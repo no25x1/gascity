@@ -2672,9 +2672,9 @@ gate = "cooldown"
 		t.Fatalf("doInitFromDirWithOptions = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	copiedToml := filepath.Join(cityPath, "city.toml")
-	if !strings.Contains(stderr.String(), copiedToml+`: field "orders.overrides.gate" is deprecated`) {
-		t.Fatalf("stderr = %q, want deprecation warning for %s", stderr.String(), copiedToml)
+	sourceToml := filepath.Join(srcDir, "city.toml")
+	if !strings.Contains(stderr.String(), sourceToml+`: field "orders.overrides.gate" is deprecated`) {
+		t.Fatalf("stderr = %q, want deprecation warning for %s", stderr.String(), sourceToml)
 	}
 }
 

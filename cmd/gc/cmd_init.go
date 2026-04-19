@@ -833,7 +833,7 @@ func doInitFromDirWithOptions(srcDir, cityPath, nameOverride string, stdout, std
 		fmt.Fprintf(stderr, "gc init: reading copied city.toml: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cfg, warnings, err := config.ParseWithWarningsSource(data, copiedToml)
+	cfg, warnings, err := config.ParseWithWarningsSource(data, filepath.Join(srcDir, "city.toml"))
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

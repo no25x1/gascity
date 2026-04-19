@@ -1,11 +1,15 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/docgen"
+)
 
 func TestGeneratedCitySchemaIncludesLegacyOrderOverrideGateAlias(t *testing.T) {
-	schema, err := runGenerateCitySchemaForTest()
+	schema, err := docgen.GenerateCitySchema()
 	if err != nil {
-		t.Fatalf("runGenerateCitySchemaForTest: %v", err)
+		t.Fatalf("GenerateCitySchema: %v", err)
 	}
 
 	orderOverride, ok := schema.Definitions["OrderOverride"]
