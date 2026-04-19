@@ -76,10 +76,21 @@ type cityCreateRequest struct {
 	BootstrapProfile string `json:"bootstrap_profile,omitempty" enum:"k8s-cell,kubernetes,kubernetes-cell,single-host-compat" doc:"Optional bootstrap profile."`
 }
 
-// cityCreateResponse is the response body for POST /v0/city.
+// cityCreateResponse is the response body for POST /v0/city. This
+// endpoint is asynchronous: a 202 response means the city was
+// scaffolded on disk and registered with the supervisor, but the
+// supervisor reconciler still has to run the slow finalize work
+// (pack materialization, bead store startup, formula resolution,
+// agent validation). Clients observe completion by subscribing to
+// /v0/events/stream and waiting for a city.ready event (payload
+// CityReadyPayload.Name == this response's Name) or a
+// city.init_failed event (CityInitFailedPayload.Name == this
+// response's Name; Error field explains the failure). Polling is
+// unnecessary.
 type cityCreateResponse struct {
-	OK   bool   `json:"ok" doc:"True on success."`
-	Path string `json:"path" doc:"Resolved absolute path of the created city."`
+	OK   bool   `json:"ok" doc:"True when scaffolding + registration succeeded. Does not imply the city is ready yet; watch /v0/events/stream for city.ready."`
+	Name string `json:"name" doc:"Resolved city name as persisted in city.toml. Use this to filter the event stream for completion."`
+	Path string `json:"path" doc:"Resolved absolute path of the created city directory."`
 }
 
 // SupervisorCityCreateInput is the input for POST /v0/city.
@@ -87,9 +98,13 @@ type SupervisorCityCreateInput struct {
 	Body cityCreateRequest
 }
 
-// SupervisorCityCreateOutput is the response for POST /v0/city.
+// SupervisorCityCreateOutput is the response for POST /v0/city. The
+// Status field carries 202 Accepted to tell Huma to emit the async
+// status code; see humaHandleCityCreate for the rationale and event
+// contract.
 type SupervisorCityCreateOutput struct {
-	Body cityCreateResponse
+	Status int `json:"-"`
+	Body   cityCreateResponse
 }
 
 // SupervisorEventListInput is the input for GET /v0/events (supervisor scope).
@@ -168,7 +183,11 @@ func (sm *SupervisorMux) registerSupervisorRoutes() {
 	huma.Get(sm.humaAPI, "/health", sm.humaHandleHealth)
 	huma.Get(sm.humaAPI, "/v0/readiness", sm.humaHandleReadiness)
 	huma.Get(sm.humaAPI, "/v0/provider-readiness", sm.humaHandleProviderReadiness)
-	huma.Post(sm.humaAPI, "/v0/city", sm.humaHandleCityCreate, addMutationCSRFParam)
+	// Async mutation: returns 202 Accepted after scaffold + register;
+	// completion signaled via city.ready / city.init_failed events.
+	huma.Post(sm.humaAPI, "/v0/city", sm.humaHandleCityCreate, addMutationCSRFParam, func(op *huma.Operation) {
+		op.DefaultStatus = http.StatusAccepted
+	})
 	huma.Get(sm.humaAPI, "/v0/events", sm.humaHandleEventList)
 
 	registerSSEStringID(sm.humaAPI, huma.Operation{
@@ -265,12 +284,23 @@ func (sm *SupervisorMux) humaHandleProviderReadiness(ctx context.Context, input 
 	return out, nil
 }
 
-// humaHandleCityCreate handles POST /v0/city. Calls the injected
-// cityinit.Initializer in-process — no subprocess, no arbitrary
-// timeout, no stderr-scraping. Typed errors from the domain layer
-// map directly to HTTP status codes. See specs/architecture.md §1–§2
-// on the "object model at the center; CLI and HTTP API are
-// projections over it" principle.
+// humaHandleCityCreate handles POST /v0/city asynchronously. Calls
+// Initializer.Scaffold in-process to write the on-disk shape and
+// register the city with the supervisor, then returns 202 Accepted
+// immediately. The supervisor reconciler runs the slow finalize
+// (prepareCityForSupervisor: pack materialization, bead store
+// startup, formula resolution, agent validation) on its next tick
+// and emits city.ready / city.init_failed events on the supervisor
+// event bus when done. Clients observe completion via
+// /v0/events/stream — no polling required.
+//
+// Rationale: full city init takes minutes (dolt startup,
+// provider-readiness probes, pack fetch). Blocking the HTTP request
+// until finalize completes exceeds reasonable client timeouts
+// (MC's harness hit 120s). The fast scaffold+register path takes
+// seconds; the async completion contract via SSE is the right shape
+// for a long-running operation. See specs/architecture.md §1–§2 on
+// the object model + typed events; §4 on the event registry.
 func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *SupervisorCityCreateInput) (*SupervisorCityCreateOutput, error) {
 	if sm.initializer == nil {
 		return nil, huma.Error501NotImplemented("city creation is not available in this supervisor (no initializer wired)")
@@ -285,13 +315,13 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 		dir = filepath.Join(home, dir)
 	}
 
-	result, err := sm.initializer.Init(ctx, cityinit.InitRequest{
+	result, err := sm.initializer.Scaffold(ctx, cityinit.InitRequest{
 		Dir:              dir,
 		Provider:         input.Body.Provider,
 		BootstrapProfile: input.Body.BootstrapProfile,
-		// API callers poll readiness separately via
-		// GET /v0/provider-readiness; the handler doesn't block
-		// city creation on provider auth.
+		// API callers observe provider readiness through
+		// GET /v0/provider-readiness; finalize's preflight is
+		// CLI-only anyway.
 		SkipProviderReadiness: true,
 	})
 	switch {
@@ -307,8 +337,14 @@ func (sm *SupervisorMux) humaHandleCityCreate(ctx context.Context, input *Superv
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
 
-	out := &SupervisorCityCreateOutput{}
-	out.Body = cityCreateResponse{OK: true, Path: result.CityPath}
+	out := &SupervisorCityCreateOutput{
+		Status: http.StatusAccepted,
+	}
+	out.Body = cityCreateResponse{
+		OK:   true,
+		Name: result.CityName,
+		Path: result.CityPath,
+	}
 	return out, nil
 }
 

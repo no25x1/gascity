@@ -34,6 +34,19 @@ type CityResolver interface {
 	CityState(name string) State
 }
 
+// FailedCityEventSource is an optional CityResolver extension that
+// lets the supervisor-scope event multiplexer include event providers
+// for cities whose init failed (so subscribers of /v0/events/stream
+// can observe city.init_failed events without polling). Resolvers
+// that implement this return one entry per failed city; the key is
+// the city name, the value is an event provider backed by that
+// city's .gc/events.jsonl file. Failed cities are not in
+// ListCities's Running set so the existing multiplexer loop skips
+// them; this method reintroduces them for event-stream purposes only.
+type FailedCityEventSource interface {
+	FailedCityEventProviders() map[string]events.Provider
+}
+
 // cachedCityServer pairs a State with its pre-built Server for caching.
 type cachedCityServer struct {
 	state State
@@ -249,7 +262,12 @@ func (sm *SupervisorMux) getCityServer(name string, state State) *Server {
 }
 
 // buildMultiplexer creates a Multiplexer from all running cities'
-// event providers.
+// event providers plus any failed-city providers surfaced by a
+// resolver that implements FailedCityEventSource. Including failed
+// cities matters for clients that call POST /v0/city and wait for
+// a city.init_failed event on /v0/events/stream — without it, the
+// event would be written to the city's events.jsonl but never reach
+// supervisor-scope subscribers.
 func (sm *SupervisorMux) buildMultiplexer() *events.Multiplexer {
 	mux := events.NewMultiplexer()
 	cities := sm.resolver.ListCities()
@@ -266,6 +284,14 @@ func (sm *SupervisorMux) buildMultiplexer() *events.Multiplexer {
 			continue
 		}
 		mux.Add(c.Name, ep)
+	}
+	if failed, ok := sm.resolver.(FailedCityEventSource); ok {
+		for name, ep := range failed.FailedCityEventProviders() {
+			if ep == nil {
+				continue
+			}
+			mux.Add(name, ep)
+		}
 	}
 	return mux
 }

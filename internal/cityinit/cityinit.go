@@ -149,4 +149,18 @@ type Initializer interface {
 	// Errors returned wrap one of the ErrXxx sentinels in this
 	// package so callers can dispatch via errors.Is.
 	Init(ctx context.Context, req InitRequest) (*InitResult, error)
+
+	// Scaffold writes the new city's on-disk shape and registers it
+	// with the supervisor — the fast portion of Init. Used by the
+	// HTTP API handler behind POST /v0/city so it can return 202
+	// Accepted immediately instead of blocking on the slow finalize
+	// work. The supervisor reconciler takes over from there; city
+	// readiness is signaled via city.ready / city.init_failed
+	// events on the supervisor event bus, not via the handler's
+	// response body.
+	//
+	// The implementation emits a city.created event before
+	// returning so subscribers of /v0/events/stream observe the
+	// new city before Finalize begins.
+	Scaffold(ctx context.Context, req InitRequest) (*InitResult, error)
 }

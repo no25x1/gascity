@@ -1037,17 +1037,38 @@
       "CityCreateResponse": {
         "additionalProperties": false,
         "properties": {
+          "name": {
+            "description": "Resolved city name as persisted in city.toml. Use this to filter the event stream for completion.",
+            "type": "string"
+          },
           "ok": {
-            "description": "True on success.",
+            "description": "True when scaffolding + registration succeeded. Does not imply the city is ready yet; watch /v0/events/stream for city.ready.",
             "type": "boolean"
           },
           "path": {
-            "description": "Resolved absolute path of the created city.",
+            "description": "Resolved absolute path of the created city directory.",
             "type": "string"
           }
         },
         "required": [
           "ok",
+          "name",
+          "path"
+        ],
+        "type": "object"
+      },
+      "CityCreatedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
           "path"
         ],
         "type": "object"
@@ -1131,6 +1152,35 @@
         ],
         "type": "object"
       },
+      "CityInitFailedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "phases_completed": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "path",
+          "error"
+        ],
+        "type": "object"
+      },
       "CityPatchInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -1139,6 +1189,22 @@
             "type": "boolean"
           }
         },
+        "type": "object"
+      },
+      "CityReadyPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "path"
+        ],
         "type": "object"
       },
       "ConfigAgentResponse": {
@@ -1872,6 +1938,15 @@
           },
           {
             "$ref": "#/components/schemas/BoundEventPayload"
+          },
+          {
+            "$ref": "#/components/schemas/CityCreatedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/CityInitFailedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/CityReadyPayload"
           },
           {
             "$ref": "#/components/schemas/GroupCreatedEventPayload"
@@ -6819,7 +6894,7 @@
           "required": true
         },
         "responses": {
-          "200": {
+          "202": {
             "content": {
               "application/json": {
                 "schema": {
@@ -6827,7 +6902,7 @@
                 }
               }
             },
-            "description": "OK",
+            "description": "Accepted",
             "headers": {
               "X-GC-Request-Id": {
                 "$ref": "#/components/headers/X-GC-Request-Id"

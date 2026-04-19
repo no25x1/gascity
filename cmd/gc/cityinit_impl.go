@@ -37,6 +37,58 @@ func NewInitializer() cityinit.Initializer {
 	return localInitializer{}
 }
 
+// Scaffold runs the fast portion of city creation so the HTTP API
+// handler can return 202 Accepted without blocking on the slow
+// finalize work. Writes the on-disk shape (via doInit), then
+// registers the city with the supervisor so the reconciler picks
+// it up on its next tick. The reconciler owns finalize from there;
+// readiness is signaled via city.ready / city.init_failed events on
+// the supervisor event bus (see internal/api/event_payloads.go).
+func (localInitializer) Scaffold(_ context.Context, req cityinit.InitRequest) (*cityinit.InitResult, error) {
+	if err := validateInitRequest(&req); err != nil {
+		return nil, err
+	}
+	dir := req.Dir
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("creating directory %q: %w", dir, err)
+	}
+
+	wiz := wizardConfig{
+		configName:       req.ConfigName,
+		provider:         req.Provider,
+		startCommand:     req.StartCommand,
+		bootstrapProfile: req.BootstrapProfile,
+	}
+	if wiz.configName == "" {
+		wiz.configName = "tutorial"
+	}
+
+	if cityHasScaffoldFS(fsys.OSFS{}, dir) {
+		return nil, cityinit.ErrAlreadyInitialized
+	}
+	if code := doInit(fsys.OSFS{}, dir, wiz, req.NameOverride, io.Discard, io.Discard); code != 0 {
+		if code == initExitAlreadyInitialized {
+			return nil, cityinit.ErrAlreadyInitialized
+		}
+		return nil, fmt.Errorf("scaffold failed (exit %d)", code)
+	}
+
+	// Register the city with the supervisor so the reconciler picks
+	// it up on its next tick. API-created cities land in the
+	// registry; prepareCityForSupervisor runs asynchronously and
+	// emits city.ready / city.init_failed when done.
+	if code := registerCityWithSupervisor(dir, io.Discard, io.Discard, "POST /v0/city", false); code != 0 {
+		return nil, fmt.Errorf("register with supervisor failed (exit %d)", code)
+	}
+
+	cityName := resolveCityName(req.NameOverride, dir)
+	return &cityinit.InitResult{
+		CityName:     cityName,
+		CityPath:     dir,
+		ProviderUsed: req.Provider,
+	}, nil
+}
+
 // Init scaffolds + finalizes a new city. Errors are mapped to the
 // typed sentinels in package cityinit so callers (HTTP API, future
 // in-process consumers) can pattern-match via errors.Is.

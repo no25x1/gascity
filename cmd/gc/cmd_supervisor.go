@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -901,6 +902,28 @@ func reconcileCities(
 			) {
 				delete(initStatus, path)
 			})
+			// Emit city.init_failed to the city's event file so
+			// clients watching /v0/events/stream observe async
+			// failure signal without polling. Best-effort: if the
+			// file recorder can't open (e.g. .gc/ missing or
+			// permissions), fall through to recordInitFailure which
+			// surfaces the error via /v0/cities.
+			evPath := filepath.Join(path, ".gc", "events.jsonl")
+			if fr, frErr := events.NewFileRecorder(evPath, stderr); frErr == nil {
+				if payload, mErr := json.Marshal(api.CityInitFailedPayload{
+					Name:  cityName,
+					Path:  path,
+					Error: err.Error(),
+				}); mErr == nil {
+					fr.Record(events.Event{
+						Type:    events.CityInitFailed,
+						Actor:   "gc",
+						Subject: cityName,
+						Payload: payload,
+					})
+				}
+				fr.Close() //nolint:errcheck // best-effort
+			}
 			recordInitFailure(cityName, fmt.Sprintf("init: %v", err))
 			continue
 		}
@@ -1270,6 +1293,19 @@ func reconcileCities(
 		}(cityName, path, fr, lis, sockPath, sockInfo, lock)
 
 		rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
+		// Signal city.ready on the supervisor event bus so clients
+		// that POST /v0/city and subscribe to /v0/events/stream
+		// observe completion without polling. Handler returned 202
+		// synchronously; this event is the async completion signal.
+		readyPayload, readyErr := json.Marshal(api.CityReadyPayload{Name: cityName, Path: path})
+		if readyErr == nil {
+			rec.Record(events.Event{
+				Type:    events.CityReady,
+				Actor:   "gc",
+				Subject: cityName,
+				Payload: readyPayload,
+			})
+		}
 		telemetry.RecordControllerLifecycle(context.Background(), "started")
 		fmt.Fprintf(stdout, "Launching city '%s' (%s)\n", cityName, path) //nolint:errcheck
 	}

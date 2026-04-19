@@ -514,10 +514,19 @@ type CityCreateRequestBootstrapProfile string
 
 // CityCreateResponse defines model for CityCreateResponse.
 type CityCreateResponse struct {
-	// Ok True on success.
+	// Name Resolved city name as persisted in city.toml. Use this to filter the event stream for completion.
+	Name string `json:"name"`
+
+	// Ok True when scaffolding + registration succeeded. Does not imply the city is ready yet; watch /v0/events/stream for city.ready.
 	Ok bool `json:"ok"`
 
-	// Path Resolved absolute path of the created city.
+	// Path Resolved absolute path of the created city directory.
+	Path string `json:"path"`
+}
+
+// CityCreatedPayload defines model for CityCreatedPayload.
+type CityCreatedPayload struct {
+	Name string `json:"name"`
 	Path string `json:"path"`
 }
 
@@ -544,10 +553,24 @@ type CityInfo struct {
 	Status          *string   `json:"status,omitempty"`
 }
 
+// CityInitFailedPayload defines model for CityInitFailedPayload.
+type CityInitFailedPayload struct {
+	Error           string    `json:"error"`
+	Name            string    `json:"name"`
+	Path            string    `json:"path"`
+	PhasesCompleted *[]string `json:"phases_completed,omitempty"`
+}
+
 // CityPatchInputBody defines model for CityPatchInputBody.
 type CityPatchInputBody struct {
 	// Suspended Whether the city is suspended.
 	Suspended *bool `json:"suspended,omitempty"`
+}
+
+// CityReadyPayload defines model for CityReadyPayload.
+type CityReadyPayload struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
 }
 
 // ConfigAgentResponse defines model for ConfigAgentResponse.
@@ -3664,6 +3687,84 @@ func (t *EventPayload) FromBoundEventPayload(v BoundEventPayload) error {
 
 // MergeBoundEventPayload performs a merge with any union data inside the EventPayload, using the provided BoundEventPayload
 func (t *EventPayload) MergeBoundEventPayload(v BoundEventPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsCityCreatedPayload returns the union data inside the EventPayload as a CityCreatedPayload
+func (t EventPayload) AsCityCreatedPayload() (CityCreatedPayload, error) {
+	var body CityCreatedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromCityCreatedPayload overwrites any union data inside the EventPayload as the provided CityCreatedPayload
+func (t *EventPayload) FromCityCreatedPayload(v CityCreatedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeCityCreatedPayload performs a merge with any union data inside the EventPayload, using the provided CityCreatedPayload
+func (t *EventPayload) MergeCityCreatedPayload(v CityCreatedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsCityInitFailedPayload returns the union data inside the EventPayload as a CityInitFailedPayload
+func (t EventPayload) AsCityInitFailedPayload() (CityInitFailedPayload, error) {
+	var body CityInitFailedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromCityInitFailedPayload overwrites any union data inside the EventPayload as the provided CityInitFailedPayload
+func (t *EventPayload) FromCityInitFailedPayload(v CityInitFailedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeCityInitFailedPayload performs a merge with any union data inside the EventPayload, using the provided CityInitFailedPayload
+func (t *EventPayload) MergeCityInitFailedPayload(v CityInitFailedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsCityReadyPayload returns the union data inside the EventPayload as a CityReadyPayload
+func (t EventPayload) AsCityReadyPayload() (CityReadyPayload, error) {
+	var body CityReadyPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromCityReadyPayload overwrites any union data inside the EventPayload as the provided CityReadyPayload
+func (t *EventPayload) FromCityReadyPayload(v CityReadyPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeCityReadyPayload performs a merge with any union data inside the EventPayload, using the provided CityReadyPayload
+func (t *EventPayload) MergeCityReadyPayload(v CityReadyPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -16164,7 +16265,7 @@ func (r GetV0CitiesResponse) StatusCode() int {
 type PostV0CityResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
-	JSON200                       *CityCreateResponse
+	JSON202                       *CityCreateResponse
 	ApplicationproblemJSONDefault *ErrorModel
 }
 
@@ -21055,12 +21156,12 @@ func ParsePostV0CityResponse(rsp *http.Response) (*PostV0CityResponse, error) {
 	}
 
 	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
 		var dest CityCreateResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
-		response.JSON200 = &dest
+		response.JSON202 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest ErrorModel
