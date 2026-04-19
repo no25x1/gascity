@@ -82,7 +82,8 @@ func TestSlingWithBead(t *testing.T) {
 }
 
 func TestSlingMissingTarget(t *testing.T) {
-	h, state := newSlingTestServer(t); _ = state
+	h, state := newSlingTestServer(t)
+	_ = state
 	body := `{"bead":"abc"}`
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
@@ -92,7 +93,8 @@ func TestSlingMissingTarget(t *testing.T) {
 }
 
 func TestSlingTargetNotFound(t *testing.T) {
-	h, state := newSlingTestServer(t); _ = state
+	h, state := newSlingTestServer(t)
+	_ = state
 	body := `{"target":"nonexistent","bead":"abc"}`
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
@@ -102,7 +104,8 @@ func TestSlingTargetNotFound(t *testing.T) {
 }
 
 func TestSlingMissingBeadAndFormula(t *testing.T) {
-	h, state := newSlingTestServer(t); _ = state
+	h, state := newSlingTestServer(t)
+	_ = state
 	body := `{"target":"myrig/worker"}`
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
@@ -112,7 +115,8 @@ func TestSlingMissingBeadAndFormula(t *testing.T) {
 }
 
 func TestSlingBeadAndFormulaMutuallyExclusive(t *testing.T) {
-	h, state := newSlingTestServer(t); _ = state
+	h, state := newSlingTestServer(t)
+	_ = state
 	body := `{"target":"myrig/worker","bead":"abc","formula":"xyz"}`
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
@@ -122,7 +126,8 @@ func TestSlingBeadAndFormulaMutuallyExclusive(t *testing.T) {
 }
 
 func TestSlingRejectsVarsWithoutFormula(t *testing.T) {
-	h, state := newSlingTestServer(t); _ = state
+	h, state := newSlingTestServer(t)
+	_ = state
 	body := `{"target":"myrig/worker","bead":"BD-42","vars":{"issue":"BD-42"}}`
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
@@ -132,7 +137,8 @@ func TestSlingRejectsVarsWithoutFormula(t *testing.T) {
 }
 
 func TestSlingRejectsScopeWithoutFormula(t *testing.T) {
-	h, state := newSlingTestServer(t); _ = state
+	h, state := newSlingTestServer(t)
+	_ = state
 	body := `{"target":"myrig/worker","bead":"BD-42","scope_kind":"city","scope_ref":"test-city"}`
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
@@ -142,7 +148,8 @@ func TestSlingRejectsScopeWithoutFormula(t *testing.T) {
 }
 
 func TestSlingRejectsPartialScope(t *testing.T) {
-	h, state := newSlingTestServer(t); _ = state
+	h, state := newSlingTestServer(t)
+	_ = state
 	body := `{"target":"myrig/worker","formula":"mol-review","scope_kind":"city"}`
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
