@@ -1827,7 +1827,7 @@ func TestSettingsArgsNonClaude(t *testing.T) {
 	}
 
 	for _, provider := range []string{"codex", "gemini", "cursor", "copilot", "amp", "opencode"} {
-		got := settingsArgs(dir, provider, nil)
+		got := settingsArgs(dir, provider)
 		if got != "" {
 			t.Errorf("settingsArgs(%q) = %q, want empty", provider, got)
 		}

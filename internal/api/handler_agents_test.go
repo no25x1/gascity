@@ -800,10 +800,11 @@ func TestAgentList_BaseOnlyDescendantUsesResolvedCache(t *testing.T) {
 		}
 		return "", os.ErrNotExist
 	}
+	h := newTestCityHandlerWith(t, state, srv)
 
-	req := httptest.NewRequest("GET", "/v0/agents", nil)
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
