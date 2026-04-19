@@ -418,6 +418,12 @@ type BeadCreateInputBody struct {
 	// Labels Bead labels.
 	Labels *[]string `json:"labels,omitempty"`
 
+	// Metadata Metadata key-value pairs to set.
+	Metadata *map[string]string `json:"metadata,omitempty"`
+
+	// Parent Parent bead ID.
+	Parent *string `json:"parent,omitempty"`
+
 	// Priority Bead priority.
 	Priority *int64 `json:"priority,omitempty"`
 
@@ -461,6 +467,9 @@ type BeadUpdateBody struct {
 
 	// Metadata Metadata key-value pairs to set.
 	Metadata *map[string]string `json:"metadata,omitempty"`
+
+	// Parent Parent bead ID. Empty string clears the parent.
+	Parent *string `json:"parent,omitempty"`
 
 	// Priority Bead priority.
 	Priority *int64 `json:"priority,omitempty"`

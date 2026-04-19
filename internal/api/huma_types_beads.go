@@ -47,13 +47,15 @@ type BeadCreateInput struct {
 	CityScope
 	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
 	Body           struct {
-		Rig         string   `json:"rig,omitempty" doc:"Rig name."`
-		Title       string   `json:"title" doc:"Bead title." minLength:"1"`
-		Type        string   `json:"type,omitempty" doc:"Bead type."`
-		Priority    *int     `json:"priority,omitempty" doc:"Bead priority."`
-		Assignee    string   `json:"assignee,omitempty" doc:"Assigned agent."`
-		Description string   `json:"description,omitempty" doc:"Bead description."`
-		Labels      []string `json:"labels,omitempty" doc:"Bead labels."`
+		Rig         string            `json:"rig,omitempty" doc:"Rig name."`
+		Title       string            `json:"title" doc:"Bead title." minLength:"1"`
+		Type        string            `json:"type,omitempty" doc:"Bead type."`
+		Priority    *int              `json:"priority,omitempty" doc:"Bead priority."`
+		Parent      string            `json:"parent,omitempty" doc:"Parent bead ID."`
+		Assignee    string            `json:"assignee,omitempty" doc:"Assigned agent."`
+		Description string            `json:"description,omitempty" doc:"Bead description."`
+		Labels      []string          `json:"labels,omitempty" doc:"Bead labels."`
+		Metadata    map[string]string `json:"metadata,omitempty" doc:"Metadata key-value pairs to set."`
 	}
 }
 
@@ -82,6 +84,7 @@ type beadUpdateBody struct {
 	Status       *string           `json:"status,omitempty" doc:"Bead status."`
 	Type         *string           `json:"type,omitempty" doc:"Bead type."`
 	Priority     *int              `json:"priority,omitempty" doc:"Bead priority."`
+	Parent       *string           `json:"parent,omitempty" doc:"Parent bead ID. Empty string clears the parent."`
 	Assignee     *string           `json:"assignee,omitempty" doc:"Assigned agent."`
 	Description  *string           `json:"description,omitempty" doc:"Bead description."`
 	Labels       []string          `json:"labels,omitempty" doc:"Bead labels."`

@@ -306,9 +306,11 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 		Title:       input.Body.Title,
 		Type:        input.Body.Type,
 		Priority:    input.Body.Priority,
+		ParentID:    input.Body.Parent,
 		Assignee:    assignee,
 		Description: input.Body.Description,
 		Labels:      input.Body.Labels,
+		Metadata:    input.Body.Metadata,
 	})
 	if err != nil {
 		s.idem.unreserve(idemKey)
@@ -413,6 +415,7 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 		Status:       body.Status,
 		Type:         body.Type,
 		Priority:     body.Priority,
+		ParentID:     body.Parent,
 		Description:  body.Description,
 		Labels:       body.Labels,
 		RemoveLabels: body.RemoveLabels,

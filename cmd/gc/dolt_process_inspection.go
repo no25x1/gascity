@@ -287,23 +287,65 @@ func processHasDeletedDataInodes(pid int, dataDir string) bool {
 		return false
 	}
 	if _, err := exec.LookPath("lsof"); err == nil {
-		out, lsofErr := exec.Command("lsof", "-p", strconv.Itoa(pid)).Output()
-		if lsofErr == nil {
-			cleanDataDir := filepath.Clean(dataDir)
-			for _, line := range strings.Split(string(out), "\n") {
-				if !strings.Contains(line, " (deleted)") || !strings.Contains(line, cleanDataDir) {
-					continue
-				}
-				idx := strings.Index(line, cleanDataDir)
-				if idx >= 0 {
-					target := strings.TrimSpace(strings.TrimSuffix(line[idx:], " (deleted)"))
-					if benignManagedDeletedInodeTarget(target) {
-						continue
-					}
-				}
-				return true
+		if lsofReportsDeletedDataInodes(pid, dataDir) {
+			return true
+		}
+	}
+	return false
+}
+
+func lsofReportsDeletedDataInodes(pid int, dataDir string) bool {
+	cleanDataDir := filepath.Clean(dataDir)
+	if out, err := exec.Command("lsof", "-p", strconv.Itoa(pid)).Output(); err == nil {
+		if lsofDeletedSuffixReportsDataInodes(string(out), cleanDataDir) {
+			return true
+		}
+	}
+	if out, err := exec.Command("lsof", "-p", strconv.Itoa(pid), "+L1").Output(); err == nil {
+		if lsofZeroLinkReportsDataInodes(string(out), cleanDataDir) {
+			return true
+		}
+	}
+	return false
+}
+
+func lsofDeletedSuffixReportsDataInodes(out, cleanDataDir string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, " (deleted)") || !strings.Contains(line, cleanDataDir) {
+			continue
+		}
+		idx := strings.Index(line, cleanDataDir)
+		if idx >= 0 {
+			target := strings.TrimSpace(strings.TrimSuffix(line[idx:], " (deleted)"))
+			if benignManagedDeletedInodeTarget(target) {
+				continue
 			}
 		}
+		return true
+	}
+	return false
+}
+
+func lsofZeroLinkReportsDataInodes(out, cleanDataDir string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, cleanDataDir) {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 10 {
+			continue
+		}
+		if fields[7] != "0" {
+			continue
+		}
+		target := strings.Join(fields[9:], " ")
+		if !samePath(target, cleanDataDir) && !strings.HasPrefix(filepath.Clean(target), cleanDataDir+string(filepath.Separator)) {
+			continue
+		}
+		if benignManagedDeletedInodeTarget(target) {
+			continue
+		}
+		return true
 	}
 	return false
 }
