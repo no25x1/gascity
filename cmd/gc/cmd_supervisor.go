@@ -1210,7 +1210,7 @@ func reconcileCities(
 		configRev := config.Revision(fsys.OSFS{}, prov, cfg, path)
 		pokeCh := make(chan struct{}, 1)
 		configDirty := &atomic.Bool{}
-		reloadReqCh := make(chan reloadRequest, 1)
+		reloadReqCh := make(chan reloadRequest)
 		cityCtx, cityCancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
 		mc := &managedCity{name: cityName, cancel: cityCancel, done: done, closer: fr}

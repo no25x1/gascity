@@ -203,13 +203,14 @@ Manual reload reuses the existing config-dirty tick path.
 
 Implementation shape:
 
-1. Add a buffered `reloadReqCh` (size `1`) to the controller/runtime
-   plumbing.
+1. Add an unbuffered `reloadReqCh` to the controller/runtime plumbing so
+   a request is handed directly to the event loop or rejected within the
+   acceptance timeout.
 2. The socket handler validates and attempts to enqueue a reload request
    to `reloadReqCh`.
 3. Acceptance is defined as event-loop registration, not mere channel
    enqueue.
-4. The socket handler waits up to `5s` for the event loop to consume and
+4. The socket handler waits up to `5s` for the event loop to receive and
    register the request.
 5. When the event loop consumes a request:
    - if another manual reload is already active, it replies `busy`

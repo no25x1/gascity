@@ -183,7 +183,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 			if p.ReloadReqCh != nil {
 				return p.ReloadReqCh
 			}
-			return make(chan reloadRequest, 1)
+			return make(chan reloadRequest)
 		}(),
 		pokeCh: func() chan struct{} {
 			if p.PokeCh != nil {

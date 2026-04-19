@@ -711,7 +711,7 @@ func runController(
 	}()
 
 	convergenceReqCh := make(chan convergenceRequest, 16)
-	reloadReqCh := make(chan reloadRequest, 1)
+	reloadReqCh := make(chan reloadRequest)
 	pokeCh := make(chan struct{}, 1)
 	controlDispatcherCh := make(chan struct{}, 1)
 	configDirty := &atomic.Bool{}

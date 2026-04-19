@@ -34,6 +34,7 @@ var (
 	controllerReloadAcceptTimeout = 5 * time.Second
 	sendReloadControlRequestHook  = sendReloadControlRequest
 	reloadUnavailableMessageHook  = reloadUnavailableMessage
+	supervisorAPIBaseURLHook      = supervisorAPIBaseURL
 )
 
 type reloadControlRequest struct {
@@ -197,7 +198,7 @@ func supervisorCityInfo(cityPath string) (api.CityInfo, bool) {
 	if err != nil || !registered || supervisorAliveHook() == 0 {
 		return api.CityInfo{}, false
 	}
-	baseURL, err := supervisorAPIBaseURL()
+	baseURL, err := supervisorAPIBaseURLHook()
 	if err != nil {
 		return api.CityInfo{}, false
 	}
@@ -207,7 +208,7 @@ func supervisorCityInfo(cityPath string) (api.CityInfo, bool) {
 		return api.CityInfo{}, false
 	}
 	for _, city := range cities {
-		if city.Path == entry.Path {
+		if samePath(city.Path, entry.Path) {
 			return city, true
 		}
 	}

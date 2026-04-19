@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,10 +15,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
 func TestCmdReloadApplied(t *testing.T) {
@@ -102,7 +106,7 @@ func TestHandleReloadSocketCmdAsyncAccepted(t *testing.T) {
 	server, client := net.Pipe()
 	defer client.Close() //nolint:errcheck
 
-	reloadReqCh := make(chan reloadRequest, 1)
+	reloadReqCh := make(chan reloadRequest)
 	done := make(chan struct{})
 	go func() {
 		handleReloadSocketCmd(server, `{"wait":false}`, reloadReqCh)
@@ -138,7 +142,7 @@ func TestHandleReloadSocketCmdSyncTimeout(t *testing.T) {
 	server, client := net.Pipe()
 	defer client.Close() //nolint:errcheck
 
-	reloadReqCh := make(chan reloadRequest, 1)
+	reloadReqCh := make(chan reloadRequest)
 	done := make(chan struct{})
 	go func() {
 		handleReloadSocketCmd(server, `{"wait":true,"timeout":"20ms"}`, reloadReqCh)
@@ -175,8 +179,7 @@ func TestHandleReloadSocketCmdBusyOnAcceptTimeout(t *testing.T) {
 	server, client := net.Pipe()
 	defer client.Close() //nolint:errcheck
 
-	reloadReqCh := make(chan reloadRequest, 1)
-	reloadReqCh <- reloadRequest{}
+	reloadReqCh := make(chan reloadRequest)
 
 	done := make(chan struct{})
 	go func() {
@@ -194,6 +197,11 @@ func TestHandleReloadSocketCmdBusyOnAcceptTimeout(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("reload socket handler did not exit")
+	}
+	select {
+	case req := <-reloadReqCh:
+		t.Fatalf("unexpected queued reload request after busy reply: %+v", req)
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 
@@ -350,4 +358,58 @@ func readReloadSocketReply(t *testing.T, conn net.Conn) reloadControlReply {
 		t.Fatalf("decode reply: %v", err)
 	}
 	return reply
+}
+
+func TestSupervisorCityInfoMatchesNormalizedPath(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+
+	realDir := shortSocketTempDir(t, "gc-reload-supervisor-real-")
+	linkDir := filepath.Join(t.TempDir(), "city-link")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(supervisor.RegistryPath()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(realDir, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/cities" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		payload := map[string]any{
+			"items": []api.CityInfo{{
+				Name:   "test",
+				Path:   linkDir,
+				Status: "starting_agents",
+			}},
+		}
+		if err := json.NewEncoder(w).Encode(payload); err != nil {
+			t.Fatalf("encode cities: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	oldAlive := supervisorAliveHook
+	oldBaseURL := supervisorAPIBaseURLHook
+	t.Cleanup(func() {
+		supervisorAliveHook = oldAlive
+		supervisorAPIBaseURLHook = oldBaseURL
+	})
+	supervisorAliveHook = func() int { return 4242 }
+	supervisorAPIBaseURLHook = func() (string, error) { return server.URL, nil }
+
+	info, ok := supervisorCityInfo(realDir)
+	if !ok {
+		t.Fatal("supervisorCityInfo returned ok=false")
+	}
+	if info.Path != linkDir {
+		t.Fatalf("info.Path = %q, want %q", info.Path, linkDir)
+	}
 }
