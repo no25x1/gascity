@@ -108,10 +108,10 @@ func TestHookInjectFormatsOutput(t *testing.T) {
 	if !strings.Contains(out, "gc hook") {
 		t.Errorf("stdout missing 'gc hook' hint: %q", out)
 	}
-	if !strings.Contains(out, "bd update <id> --claim") {
+	if !strings.Contains(out, "gc bd update <id> --claim") {
 		t.Errorf("stdout missing claim command: %q", out)
 	}
-	if !strings.Contains(out, "bd close <id>") {
+	if !strings.Contains(out, "gc bd close <id>") {
 		t.Errorf("stdout missing close command: %q", out)
 	}
 }

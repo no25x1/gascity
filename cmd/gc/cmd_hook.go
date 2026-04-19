@@ -268,9 +268,9 @@ You have pending work. Pick up the next item:
 </work-items>
 
 Use the bead id from the work item:
-- If the item is not assigned to you yet, run `+"`bd update <id> --claim`"+`.
+- If the item is not assigned to you yet, run `+"`gc bd update <id> --claim`"+`.
 - Do the requested work.
-- When done, run `+"`bd close <id>`"+`.
+- When done, run `+"`gc bd close <id>`"+`.
 Run `+"`gc hook`"+` to see the full queue.
 </system-reminder>
 `, normalizedWork)

@@ -52,9 +52,9 @@ metadata before doing anything destructive.
 
 ```bash
 gc prime
-bd prime
-bd show {{issue}}
-bd show {{issue}} --json | jq '.metadata'
+gc bd prime
+gc bd show {{issue}}
+gc bd show {{issue}} --json | jq '.metadata'
 gc mail inbox
 ```
 """
@@ -86,11 +86,11 @@ Ensure there is an isolated worktree for this work item.
 
 ```bash
 git fetch --prune origin
-WORKTREE=$(bd show {{issue}} --json | jq -r '.metadata.work_dir // empty')
+WORKTREE=$(gc bd show {{issue}} --json | jq -r '.metadata.work_dir // empty')
 if [ -z "$WORKTREE" ]; then
   WORKTREE_PATH=$(pwd)/worktrees/{{issue}}
   git worktree add "$WORKTREE_PATH" --detach origin/{{base_branch}}
-  bd update {{issue}} --set-metadata work_dir="$WORKTREE_PATH"
+  gc bd update {{issue}} --set-metadata work_dir="$WORKTREE_PATH"
   WORKTREE="$WORKTREE_PATH"
 fi
 cd "$WORKTREE"
@@ -186,11 +186,11 @@ description = """
 Remove the temporary worktree after the body reaches terminal state.
 
 ```bash
-WORKTREE=$(bd show {{issue}} --json | jq -r '.metadata.work_dir // empty')
+WORKTREE=$(gc bd show {{issue}} --json | jq -r '.metadata.work_dir // empty')
 if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
   git worktree remove --force "$WORKTREE" || rm -rf "$WORKTREE"
 fi
-bd update {{issue}} --unset-metadata work_dir
+gc bd update {{issue}} --unset-metadata work_dir
 ```
 """
 metadata = { "gc.kind" = "cleanup", "gc.scope_ref" = "body", "gc.scope_role" = "teardown" }

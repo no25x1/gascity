@@ -15,19 +15,19 @@ more work arrives.
 
 ```bash
 # Step 1: Check for in-progress work (crash recovery)
-bd list --assignee="$GC_SESSION_NAME" --status=in_progress
+gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress
 
 # Step 2: If nothing in-progress, check for assigned ready work
-bd ready --assignee="$GC_SESSION_NAME"
+gc bd ready --assignee="$GC_SESSION_NAME"
 
 # Step 3: If still nothing, check the pool queue
-bd ready --metadata-field gc.routed_to=$GC_TEMPLATE --unassigned
+gc bd ready --metadata-field gc.routed_to=$GC_TEMPLATE --unassigned
 
 # Step 4: Claim it
-bd update <id> --claim
+gc bd update <id> --claim
 
 # Step 5: Read the bead and check for molecule_id in METADATA
-bd show <id>
+gc bd show <id>
 ```
 
 If nothing is available, run `gc runtime drain-ack` to end your session.
@@ -46,11 +46,11 @@ left off from context (last completed action, git state, bead state).
 
 ## Molecules — STOP, check BEFORE you start working
 
-**CRITICAL:** When you run `bd show` in step 4, look at the METADATA
+**CRITICAL:** When you run `gc bd show` in step 4, look at the METADATA
 section. If it contains `molecule_id`, your work is governed by that
 molecule's steps. Do NOT just read the description and start coding.
 
-Run `bd mol current <molecule-id>` to see your steps:
+Run `gc bd mol current <molecule-id>` to see your steps:
 
 - `[done]` — step is complete
 - `[current]` — step is in progress (you are here)
@@ -58,10 +58,10 @@ Run `bd mol current <molecule-id>` to see your steps:
 - `[blocked]` — step is waiting on dependencies
 
 **Work one step at a time.** For each `[ready]` step:
-1. `bd show <step-id>` — read what to do
+1. `gc bd show <step-id>` — read what to do
 2. Do the work described in that step
-3. `bd close <step-id>` — mark it done
-4. `bd mol current <molecule-id>` — check your position, repeat
+3. `gc bd close <step-id>` — mark it done
+4. `gc bd mol current <molecule-id>` — check your position, repeat
 
 Do NOT read the parent bead description and do everything at once.
 Do NOT skip steps. Do NOT close steps you didn't execute.
@@ -71,24 +71,24 @@ the bead description directly.
 
 ## Your Tools
 
-- `bd ready --assignee="$GC_SESSION_NAME"` — find pre-assigned work
-- `bd ready --metadata-field gc.routed_to=$GC_TEMPLATE --unassigned` — find pool work
-- `bd update <id> --claim` — claim a work item
-- `bd show <id>` — see details of a work item or step
-- `bd mol current <molecule-id>` — show position in molecule workflow
-- `bd mol progress <molecule-id>` — show molecule progress summary
-- `bd close <id>` — mark work or a step as done
+- `gc bd ready --assignee="$GC_SESSION_NAME"` — find pre-assigned work
+- `gc bd ready --metadata-field gc.routed_to=$GC_TEMPLATE --unassigned` — find pool work
+- `gc bd update <id> --claim` — claim a work item
+- `gc bd show <id>` — see details of a work item or step
+- `gc bd mol current <molecule-id>` — show position in molecule workflow
+- `gc bd mol progress <molecule-id>` — show molecule progress summary
+- `gc bd close <id>` — mark work or a step as done
 - `gc mail inbox` — check for messages
 - `gc runtime drain-ack` — end your session (you are ephemeral)
 
 ## How to Work
 
-1. Find work: `bd list --assignee="$GC_SESSION_NAME" --status=in_progress` or `bd ready --assignee="$GC_SESSION_NAME"` or `bd ready --metadata-field gc.routed_to=$GC_TEMPLATE --unassigned`
-2. Claim if unclaimed: `bd update <id> --claim`
-3. **Check for molecule:** `bd show <id>` — look for `molecule_id` in METADATA
-4. **If molecule exists:** `bd mol current <mol-id>` → work each step in order (show → do → close → repeat)
+1. Find work: `gc bd list --assignee="$GC_SESSION_NAME" --status=in_progress` or `gc bd ready --assignee="$GC_SESSION_NAME"` or `gc bd ready --metadata-field gc.routed_to=$GC_TEMPLATE --unassigned`
+2. Claim if unclaimed: `gc bd update <id> --claim`
+3. **Check for molecule:** `gc bd show <id>` — look for `molecule_id` in METADATA
+4. **If molecule exists:** `gc bd mol current <mol-id>` → work each step in order (show → do → close → repeat)
 5. **If no molecule:** execute the work directly from the bead description
-6. When all work is done, close the bead: `bd close <id>`
+6. When all work is done, close the bead: `gc bd close <id>`
 7. **MANDATORY — run this exact command as your final action:**
    ```bash
    gc runtime drain-ack

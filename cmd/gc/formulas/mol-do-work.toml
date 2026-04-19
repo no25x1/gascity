@@ -32,7 +32,7 @@ You have been assigned a work bead. Read it, do the work, and close it.
 
 **1. Read your assignment:**
 ```bash
-bd show {{issue}}
+gc bd show {{issue}}
 ```
 
 Read the bead's title and description carefully. This is your task.
@@ -48,7 +48,7 @@ git commit -m "<type>: <description>"
 
 **3. Close the bead when done:**
 ```bash
-bd update {{issue}} --status=closed --notes "Done: <brief summary of what you did>"
+gc bd update {{issue}} --status=closed --notes "Done: <brief summary of what you did>"
 ```
 
 If you get stuck or need clarification, check your inbox:
