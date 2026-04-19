@@ -1604,18 +1604,23 @@ type OrderResponse struct {
 	Enabled       bool    `json:"enabled"`
 	Exec          *string `json:"exec,omitempty"`
 	Formula       *string `json:"formula,omitempty"`
-	Gate          *string `json:"gate,omitempty"`
-	Interval      *string `json:"interval,omitempty"`
-	Name          string  `json:"name"`
-	On            *string `json:"on,omitempty"`
-	Pool          *string `json:"pool,omitempty"`
-	Rig           *string `json:"rig,omitempty"`
-	Schedule      *string `json:"schedule,omitempty"`
-	ScopedName    string  `json:"scoped_name"`
-	Timeout       *string `json:"timeout,omitempty"`
-	TimeoutMs     int64   `json:"timeout_ms"`
-	Trigger       string  `json:"trigger"`
-	Type          string  `json:"type"`
+
+	// Gate Deprecated compatibility alias for trigger.
+	// Deprecated: this property has been marked as deprecated upstream, but no `x-deprecated-reason` was set
+	Gate       *string `json:"gate,omitempty"`
+	Interval   *string `json:"interval,omitempty"`
+	Name       string  `json:"name"`
+	On         *string `json:"on,omitempty"`
+	Pool       *string `json:"pool,omitempty"`
+	Rig        *string `json:"rig,omitempty"`
+	Schedule   *string `json:"schedule,omitempty"`
+	ScopedName string  `json:"scoped_name"`
+	Timeout    *string `json:"timeout,omitempty"`
+	TimeoutMs  int64   `json:"timeout_ms"`
+
+	// Trigger Canonical trigger type.
+	Trigger *string `json:"trigger,omitempty"`
+	Type    string  `json:"type"`
 }
 
 // OrdersFeedBody defines model for OrdersFeedBody.

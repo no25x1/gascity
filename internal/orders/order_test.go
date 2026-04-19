@@ -95,6 +95,28 @@ interval = "24h"
 	}
 }
 
+func TestParseWithWarnings_TriggerWarnsWhenLegacyGateDiffers(t *testing.T) {
+	a, warnings, err := ParseWithWarnings([]byte(`
+[order]
+formula = "mol-digest-generate"
+trigger = "cron"
+gate = "cooldown"
+schedule = "0 3 * * *"
+`))
+	if err != nil {
+		t.Fatalf("ParseWithWarnings: %v", err)
+	}
+	if a.Trigger != "cron" {
+		t.Fatalf("Trigger = %q, want %q", a.Trigger, "cron")
+	}
+	if len(warnings) != 2 {
+		t.Fatalf("warnings = %v, want 2 warnings", warnings)
+	}
+	if !strings.Contains(strings.Join(warnings, "\n"), `using "order.trigger" and ignoring "order.gate"`) {
+		t.Fatalf("warnings = %v, want explicit trigger/gate conflict warning", warnings)
+	}
+}
+
 func TestValidateCooldown(t *testing.T) {
 	a := Order{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h"}
 	if err := Validate(a); err != nil {

@@ -144,6 +144,36 @@ gate = "cooldown"
 	}
 }
 
+func TestParseWithWarnings_OrderOverrideTriggerWarnsWhenLegacyGateDiffers(t *testing.T) {
+	cfg, warnings, err := ParseWithWarnings([]byte(`
+[workspace]
+name = "test-city"
+
+[orders]
+
+[[orders.overrides]]
+name = "digest"
+trigger = "cron"
+gate = "cooldown"
+schedule = "0 3 * * *"
+`))
+	if err != nil {
+		t.Fatalf("ParseWithWarnings: %v", err)
+	}
+	if len(cfg.Orders.Overrides) != 1 {
+		t.Fatalf("len(overrides) = %d, want 1", len(cfg.Orders.Overrides))
+	}
+	if cfg.Orders.Overrides[0].Trigger == nil || *cfg.Orders.Overrides[0].Trigger != "cron" {
+		t.Fatalf("Trigger = %#v, want cron", cfg.Orders.Overrides[0].Trigger)
+	}
+	if len(warnings) != 2 {
+		t.Fatalf("warnings = %v, want 2 warnings", warnings)
+	}
+	if !strings.Contains(strings.Join(warnings, "\n"), `using "trigger" and ignoring "gate"`) {
+		t.Fatalf("warnings = %v, want explicit trigger/gate conflict warning", warnings)
+	}
+}
+
 func TestParseAgentsNoStartCommand(t *testing.T) {
 	data := []byte(`
 [workspace]

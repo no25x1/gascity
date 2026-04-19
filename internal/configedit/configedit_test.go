@@ -976,11 +976,12 @@ func TestSetOrderOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	if got := string(raw); got != "" && strings.Contains(got, "gate =") {
-		t.Fatalf("city.toml still contains legacy gate key:\n%s", got)
+	got := string(raw)
+	if !strings.Contains(got, `trigger = "cooldown"`) {
+		t.Fatalf("city.toml missing canonical trigger key:\n%s", got)
 	}
-	if !strings.Contains(string(raw), `trigger = "cooldown"`) {
-		t.Fatalf("city.toml missing canonical trigger key:\n%s", string(raw))
+	if !strings.Contains(got, `gate = "cooldown"`) {
+		t.Fatalf("city.toml missing rollback-safe legacy gate key:\n%s", got)
 	}
 
 	cfg := readTOML(t, path)
@@ -1085,11 +1086,11 @@ gate = "cooldown"
 		t.Fatalf("ReadFile: %v", err)
 	}
 	got := string(raw)
-	if strings.Contains(got, "gate =") {
-		t.Fatalf("city.toml still contains legacy gate key:\n%s", got)
-	}
 	if !strings.Contains(got, `trigger = "cooldown"`) {
 		t.Fatalf("city.toml did not preserve normalized trigger:\n%s", got)
+	}
+	if !strings.Contains(got, `gate = "cooldown"`) {
+		t.Fatalf("city.toml did not preserve rollback-safe gate alias:\n%s", got)
 	}
 }
 

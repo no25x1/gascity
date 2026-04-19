@@ -1020,7 +1020,8 @@ type OrderOverride struct {
 	// Enabled overrides whether the order is active.
 	Enabled *bool `toml:"enabled,omitempty"`
 	// Gate is a deprecated compatibility alias for Trigger.
-	// It is normalized away after decode so config writes stay trigger-only.
+	// It is normalized away after decode so runtime code can stay trigger-only;
+	// writers that need rollback-safe persistence can mirror Trigger back here.
 	Gate *string `toml:"gate,omitempty" jsonschema_extras:"deprecated=true"`
 	// Trigger overrides the trigger type.
 	Trigger *string `toml:"trigger,omitempty"`
@@ -1045,7 +1046,8 @@ func normalizeLegacyOrderOverrideAliases(cfg *City) {
 }
 
 // NormalizeLegacyOrderOverrideAlias promotes the deprecated Gate alias onto
-// Trigger when needed and clears Gate so downstream code can stay trigger-only.
+// Trigger when needed and clears Gate so downstream runtime code can stay
+// trigger-only in memory.
 func NormalizeLegacyOrderOverrideAlias(ov *OrderOverride) {
 	if ov == nil {
 		return
@@ -1054,6 +1056,26 @@ func NormalizeLegacyOrderOverrideAlias(ov *OrderOverride) {
 		ov.Trigger = ov.Gate
 	}
 	ov.Gate = nil
+}
+
+func orderOverrideConflictWarnings(cfg *City, source string) []string {
+	var warnings []string
+	for _, ov := range cfg.Orders.Overrides {
+		if ov.Trigger == nil || ov.Gate == nil || *ov.Trigger == *ov.Gate {
+			continue
+		}
+		scope := fmt.Sprintf("order override %q", ov.Name)
+		if ov.Rig != "" {
+			scope = fmt.Sprintf(`order override %q for rig %q`, ov.Name, ov.Rig)
+		}
+		warnings = append(warnings,
+			fmt.Sprintf(
+				`%s: %s sets both "trigger"=%q and deprecated "gate"=%q; using "trigger" and ignoring "gate"`,
+				source, scope, *ov.Trigger, *ov.Gate,
+			),
+		)
+	}
+	return warnings
 }
 
 // MaxTimeoutDuration parses MaxTimeout as a Go duration.
@@ -2612,6 +2634,7 @@ func parseCityWithWarnings(data []byte, source string) (*City, toml.MetaData, []
 	if err != nil {
 		return nil, md, nil, fmt.Errorf("parsing config: %w", err)
 	}
+	warnings := append([]string(nil), orderOverrideConflictWarnings(&cfg, source)...)
 	normalizeAgentDefaultsAlias(&cfg, md)
 	normalizeLegacyOrderOverrideAliases(&cfg)
 	NormalizeSessionSleepFields(&cfg)
@@ -2619,7 +2642,7 @@ func parseCityWithWarnings(data []byte, source string) (*City, toml.MetaData, []
 	if cfg.Daemon.GraphWorkflows && !cfg.Daemon.FormulaV2 {
 		cfg.Daemon.FormulaV2 = true
 	}
-	warnings := CheckUndecodedKeys(md, source)
+	warnings = append(warnings, CheckUndecodedKeys(md, source)...)
 	return &cfg, md, warnings, nil
 }
 

@@ -47,3 +47,30 @@ func TestAgentCreateSpecMarksFieldsRequired(t *testing.T) {
 		t.Errorf("agent create schema does not mark provider as required; required=%v", required)
 	}
 }
+
+func TestOrderResponseSpecKeepsLegacyGateDeprecatedAndTriggerOptional(t *testing.T) {
+	spec := readCommittedOpenAPISpec(t)
+
+	components, _ := spec["components"].(map[string]any)
+	schemas, _ := components["schemas"].(map[string]any)
+	schema, ok := schemas["OrderResponse"].(map[string]any)
+	if !ok {
+		t.Fatal("OrderResponse schema not found")
+	}
+
+	required, _ := schema["required"].([]any)
+	for _, r := range required {
+		if s, ok := r.(string); ok && s == "trigger" {
+			t.Fatalf("OrderResponse.trigger should remain optional for old-server compatibility; required=%v", required)
+		}
+	}
+
+	properties, _ := schema["properties"].(map[string]any)
+	gate, ok := properties["gate"].(map[string]any)
+	if !ok {
+		t.Fatal("OrderResponse.gate property not found")
+	}
+	if deprecated, _ := gate["deprecated"].(bool); !deprecated {
+		t.Fatalf("OrderResponse.gate should be marked deprecated; property=%v", gate)
+	}
+}

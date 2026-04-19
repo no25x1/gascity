@@ -1272,7 +1272,7 @@
         },
         "gate": {
           "type": "string",
-          "description": "Gate is a deprecated compatibility alias for Trigger.\nIt is normalized away after decode so config writes stay trigger-only.",
+          "description": "Gate is a deprecated compatibility alias for Trigger.\nIt is normalized away after decode so runtime code can stay trigger-only;\nwriters that need rollback-safe persistence can mirror Trigger back here.",
           "deprecated": true
         },
         "trigger": {

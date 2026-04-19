@@ -709,7 +709,10 @@ func normalizeOrderOverride(ov config.OrderOverride) (config.OrderOverride, erro
 	if ov.Name == "" {
 		return config.OrderOverride{}, fmt.Errorf("order override: name is required")
 	}
-	config.NormalizeLegacyOrderOverrideAlias(&ov)
+	if ov.Trigger == nil {
+		ov.Trigger = ov.Gate
+	}
+	ensureRollbackCompatibleOrderOverride(&ov)
 	return ov, nil
 }
 
@@ -738,6 +741,15 @@ func mergeOrderOverride(dst *config.OrderOverride, patch config.OrderOverride) {
 	if patch.Timeout != nil {
 		dst.Timeout = patch.Timeout
 	}
+	ensureRollbackCompatibleOrderOverride(dst)
+}
+
+func ensureRollbackCompatibleOrderOverride(ov *config.OrderOverride) {
+	if ov == nil || ov.Trigger == nil {
+		return
+	}
+	trigger := *ov.Trigger
+	ov.Gate = &trigger
 }
 
 // DeleteOrderOverride removes an order override by name and rig.

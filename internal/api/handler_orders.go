@@ -23,8 +23,8 @@ type orderResponse struct {
 	ScopedName    string `json:"scoped_name"`
 	Description   string `json:"description,omitempty"`
 	Type          string `json:"type"`
-	Gate          string `json:"gate,omitempty"`
-	Trigger       string `json:"trigger"`
+	Gate          string `json:"gate,omitempty" deprecated:"true" doc:"Deprecated compatibility alias for trigger."`
+	Trigger       string `json:"trigger" required:"false" doc:"Canonical trigger type."`
 	Interval      string `json:"interval,omitempty"`
 	Schedule      string `json:"schedule,omitempty"`
 	Check         string `json:"check,omitempty"`

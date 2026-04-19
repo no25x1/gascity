@@ -4000,6 +4000,8 @@
             "type": "string"
           },
           "gate": {
+            "deprecated": true,
+            "description": "Deprecated compatibility alias for trigger.",
             "type": "string"
           },
           "interval": {
@@ -4031,6 +4033,7 @@
             "type": "integer"
           },
           "trigger": {
+            "description": "Canonical trigger type.",
             "type": "string"
           },
           "type": {
@@ -4041,7 +4044,6 @@
           "name",
           "scoped_name",
           "type",
-          "trigger",
           "timeout_ms",
           "enabled",
           "capture_output"
