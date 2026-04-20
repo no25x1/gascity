@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -50,7 +52,7 @@ func setupConvergenceRuntime(t *testing.T) (*CityRuntime, *beads.MemStore) {
 
 	// Initialize convergence handler (mimics initConvergenceHandler).
 	adapter := newConvergenceStoreAdapter(store, []string{sharedTestFormulaDir})
-	emitter := &convergenceEventEmitter{rec: cr.rec}
+	emitter := newConvergenceEventEmitter(cr.rec, cr.stderr)
 	cr.convStoreAdapter = adapter
 	cr.convHandler = &convergence.Handler{
 		Store:   adapter,
@@ -573,5 +575,126 @@ func TestConvergenceIndex_MaintainedOnStateTransitions(t *testing.T) {
 	_ = adapter.CloseBead(b.ID)
 	if _, ok := adapter.activeIndex[b.ID]; ok {
 		t.Error("bead should not be in index after CloseBead")
+	}
+}
+
+type blockingRecorder struct {
+	mu        sync.Mutex
+	events    []events.Event
+	entered   chan events.Event
+	completed chan events.Event
+	release   chan struct{}
+}
+
+func (r *blockingRecorder) Record(e events.Event) {
+	r.mu.Lock()
+	r.events = append(r.events, e)
+	r.mu.Unlock()
+	r.entered <- e
+	<-r.release
+	r.completed <- e
+}
+
+func (r *blockingRecorder) recordedCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.events)
+}
+
+func TestConvergenceEventEmitter_EmitIsNonBlockingWhileRecorderIsBusy(t *testing.T) {
+	rec := &blockingRecorder{
+		entered:   make(chan events.Event, 4),
+		completed: make(chan events.Event, 4),
+		release:   make(chan struct{}),
+	}
+	stderr := &bytes.Buffer{}
+	emitter := newConvergenceEventEmitterWithQueueSize(rec, stderr, 1)
+
+	start := time.Now()
+	emitter.Emit(convergence.EventCreated, convergence.EventIDCreated("root-1"), "root-1", json.RawMessage(`{"ok":true}`), false)
+
+	select {
+	case <-rec.entered:
+	case <-time.After(time.Second):
+		t.Fatal("expected recorder to receive event")
+	}
+
+	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		t.Fatalf("Emit blocked for %s, want non-blocking delivery", elapsed)
+	}
+
+	close(rec.release)
+
+	select {
+	case <-rec.completed:
+	case <-time.After(time.Second):
+		t.Fatal("expected recorder to finish after release")
+	}
+
+	if got := rec.recordedCount(); got != 1 {
+		t.Fatalf("recorded count = %d, want 1", got)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty for successful delivery", stderr.String())
+	}
+}
+
+func TestConvergenceEventEmitter_LogsDroppedEventsWhenQueueIsFull(t *testing.T) {
+	rec := &blockingRecorder{
+		entered:   make(chan events.Event, 8),
+		completed: make(chan events.Event, 8),
+		release:   make(chan struct{}),
+	}
+	stderr := &bytes.Buffer{}
+	emitter := newConvergenceEventEmitterWithQueueSize(rec, stderr, 1)
+
+	emitter.Emit(convergence.EventCreated, convergence.EventIDCreated("root-1"), "root-1", json.RawMessage(`{"seq":1}`), false)
+
+	select {
+	case <-rec.entered:
+	case <-time.After(time.Second):
+		t.Fatal("expected first event to reach recorder")
+	}
+
+	emitter.Emit(convergence.EventIteration, convergence.EventIDIteration("root-1", 2), "root-1", json.RawMessage(`{"seq":2}`), false)
+
+	if got := stderr.String(); !strings.Contains(got, "dropping convergence event") {
+		t.Fatalf("stderr = %q, want drop warning", got)
+	}
+
+	close(rec.release)
+
+	select {
+	case <-rec.completed:
+	case <-time.After(time.Second):
+		t.Fatal("expected recorded event to complete")
+	}
+
+	if got := rec.recordedCount(); got != 1 {
+		t.Fatalf("recorded count = %d, want 1", got)
+	}
+}
+
+func TestConvergenceEventEmitter_LogsMissingPayload(t *testing.T) {
+	rec := &blockingRecorder{
+		entered:   make(chan events.Event, 1),
+		completed: make(chan events.Event, 1),
+		release:   make(chan struct{}),
+	}
+	stderr := &bytes.Buffer{}
+	emitter := newConvergenceEventEmitterWithQueueSize(rec, stderr, 1)
+
+	emitter.Emit(convergence.EventCreated, convergence.EventIDCreated("root-1"), "root-1", nil, false)
+
+	if got := stderr.String(); !strings.Contains(got, "missing payload") {
+		t.Fatalf("stderr = %q, want missing payload warning", got)
+	}
+	select {
+	case <-rec.entered:
+		t.Fatal("recorder should not be called when payload is missing")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if got := rec.recordedCount(); got != 0 {
+		t.Fatalf("recorded count = %d, want 0", got)
 	}
 }

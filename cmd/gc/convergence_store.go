@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -350,19 +351,84 @@ func extractParentIDFromKey(key string) string {
 	return rest[:idx]
 }
 
+const convergenceEventQueueDepth = 32
+
 // convergenceEventEmitter wraps events.Recorder to implement convergence.EventEmitter.
+// It limits the number of in-flight record operations so convergence state
+// transitions do not block on recorder latency.
 type convergenceEventEmitter struct {
-	rec events.Recorder
+	rec    events.Recorder
+	stderr io.Writer
+	tokens chan struct{}
 }
 
 var _ convergence.EventEmitter = (*convergenceEventEmitter)(nil)
 
+func newConvergenceEventEmitter(rec events.Recorder, stderr io.Writer) *convergenceEventEmitter {
+	return newConvergenceEventEmitterWithQueueSize(rec, stderr, convergenceEventQueueDepth)
+}
+
+func newConvergenceEventEmitterWithQueueSize(rec events.Recorder, stderr io.Writer, queueDepth int) *convergenceEventEmitter {
+	if queueDepth <= 0 {
+		queueDepth = convergenceEventQueueDepth
+	}
+	return &convergenceEventEmitter{
+		rec:    rec,
+		stderr: stderr,
+		tokens: make(chan struct{}, queueDepth),
+	}
+}
+
 func (e *convergenceEventEmitter) Emit(eventType, eventID, beadID string, payload json.RawMessage, _ bool) {
-	e.rec.Record(events.Event{
+	if e == nil {
+		return
+	}
+	if e.rec == nil {
+		e.logDeliveryFailure(eventType, eventID, beadID, "no recorder configured")
+		return
+	}
+	if payload == nil {
+		e.logDeliveryFailure(eventType, eventID, beadID, "missing payload")
+		return
+	}
+
+	evt := events.Event{
 		Type:    eventType,
 		Actor:   "convergence",
 		Subject: beadID,
 		Message: string(payload),
-	})
-	_ = eventID // used for deduplication by consumers, not the recorder
+	}
+	select {
+	case e.tokens <- struct{}{}:
+		go e.deliver(evt)
+	default:
+		e.logDeliveryFailure(eventType, eventID, beadID, "delivery limit reached")
+	}
+}
+
+func (e *convergenceEventEmitter) deliver(evt events.Event) {
+	defer func() {
+		<-e.tokens
+	}()
+	defer func() {
+		if r := recover(); r != nil {
+			e.logf("error delivering %s for bead %s: panic: %v", evt.Type, evt.Subject, r)
+		}
+	}()
+	e.rec.Record(evt)
+}
+
+func (e *convergenceEventEmitter) logDeliveryFailure(eventType, eventID, beadID, reason string) {
+	if eventID != "" {
+		e.logf("dropping convergence event %s (%s) for bead %s: %s", eventType, eventID, beadID, reason)
+		return
+	}
+	e.logf("dropping convergence event %s for bead %s: %s", eventType, beadID, reason)
+}
+
+func (e *convergenceEventEmitter) logf(format string, args ...any) {
+	if e.stderr == nil {
+		return
+	}
+	fmt.Fprintf(e.stderr, "gc convergence: "+format+"\n", args...) //nolint:errcheck
 }

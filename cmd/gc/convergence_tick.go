@@ -35,7 +35,7 @@ func (cr *CityRuntime) initConvergenceHandler() {
 		return
 	}
 	adapter := newConvergenceStoreAdapter(store, cr.cfg.FormulaLayers.City)
-	emitter := &convergenceEventEmitter{rec: cr.rec}
+	emitter := newConvergenceEventEmitter(cr.rec, cr.stderr)
 	cr.convStoreAdapter = adapter
 	cr.convHandler = &convergence.Handler{
 		Store:   adapter,
