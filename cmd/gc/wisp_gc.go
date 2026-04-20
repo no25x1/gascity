@@ -98,14 +98,16 @@ func collectExpiredBeadClosure(store beads.Store, rootID string) ([]string, erro
 		return nil, fmt.Errorf("bead store unavailable")
 	}
 	rootOwned := make([]string, 0, 4)
-	if related, err := store.List(beads.ListQuery{
+	related, err := store.List(beads.ListQuery{
 		Metadata:      map[string]string{"gc.root_bead_id": rootID},
 		IncludeClosed: true,
-	}); err == nil {
-		for _, bead := range related {
-			if bead.ID != "" && bead.ID != rootID {
-				rootOwned = append(rootOwned, bead.ID)
-			}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list workflow-owned beads for %s: %w", rootID, err)
+	}
+	for _, bead := range related {
+		if bead.ID != "" && bead.ID != rootID {
+			rootOwned = append(rootOwned, bead.ID)
 		}
 	}
 
