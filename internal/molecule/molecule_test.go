@@ -806,6 +806,58 @@ func TestInstantiateFragmentRecordsParentChildDeps(t *testing.T) {
 	}
 }
 
+func TestInstantiateFragmentPrefersRecipeParentOverExternalParent(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:    "Workflow root",
+		Type:     "task",
+		Priority: priorityPtr(1),
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	externalParent, err := store.Create(beads.Bead{
+		Title: "External parent",
+		Type:  "task",
+	})
+	if err != nil {
+		t.Fatalf("create external parent: %v", err)
+	}
+
+	recipe := &formula.FragmentRecipe{
+		Steps: []formula.RecipeStep{
+			{ID: "frag.scope", Title: "Scope", Type: "task"},
+			{ID: "frag.scope.child", Title: "Child", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "frag.scope.child", DependsOnID: "frag.scope", Type: "parent-child"},
+		},
+	}
+
+	result, err := InstantiateFragment(context.Background(), store, recipe, FragmentOptions{
+		RootID: root.ID,
+		ExternalDeps: []ExternalDep{
+			{
+				StepID:      "frag.scope.child",
+				DependsOnID: externalParent.ID,
+				Type:        "parent-child",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("InstantiateFragment: %v", err)
+	}
+
+	child, err := store.Get(result.IDMapping["frag.scope.child"])
+	if err != nil {
+		t.Fatalf("Get(child): %v", err)
+	}
+	if child.ParentID != result.IDMapping["frag.scope"] {
+		t.Fatalf("child.ParentID = %q, want recipe parent %q", child.ParentID, result.IDMapping["frag.scope"])
+	}
+}
+
 func TestBuildFragmentApplyPlan_UsesTracksOwnershipEdges(t *testing.T) {
 	store := beads.NewMemStore()
 	root, err := store.Create(beads.Bead{

@@ -622,12 +622,12 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 			if dep.StepID == step.ID && dep.Type == "parent-child" {
 				if parentBeadID, ok := idMapping[dep.DependsOnID]; ok {
 					b.ParentID = parentBeadID
+					break
 				}
-				break
 			}
 		}
 		for _, dep := range externalDepsByStep[step.ID] {
-			if dep.Type == "parent-child" && dep.DependsOnID != "" {
+			if b.ParentID == "" && dep.Type == "parent-child" && dep.DependsOnID != "" {
 				b.ParentID = dep.DependsOnID
 				break
 			}
