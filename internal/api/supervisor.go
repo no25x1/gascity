@@ -262,32 +262,27 @@ func (sm *SupervisorMux) buildMultiplexer() *events.Multiplexer {
 func (sm *SupervisorMux) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	cities := sm.resolver.ListCities()
 	var running int
-	// Prefer a running city for startup info so the supervisor health
-	// surface reflects live lifecycle state in multi-city deployments.
+	// Use the first city for startup info (single-city deployments).
 	var startup map[string]any
-	var fallback map[string]any
 	for _, c := range cities {
 		if c.Running {
 			running++
-			if startup == nil {
+		}
+		if startup == nil {
+			if c.Running {
 				startup = map[string]any{
 					"ready":            true,
 					"phase":            "running",
 					"phases_completed": allStartupPhases(),
 				}
-			}
-			continue
-		}
-		if fallback == nil {
-			fallback = map[string]any{
-				"ready":            false,
-				"phase":            c.Status,
-				"phases_completed": c.PhasesCompleted,
+			} else {
+				startup = map[string]any{
+					"ready":            false,
+					"phase":            c.Status,
+					"phases_completed": c.PhasesCompleted,
+				}
 			}
 		}
-	}
-	if startup == nil {
-		startup = fallback
 	}
 	resp := map[string]any{
 		"status":         "ok",
