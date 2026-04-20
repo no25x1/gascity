@@ -310,26 +310,37 @@ type bdIssue struct {
 // parseIssuesTolerant unmarshals a JSON array of bdIssue objects, skipping
 // any entries that fail to parse (e.g. corrupt metadata with non-string values).
 // This prevents a single bad bead from breaking all list operations.
-func parseIssuesTolerant(data []byte) []bdIssue {
+func parseIssuesTolerant(data []byte) ([]bdIssue, error) {
 	var raw []json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil
+		return nil, fmt.Errorf("parsing JSON: %w", err)
 	}
 	result := make([]bdIssue, 0, len(raw))
+	var parseErr error
 	for _, r := range raw {
 		var issue bdIssue
 		if err := json.Unmarshal(r, &issue); err != nil {
-			// Skip corrupt entry — log the ID if we can extract it.
 			var peek struct {
 				ID string `json:"id"`
 			}
 			_ = json.Unmarshal(r, &peek)
-			fmt.Fprintf(os.Stderr, "beads: skipping corrupt bead %q: %v\n", peek.ID, err)
+			if peek.ID == "" {
+				peek.ID = "<unknown>"
+			}
+			parseErr = errors.Join(parseErr, fmt.Errorf("%s: %w", peek.ID, err))
 			continue
 		}
 		result = append(result, issue)
 	}
-	return result
+	if parseErr != nil {
+		skipped := len(raw) - len(result)
+		beadNoun := "beads"
+		if skipped == 1 {
+			beadNoun = "bead"
+		}
+		return result, fmt.Errorf("skipped %d corrupt %s: %w", skipped, beadNoun, parseErr)
+	}
+	return result, nil
 }
 
 // toBead converts a bdIssue to a Gas City Bead. CreatedAt is truncated to
@@ -586,12 +597,15 @@ func (s *BdStore) CloseAll(ids []string, metadata map[string]string) (int, error
 	if err != nil {
 		// Fall back to individual closes on batch failure.
 		closed := 0
+		fallbackErr := fmt.Errorf("bd close batch: %w", err)
 		for _, id := range ids {
 			if closeErr := s.Close(id); closeErr == nil {
 				closed++
+			} else {
+				fallbackErr = errors.Join(fallbackErr, closeErr)
 			}
 		}
-		return closed, nil
+		return closed, fallbackErr
 	}
 	return len(ids), nil
 }
@@ -671,12 +685,16 @@ func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bd list: %w", err)
 	}
-	issues := parseIssuesTolerant(extractJSON(out))
+	issues, parseErr := parseIssuesTolerant(extractJSON(out))
 	result := make([]Bead, len(issues))
 	for i := range issues {
 		result[i] = issues[i].toBead()
 	}
-	return applyListQuery(result, query), nil
+	filtered := applyListQuery(result, query)
+	if parseErr != nil {
+		return filtered, fmt.Errorf("bd list: %w", parseErr)
+	}
+	return filtered, nil
 }
 
 // ListOpen returns non-closed beads via bd list. Pass a status to filter further.
@@ -739,7 +757,7 @@ func (s *BdStore) Ready() ([]Bead, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bd ready: %w", err)
 	}
-	issues := parseIssuesTolerant(extractJSON(out))
+	issues, parseErr := parseIssuesTolerant(extractJSON(out))
 	result := make([]Bead, 0, len(issues))
 	for i := range issues {
 		bead := issues[i].toBead()
@@ -747,6 +765,9 @@ func (s *BdStore) Ready() ([]Bead, error) {
 			continue
 		}
 		result = append(result, bead)
+	}
+	if parseErr != nil {
+		return result, fmt.Errorf("bd ready: %w", parseErr)
 	}
 	return result, nil
 }

@@ -451,6 +451,46 @@ func TestBdStoreCloseAllReturnsMetadataWriteFailure(t *testing.T) {
 	}
 }
 
+func TestBdStoreCloseAllReturnsPartialCountAndErrorOnFallbackFailure(t *testing.T) {
+	batchErr := errors.New("batch close failed")
+	individualErr := errors.New("single close failed")
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd close --json bd-1 bd-2`: {
+			err: batchErr,
+		},
+		`bd close --json bd-1`: {
+			out: []byte(`[{"id":"bd-1","title":"one","status":"closed","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`),
+		},
+		`bd close --json bd-2`: {
+			err: individualErr,
+		},
+		`bd show --json bd-2`: {
+			out: []byte(`[{"id":"bd-2","title":"two","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`),
+		},
+	})
+
+	s := beads.NewBdStore("/city", runner)
+	closed, err := s.CloseAll([]string{"bd-1", "bd-2"}, nil)
+	if closed != 1 {
+		t.Fatalf("closed = %d, want 1", closed)
+	}
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, batchErr) {
+		t.Fatalf("error = %v, want wrapped batch error", err)
+	}
+	if !errors.Is(err, individualErr) {
+		t.Fatalf("error = %v, want wrapped individual error", err)
+	}
+	if !strings.Contains(err.Error(), `closing bead "bd-2"`) {
+		t.Fatalf("error = %q, want failing bead context", err)
+	}
+}
+
 // --- List ---
 
 func TestBdStoreList(t *testing.T) {
@@ -506,6 +546,35 @@ func TestBdStoreListError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "bd list") {
 		t.Errorf("error = %q, want to contain 'bd list'", err)
+	}
+}
+
+func TestBdStoreListReturnsPartialResultsAndErrorOnCorruptEntries(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd list --json --include-infra --include-gates --limit 0`: {
+			out: []byte(`[
+				{"id":"bd-good","title":"good","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"},
+				{"id":"bd-bad","title":"bad","status":"open","issue_type":"task","created_at":"not-a-time"}
+			]`),
+		},
+	})
+
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.ListOpen()
+	if len(got) != 1 || got[0].ID != "bd-good" {
+		t.Fatalf("ListOpen() = %v, want only bd-good", got)
+	}
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "skipped 1 corrupt bead") {
+		t.Fatalf("error = %q, want skipped-entry summary", err)
+	}
+	if !strings.Contains(err.Error(), "bd-bad") {
+		t.Fatalf("error = %q, want corrupt bead id", err)
 	}
 }
 
@@ -601,6 +670,26 @@ func TestBdStoreReadyError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "bd ready") {
 		t.Errorf("error = %q, want to contain 'bd ready'", err)
+	}
+}
+
+func TestBdStoreReadyReturnsParseErrorOnMalformedJSON(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd ready --json --limit 0`: {
+			out: []byte(`{not json`),
+		},
+	})
+
+	s := beads.NewBdStore("/city", runner)
+	_, err := s.Ready()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "parsing JSON") {
+		t.Fatalf("error = %q, want parsing JSON context", err)
 	}
 }
 

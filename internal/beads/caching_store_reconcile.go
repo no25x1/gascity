@@ -79,40 +79,64 @@ func (c *CachingStore) runReconciliation() {
 
 	freshByID := make(map[string]Bead, len(fresh))
 	for _, b := range fresh {
-		freshByID[b.ID] = b
+		freshByID[b.ID] = cloneBead(b)
+	}
+
+	depMap, depErr := c.fetchDepsForIDs(beadIDs(freshByID))
+	if depErr != nil {
+		c.recordProblem("refresh dep cache during reconcile", depErr)
 	}
 
 	c.mu.Lock()
 
 	var adds, removes, updates int64
-	var changedIDs []string
+	notifications := make([]cacheNotification, 0, len(freshByID))
+	nextDeps := make(map[string][]Dep, len(freshByID))
 
-	// Detect new and updated.
-	for id, fb := range freshByID {
+	for id, freshBead := range freshByID {
+		if depErr == nil {
+			nextDeps[id] = cloneDeps(depMap[id])
+		} else if deps, ok := c.deps[id]; ok {
+			nextDeps[id] = cloneDeps(deps)
+		}
+
 		old, exists := c.beads[id]
-		if !exists {
-			c.beads[id] = cloneBead(fb)
+		switch {
+		case !exists:
 			adds++
-			changedIDs = append(changedIDs, id)
-			c.notifyChangeLocked("bead.created", fb)
-		} else if beadChanged(old, fb) {
-			c.beads[id] = cloneBead(fb)
+			notifications = append(notifications, cacheNotification{
+				eventType: "bead.created",
+				bead:      cloneBead(freshBead),
+			})
+		case beadChanged(old, freshBead):
 			updates++
-			changedIDs = append(changedIDs, id)
-			c.notifyChangeLocked("bead.updated", fb)
+			notifications = append(notifications, cacheNotification{
+				eventType: "bead.updated",
+				bead:      cloneBead(freshBead),
+			})
+		case depErr == nil && depsChanged(c.deps[id], depMap[id]):
+			updates++
+			notifications = append(notifications, cacheNotification{
+				eventType: "bead.updated",
+				bead:      cloneBead(freshBead),
+			})
 		}
 	}
 
-	// Detect removed.
 	for id, old := range c.beads {
 		if _, exists := freshByID[id]; !exists {
-			delete(c.beads, id)
-			delete(c.deps, id)
 			removes++
-			c.notifyChangeLocked("bead.closed", old)
+			closed := cloneBead(old)
+			closed.Status = "closed"
+			notifications = append(notifications, cacheNotification{
+				eventType: "bead.closed",
+				bead:      closed,
+			})
 		}
 	}
 
+	c.beads = freshByID
+	c.deps = nextDeps
 	c.syncFailures = 0
 	if c.state == cacheDegraded {
 		c.state = cacheLive
@@ -128,21 +152,5 @@ func (c *CachingStore) runReconciliation() {
 	c.markFreshLocked(now)
 	c.updateStatsLocked()
 	c.mu.Unlock()
-
-	if len(changedIDs) == 0 {
-		return
-	}
-
-	depMap, depErr := c.fetchDepsForIDs(changedIDs)
-	if depErr != nil {
-		c.recordProblem("refresh dep cache after reconcile", depErr)
-		return
-	}
-
-	c.mu.Lock()
-	for id, deps := range depMap {
-		c.deps[id] = cloneDeps(deps)
-	}
-	c.updateStatsLocked()
-	c.mu.Unlock()
+	c.notifyChanges(notifications)
 }

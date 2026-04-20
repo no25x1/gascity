@@ -3,6 +3,7 @@ package beads
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 )
@@ -94,41 +95,54 @@ func (c *CachingStore) notifyChange(eventType string, b Bead) {
 	c.onChange(eventType, b.ID, payload)
 }
 
-func (c *CachingStore) notifyChangeLocked(eventType string, b Bead) {
-	if c.onChange == nil {
-		return
+type cacheNotification struct {
+	eventType string
+	bead      Bead
+}
+
+func (c *CachingStore) notifyChanges(notifications []cacheNotification) {
+	for _, notification := range notifications {
+		c.notifyChange(notification.eventType, notification.bead)
 	}
-	payload, err := json.Marshal(b)
-	if err != nil {
-		c.recordProblemLocked(fmt.Sprintf("marshal %s notification", eventType), err)
-		return
-	}
-	// Unlock before callback to avoid holding the lock during event recording.
-	c.mu.Unlock()
-	c.onChange(eventType, b.ID, payload)
-	c.mu.Lock()
 }
 
 func beadChanged(old, fresh Bead) bool {
-	if old.Status != fresh.Status {
+	if old.ID != fresh.ID ||
+		old.Title != fresh.Title ||
+		old.Status != fresh.Status ||
+		old.Type != fresh.Type ||
+		!intPtrEqual(old.Priority, fresh.Priority) ||
+		!old.CreatedAt.Equal(fresh.CreatedAt) ||
+		old.Assignee != fresh.Assignee ||
+		old.From != fresh.From ||
+		old.ParentID != fresh.ParentID ||
+		old.Ref != fresh.Ref ||
+		old.Description != fresh.Description {
 		return true
 	}
-	if old.Title != fresh.Title {
+	if !maps.Equal(old.Metadata, fresh.Metadata) {
 		return true
 	}
-	if old.Assignee != fresh.Assignee {
+	if !slices.Equal(old.Labels, fresh.Labels) {
 		return true
 	}
-	if old.Description != fresh.Description {
+	if !slices.Equal(old.Needs, fresh.Needs) {
 		return true
 	}
-	if len(old.Metadata) != len(fresh.Metadata) {
+	return !slices.Equal(old.Dependencies, fresh.Dependencies)
+}
+
+func depsChanged(old, fresh []Dep) bool {
+	return !slices.Equal(old, fresh)
+}
+
+func intPtrEqual(left, right *int) bool {
+	switch {
+	case left == nil && right == nil:
 		return true
+	case left == nil || right == nil:
+		return false
+	default:
+		return *left == *right
 	}
-	for k, v := range old.Metadata {
-		if fresh.Metadata[k] != v {
-			return true
-		}
-	}
-	return !slices.Equal(old.Labels, fresh.Labels)
 }

@@ -2,6 +2,7 @@ package beads
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -37,6 +38,132 @@ func TestCachingStoreRunReconciliationDetectsLabelContentChanges(t *testing.T) {
 	}
 	if len(got.Labels) != 1 || got.Labels[0] != "new" {
 		t.Fatalf("Labels = %v, want [new]", got.Labels)
+	}
+}
+
+func TestCachingStoreRunReconciliationDetectsPriorityChanges(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	initialPriority := 1
+	bead, err := backing.Create(Bead{Title: "Task", Priority: &initialPriority})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	updatedPriority := 2
+	if err := backing.Update(bead.ID, UpdateOpts{Priority: &updatedPriority}); err != nil {
+		t.Fatalf("Update backing: %v", err)
+	}
+
+	cache.runReconciliation()
+
+	got, err := cache.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get after reconcile: %v", err)
+	}
+	if got.Priority == nil || *got.Priority != updatedPriority {
+		t.Fatalf("Priority = %v, want %d", got.Priority, updatedPriority)
+	}
+}
+
+func TestCachingStoreRunReconciliationDetectsDepOnlyChangesAndNotifies(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	blocker, err := backing.Create(Bead{Title: "Blocker"})
+	if err != nil {
+		t.Fatalf("Create blocker: %v", err)
+	}
+	bead, err := backing.Create(Bead{Title: "Task"})
+	if err != nil {
+		t.Fatalf("Create task: %v", err)
+	}
+
+	var events []string
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, _ json.RawMessage) {
+		events = append(events, eventType+":"+beadID)
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	deps, err := cache.DepList(bead.ID, "down")
+	if err != nil {
+		t.Fatalf("DepList before dep add: %v", err)
+	}
+	if len(deps) != 0 {
+		t.Fatalf("initial deps = %v, want empty", deps)
+	}
+
+	if err := backing.DepAdd(bead.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd backing: %v", err)
+	}
+
+	cache.runReconciliation()
+
+	deps, err = cache.DepList(bead.ID, "down")
+	if err != nil {
+		t.Fatalf("DepList after reconcile: %v", err)
+	}
+	if len(deps) != 1 || deps[0].DependsOnID != blocker.ID {
+		t.Fatalf("deps after reconcile = %v, want blocker %s", deps, blocker.ID)
+	}
+	if len(events) != 1 || events[0] != "bead.updated:"+bead.ID {
+		t.Fatalf("events = %v, want [bead.updated:%s]", events, bead.ID)
+	}
+}
+
+func TestCachingStoreRunReconciliationPublishesCallbacksAfterDepsCommitted(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	blocker, err := backing.Create(Bead{Title: "Blocker"})
+	if err != nil {
+		t.Fatalf("Create blocker: %v", err)
+	}
+	bead, err := backing.Create(Bead{Title: "Task"})
+	if err != nil {
+		t.Fatalf("Create task: %v", err)
+	}
+
+	var observedDeps int
+	var cache *CachingStore
+	cache = NewCachingStoreForTest(backing, func(eventType, beadID string, _ json.RawMessage) {
+		if eventType != "bead.updated" || beadID != bead.ID {
+			return
+		}
+		deps, err := cache.DepList(beadID, "down")
+		if err != nil {
+			t.Fatalf("DepList during callback: %v", err)
+		}
+		observedDeps = len(deps)
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	if _, err := cache.DepList(bead.ID, "down"); err != nil {
+		t.Fatalf("DepList before changes: %v", err)
+	}
+
+	title := "Task updated"
+	if err := backing.Update(bead.ID, UpdateOpts{Title: &title}); err != nil {
+		t.Fatalf("Update backing: %v", err)
+	}
+	if err := backing.DepAdd(bead.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd backing: %v", err)
+	}
+
+	cache.runReconciliation()
+
+	if observedDeps != 1 {
+		t.Fatalf("observed deps during callback = %d, want 1", observedDeps)
 	}
 }
 
@@ -202,6 +329,55 @@ func TestCachingStoreNextReconcileDelayUsesFreshnessWatchdog(t *testing.T) {
 	}
 }
 
+func TestCachingStoreCloseAllRefreshesOnlyActuallyClosedBeads(t *testing.T) {
+	t.Parallel()
+
+	backing := &partialCloseAllStore{Store: NewMemStore()}
+	first, err := backing.Create(Bead{Title: "first"})
+	if err != nil {
+		t.Fatalf("Create first: %v", err)
+	}
+	second, err := backing.Create(Bead{Title: "second"})
+	if err != nil {
+		t.Fatalf("Create second: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	closed, err := cache.CloseAll([]string{first.ID, second.ID}, map[string]string{"source": "wave1"})
+	if err != nil {
+		t.Fatalf("CloseAll: %v", err)
+	}
+	if closed != 1 {
+		t.Fatalf("closed = %d, want 1", closed)
+	}
+
+	gotFirst, err := cache.Get(first.ID)
+	if err != nil {
+		t.Fatalf("Get first: %v", err)
+	}
+	if gotFirst.Status != "closed" {
+		t.Fatalf("first status = %q, want closed", gotFirst.Status)
+	}
+	if gotFirst.Metadata["source"] != "wave1" {
+		t.Fatalf("first metadata = %v, want source=wave1", gotFirst.Metadata)
+	}
+
+	gotSecond, err := cache.Get(second.ID)
+	if err != nil {
+		t.Fatalf("Get second: %v", err)
+	}
+	if gotSecond.Status != "open" {
+		t.Fatalf("second status = %q, want open", gotSecond.Status)
+	}
+	if gotSecond.Metadata["source"] != "" {
+		t.Fatalf("second metadata = %v, want no source metadata", gotSecond.Metadata)
+	}
+}
+
 type refreshFailingStore struct {
 	Store
 	failNextGet bool
@@ -225,4 +401,21 @@ func (s *listFailingStore) List(query ListQuery) ([]Bead, error) {
 		return nil, errors.New("transient list failure")
 	}
 	return s.Store.List(query)
+}
+
+type partialCloseAllStore struct {
+	Store
+}
+
+func (s *partialCloseAllStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	if err := s.Store.SetMetadataBatch(ids[0], metadata); err != nil {
+		return 0, err
+	}
+	if err := s.Store.Close(ids[0]); err != nil {
+		return 0, err
+	}
+	return 1, nil
 }

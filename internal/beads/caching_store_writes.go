@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"errors"
 	"fmt"
 	"time"
 )
@@ -82,23 +83,45 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 		return n, err
 	}
 
-	c.mu.Lock()
+	type refreshedBead struct {
+		id   string
+		bead Bead
+	}
+	refreshed := make([]refreshedBead, 0, len(ids))
+	var refreshErr error
 	for _, id := range ids {
-		if b, ok := c.beads[id]; ok {
-			b.Status = "closed"
-			if b.Metadata == nil {
-				b.Metadata = make(map[string]string, len(metadata))
-			}
-			for k, v := range metadata {
-				b.Metadata[k] = v
-			}
-			c.beads[id] = b
+		fresh, getErr := c.backing.Get(id)
+		if getErr != nil {
+			refreshErr = errors.Join(refreshErr, fmt.Errorf("refresh bead after close-all %s: %w", id, getErr))
+			continue
+		}
+		refreshed = append(refreshed, refreshedBead{id: id, bead: fresh})
+	}
+
+	notifications := make([]cacheNotification, 0, len(refreshed))
+	c.mu.Lock()
+	if refreshErr != nil {
+		c.state = cacheDegraded
+		c.recordProblemLocked("close-all refresh", refreshErr)
+	}
+	for _, item := range refreshed {
+		previous, hadPrevious := c.beads[item.id]
+		c.beads[item.id] = cloneBead(item.bead)
+		if item.bead.Status == "closed" {
+			delete(c.deps, item.id)
+		}
+		if hadPrevious && previous.Status != "closed" && item.bead.Status == "closed" {
+			notifications = append(notifications, cacheNotification{
+				eventType: "bead.closed",
+				bead:      cloneBead(item.bead),
+			})
 		}
 	}
 	c.markFreshLocked(time.Now())
 	c.updateStatsLocked()
 	c.mu.Unlock()
-	return n, nil
+	c.notifyChanges(notifications)
+	return n, refreshErr
 }
 
 // SetMetadata sets a single metadata key-value on a bead.
