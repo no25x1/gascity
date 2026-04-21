@@ -6127,6 +6127,127 @@ func TestGcBeadsBdStartUsesGCBinManagedConfigWriter(t *testing.T) {
 	}
 }
 
+func TestGcBeadsBdStartWithGCBinClosesStartLockFDBeforeLaunchingManagedDolt(t *testing.T) {
+	skipSlowCmdGCTest(t, "builds gc and starts the real gc-beads-bd lifecycle script; run make test-cmd-gc-process for full coverage")
+
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := MaterializeBuiltinPacks(cityPath); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks: %v", err)
+	}
+	script := gcBeadsBdScriptPath(cityPath)
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation.txt")
+	lockFDStatusFile := filepath.Join(t.TempDir(), "dolt-lock-fd.txt")
+	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$INVOCATION_FILE"
+case "$*" in
+  config*)
+    exit 0
+    ;;
+  "sql-server --config "*)
+    config_file=${*#sql-server --config }
+    port=$(awk '/port:/ {print $2; exit}' "$config_file")
+    data_dir=$(awk '/data_dir:/ {print $2; exit}' "$config_file" | tr -d '"')
+    exec python3 - "$port" "$data_dir" "$LOCK_FD_STATUS_FILE" <<'INNERPY'
+import os
+import signal
+import socket
+import sys
+import time
+
+port = int(sys.argv[1])
+data_dir = sys.argv[2]
+status_file = sys.argv[3]
+if data_dir:
+    os.makedirs(data_dir, exist_ok=True)
+    os.chdir(data_dir)
+status = "closed"
+try:
+    os.fstat(9)
+    status = "open"
+except OSError:
+    pass
+with open(status_file, "w", encoding="utf-8") as handle:
+    handle.write(status + "\n")
+sock = socket.socket()
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(("127.0.0.1", port))
+sock.listen(5)
+def _stop(*_args):
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, _stop)
+signal.signal(signal.SIGINT, _stop)
+while True:
+    time.sleep(1)
+INNERPY
+    ;;
+  *"SELECT active_branch()"*)
+    exit 0
+    ;;
+  *"SELECT COUNT(*) AS cnt FROM information_schema.PROCESSLIST"*)
+    printf 'cnt\n1\n'
+    ;;
+  *"CREATE DATABASE IF NOT EXISTS __gc_probe;"*)
+    exit 0
+    ;;
+  *)
+    echo "unexpected command: $*" >&2
+    exit 2
+    ;;
+esac
+`)
+
+	port := reserveRandomTCPPort(t)
+	env := sanitizedBaseEnv(
+		"GC_CITY_PATH="+cityPath,
+		"GC_BIN="+currentGCBinaryForTests(t),
+		"GC_DOLT_PORT="+strconv.Itoa(port),
+		"INVOCATION_FILE="+invocationFile,
+		"LOCK_FD_STATUS_FILE="+lockFDStatusFile,
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+
+	cmd := exec.Command(script, "start")
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gc-beads-bd start failed: %v\n%s", err, out)
+	}
+	t.Cleanup(func() {
+		stop := exec.Command(script, "stop")
+		stop.Env = env
+		_ = stop.Run()
+	})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(lockFDStatusFile); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for fake dolt to report lock-fd state\n%s", out)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	status, err := os.ReadFile(lockFDStatusFile)
+	if err != nil {
+		t.Fatalf("ReadFile(lock fd status): %v", err)
+	}
+	if got := strings.TrimSpace(string(status)); got != "closed" {
+		t.Fatalf("managed dolt inherited startup lock fd 9 = %q, want closed", got)
+	}
+}
+
 func TestGcBeadsBdStopUsesGCBinStopManagedHelperWhenAvailable(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
