@@ -2302,6 +2302,10 @@ func TestPrepareStartCandidate_PreservesRuntimeConfigAndProviderEnv(t *testing.T
 	))
 	expected.Env = mergeEnv(expected.Env, map[string]string{"GC_PROVIDER": "gemini"})
 	expected = runtime.SyncWorkDirEnv(expected)
+	if prepared.cfg.PreLaunchMetadataSink == nil {
+		t.Fatal("prepared cfg PreLaunchMetadataSink is nil")
+	}
+	prepared.cfg.PreLaunchMetadataSink = nil
 
 	if !reflect.DeepEqual(prepared.cfg, expected) {
 		t.Fatalf("prepared cfg mismatch\n got: %#v\nwant: %#v", prepared.cfg, expected)
