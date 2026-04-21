@@ -182,6 +182,9 @@ func DeepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 	if src.PreStart != nil {
 		dst.PreStart = append([]string(nil), src.PreStart...)
 	}
+	if src.PreLaunch != nil {
+		dst.PreLaunch = append([]string(nil), src.PreLaunch...)
+	}
 	if src.Args != nil {
 		dst.Args = append([]string(nil), src.Args...)
 	}

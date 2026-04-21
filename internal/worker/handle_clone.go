@@ -46,6 +46,7 @@ func cloneRuntimeConfig(cfg runtime.Config) runtime.Config {
 	cfg.Env = cloneStringMap(cfg.Env)
 	cfg.ProcessNames = append([]string(nil), cfg.ProcessNames...)
 	cfg.PreStart = append([]string(nil), cfg.PreStart...)
+	cfg.PreLaunch = append([]string(nil), cfg.PreLaunch...)
 	cfg.SessionSetup = append([]string(nil), cfg.SessionSetup...)
 	cfg.SessionLive = append([]string(nil), cfg.SessionLive...)
 	cfg.PackOverlayDirs = append([]string(nil), cfg.PackOverlayDirs...)

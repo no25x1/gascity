@@ -50,6 +50,21 @@ const (
 	StateQuarantined State = "quarantined"
 )
 
+func rejectDirectPreLaunch(hints runtime.Config) error {
+	if len(hints.PreLaunch) == 0 {
+		return nil
+	}
+	if hints.PreLaunchMetadataSink != nil {
+		return nil
+	}
+	return &runtime.PreLaunchDecisionError{
+		Err:    runtime.ErrPreLaunchAborted,
+		Action: "abort",
+		Reason: "pre_launch is only supported for reconciler-managed starts",
+		Stage:  "unsupported_start_path",
+	}
+}
+
 // BeadType is the bead type for chat sessions.
 const BeadType = "session"
 
@@ -246,6 +261,9 @@ func (m *Manager) CreateAliasedNamedWithTransportAndMetadata(ctx context.Context
 }
 
 func (m *Manager) createAliasedNamedWithTransport(ctx context.Context, alias, explicitName, template, title, command, workDir, provider, transport string, env map[string]string, resume ProviderResume, hints runtime.Config, extraMeta map[string]string) (Info, error) {
+	if err := rejectDirectPreLaunch(hints); err != nil {
+		return Info{}, err
+	}
 	alias, err := ValidateAlias(alias)
 	if err != nil {
 		return Info{}, err

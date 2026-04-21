@@ -632,6 +632,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		Scope:                        "city",
 		Suspended:                    true,
 		PreStart:                     []string{"pre-cmd"},
+		PreLaunch:                    []string{"pre-launch-cmd"},
 		PromptTemplate:               "prompts/test.md",
 		Nudge:                        "nudge text",
 		Session:                      "acp",
@@ -735,6 +736,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 
 	// Verify deep independence: mutating src slices/maps should not affect dst.
 	src.PreStart[0] = "MUTATED"
+	src.PreLaunch[0] = "MUTATED"
 	src.Env["K"] = "MUTATED"
 	src.SessionSetup[0] = "MUTATED"
 	src.Args[0] = "MUTATED"
@@ -748,6 +750,9 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 
 	if dst.PreStart[0] == "MUTATED" {
 		t.Error("PreStart is not a deep copy")
+	}
+	if dst.PreLaunch[0] == "MUTATED" {
+		t.Error("PreLaunch is not a deep copy")
 	}
 	if dst.Env["K"] == "MUTATED" {
 		t.Error("Env is not a deep copy")

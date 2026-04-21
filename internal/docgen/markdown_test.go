@@ -103,4 +103,7 @@ func TestRenderMarkdownEnumValues(t *testing.T) {
 	if !strings.Contains(md, "pre_start") {
 		t.Error("pre_start not shown in markdown")
 	}
+	if !strings.Contains(md, "pre_launch") {
+		t.Error("pre_launch not shown in markdown")
+	}
 }

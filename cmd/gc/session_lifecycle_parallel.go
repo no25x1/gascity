@@ -58,12 +58,13 @@ type preparedStart struct {
 }
 
 type startResult struct {
-	prepared        preparedStart
-	err             error
-	outcome         string
-	started         time.Time
-	finished        time.Time
-	rollbackPending bool
+	prepared          preparedStart
+	err               error
+	outcome           string
+	started           time.Time
+	finished          time.Time
+	rollbackPending   bool
+	preLaunchDecision *runtime.PreLaunchDecisionError
 }
 
 type stopTarget struct {
@@ -430,6 +431,27 @@ func buildPreparedStart(
 		agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 	}
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
+	if store != nil && strings.TrimSpace(session.ID) != "" {
+		sessionID := session.ID
+		agentCfg.PreLaunchMetadataSink = func(action, reason, stage string, userMetadata map[string]string) error {
+			metadata := make(map[string]string, len(userMetadata)+5)
+			for key, value := range userMetadata {
+				metadata[key] = value
+			}
+			metadata["gc.pre_launch.action"] = action
+			if reason != "" {
+				metadata["gc.pre_launch.reason"] = reason
+			}
+			if stage != "" {
+				metadata["gc.pre_launch.failure_stage"] = stage
+			}
+			metadata["gc.pre_launch.at"] = time.Now().UTC().Format(time.RFC3339)
+			if action != "continue" {
+				metadata["gc.pre_launch.provider_started"] = "false"
+			}
+			return store.SetMetadataBatch(sessionID, metadata)
+		}
+	}
 	return &preparedStart{
 		candidate:     candidate,
 		cfg:           agentCfg,
@@ -521,6 +543,7 @@ func executePreparedStartWave(
 				return
 			}
 			var outcome string
+			var preLaunchDecision *runtime.PreLaunchDecisionError
 			switch {
 			case err == nil:
 				outcome = "success"
@@ -531,6 +554,14 @@ func executePreparedStartWave(
 			case errors.Is(err, runtime.ErrSessionInitializing):
 				outcome = "session_initializing"
 				err = nil
+			case errors.Is(err, runtime.ErrPreLaunchDrained):
+				outcome = "pre_launch_drained"
+				_ = errors.As(err, &preLaunchDecision)
+				err = nil
+				rollbackPending = false
+			case errors.Is(err, runtime.ErrPreLaunchAborted):
+				outcome = "pre_launch_aborted"
+				_ = errors.As(err, &preLaunchDecision)
 			case errors.Is(err, runtime.ErrSessionExists):
 				running, runningErr := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, item.candidate.name())
 				switch {
@@ -547,12 +578,13 @@ func executePreparedStartWave(
 				outcome = "provider_error"
 			}
 			results[i] = startResult{
-				prepared:        item,
-				err:             err,
-				outcome:         outcome,
-				started:         started,
-				finished:        finished,
-				rollbackPending: rollbackPending,
+				prepared:          item,
+				err:               err,
+				outcome:           outcome,
+				started:           started,
+				finished:          finished,
+				rollbackPending:   rollbackPending,
+				preLaunchDecision: preLaunchDecision,
 			}
 		}()
 	}
@@ -635,6 +667,78 @@ func commitStartResultTraced(
 	// The reconciler will retry on the next patrol tick.
 	if result.outcome == "session_initializing" {
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, nil)
+		return false
+	}
+	if result.outcome == "pre_launch_drained" {
+		reason := "no work"
+		if result.preLaunchDecision != nil && strings.TrimSpace(result.preLaunchDecision.Reason) != "" {
+			reason = strings.TrimSpace(result.preLaunchDecision.Reason)
+		}
+		metadata := sessionpkg.ArchivePatch(clk.Now(), "pre_launch_drained", true)
+		if result.preLaunchDecision != nil {
+			for key, value := range result.preLaunchDecision.Metadata {
+				metadata[key] = value
+			}
+		}
+		metadata["gc.pre_launch.action"] = "drain"
+		metadata["gc.pre_launch.reason"] = reason
+		metadata["gc.pre_launch.at"] = clk.Now().UTC().Format(time.RFC3339)
+		metadata["gc.pre_launch.provider_started"] = "false"
+		if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
+			fmt.Fprintf(stderr, "session reconciler: archiving pre_launch drain for %s: %v\n", name, err) //nolint:errcheck
+			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "pre_launch_drain_metadata_failed", result.started, result.finished, err)
+			return false
+		}
+		if session.Metadata == nil {
+			session.Metadata = make(map[string]string)
+		}
+		for key, value := range metadata {
+			session.Metadata[key] = value
+		}
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, nil)
+		return true
+	}
+	if result.outcome == "pre_launch_aborted" {
+		reason := "abort"
+		stage := "script_exit"
+		metadata := map[string]string{}
+		if result.preLaunchDecision != nil {
+			if strings.TrimSpace(result.preLaunchDecision.Reason) != "" {
+				reason = strings.TrimSpace(result.preLaunchDecision.Reason)
+			}
+			if strings.TrimSpace(result.preLaunchDecision.Stage) != "" {
+				stage = strings.TrimSpace(result.preLaunchDecision.Stage)
+			}
+			for key, value := range result.preLaunchDecision.Metadata {
+				metadata[key] = value
+			}
+		}
+		metadata["gc.pre_launch.action"] = "abort"
+		metadata["gc.pre_launch.reason"] = reason
+		metadata["gc.pre_launch.failure_stage"] = stage
+		metadata["gc.pre_launch.at"] = clk.Now().UTC().Format(time.RFC3339)
+		metadata["gc.pre_launch.provider_started"] = "false"
+		metadata["pending_create_claim"] = ""
+		if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
+			fmt.Fprintf(stderr, "session reconciler: recording pre_launch abort for %s: %v\n", name, err) //nolint:errcheck
+		} else {
+			if session.Metadata == nil {
+				session.Metadata = make(map[string]string)
+			}
+			for key, value := range metadata {
+				session.Metadata[key] = value
+			}
+		}
+		if err := store.SetMetadata(session.ID, "last_woke_at", ""); err != nil {
+			fmt.Fprintf(stderr, "session reconciler: clearing last_woke_at for %s: %v\n", name, err) //nolint:errcheck
+		} else {
+			if session.Metadata == nil {
+				session.Metadata = make(map[string]string)
+			}
+			session.Metadata["last_woke_at"] = ""
+		}
+		recordWakeFailure(session, store, clk)
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err)
 		return false
 	}
 	if result.err != nil {

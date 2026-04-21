@@ -59,6 +59,9 @@ type fakeStartOps struct {
 	hasSessionErr            error
 	setRemainOnExitErr       error
 	runSetupCommandErr       error
+	runPreLaunchStdout       string
+	runPreLaunchStderr       string
+	runPreLaunchErr          error
 }
 
 type errReader struct{}
@@ -176,6 +179,16 @@ func (f *fakeStartOps) runSetupCommand(_ context.Context, cmd string, env map[st
 		return f.runSetupCommandErr
 	}
 	return nil
+}
+
+func (f *fakeStartOps) runPreLaunchCommand(_ context.Context, cmd string, env map[string]string, timeout time.Duration) (string, string, error) {
+	f.calls = append(f.calls, startCall{
+		method:  "runPreLaunchCommand",
+		command: cmd,
+		env:     env,
+		timeout: timeout,
+	})
+	return f.runPreLaunchStdout, f.runPreLaunchStderr, f.runPreLaunchErr
 }
 
 // callMethods returns just the method names for sequence assertions.
@@ -984,6 +997,168 @@ func TestDoStartSession_PreStartFailureIsFatal(t *testing.T) {
 	}
 
 	assertCallSequence(t, ops, []string{"runSetupCommand"})
+}
+
+func TestDoStartSession_PreLaunchRunsBeforeCreate(t *testing.T) {
+	ops := &fakeStartOps{
+		hasSessionResult:   true,
+		runPreLaunchStdout: `{"action":"continue","env":{"GC_WORK_BEAD":"ga-1"},"prompt_append":"\nClaimed ga-1","nudge_prepend":"claimed\n"}`,
+	}
+
+	cfg := runtime.Config{
+		Command:      "claude",
+		WorkDir:      "/proj",
+		PromptSuffix: "'base prompt'",
+		Nudge:        "start",
+		Env:          map[string]string{"GC_AGENT": "worker"},
+		PreLaunch:    []string{"claim-work"},
+		PreLaunchMetadataSink: func(_, _, _ string, _ map[string]string) error {
+			return nil
+		},
+	}
+
+	err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertCallSequence(t, ops, []string{"runPreLaunchCommand", "createSession", "setRemainOnExit", "hasSession", "sendKeys"})
+
+	if got := ops.calls[0].env["GC_SESSION"]; got != "test" {
+		t.Errorf("pre_launch GC_SESSION = %q, want test", got)
+	}
+	create := ops.calls[1]
+	if create.env["GC_WORK_BEAD"] != "ga-1" {
+		t.Errorf("create env GC_WORK_BEAD = %q, want ga-1", create.env["GC_WORK_BEAD"])
+	}
+	if !strings.Contains(create.command, "Claimed ga-1") {
+		t.Errorf("create command = %q, want patched prompt", create.command)
+	}
+	if got := ops.calls[4].command; got != "claimed\nstart" {
+		t.Errorf("nudge = %q, want patched nudge", got)
+	}
+}
+
+func TestDoStartSession_PreLaunchDrainSkipsCreate(t *testing.T) {
+	ops := &fakeStartOps{
+		runPreLaunchStdout: `{"action":"drain","reason":"no work"}`,
+	}
+
+	cfg := runtime.Config{
+		Command:   "claude",
+		PreLaunch: []string{"claim-work"},
+		PreLaunchMetadataSink: func(_, _, _ string, _ map[string]string) error {
+			return nil
+		},
+	}
+
+	err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
+	if err == nil {
+		t.Fatal("expected pre_launch drain")
+	}
+	if !errors.Is(err, runtime.ErrPreLaunchDrained) {
+		t.Fatalf("error = %v, want ErrPreLaunchDrained", err)
+	}
+
+	assertCallSequence(t, ops, []string{"runPreLaunchCommand"})
+}
+
+func TestDoStartSession_PreLaunchInvalidEnvAborts(t *testing.T) {
+	ops := &fakeStartOps{
+		runPreLaunchStdout: `{"action":"continue","env":{"GC_SESSION_ID":"wrong"}}`,
+	}
+
+	cfg := runtime.Config{
+		Command:   "claude",
+		PreLaunch: []string{"bad-env"},
+		PreLaunchMetadataSink: func(_, _, _ string, _ map[string]string) error {
+			return nil
+		},
+	}
+
+	err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
+	if err == nil {
+		t.Fatal("expected pre_launch abort")
+	}
+	if !errors.Is(err, runtime.ErrPreLaunchAborted) {
+		t.Fatalf("error = %v, want ErrPreLaunchAborted", err)
+	}
+
+	assertCallSequence(t, ops, []string{"runPreLaunchCommand"})
+}
+
+func TestDoStartSession_PreLaunchPromptPatchRejectsPromptModeNone(t *testing.T) {
+	ops := &fakeStartOps{
+		runPreLaunchStdout: `{"action":"continue","prompt_append":"\nClaimed ga-1"}`,
+	}
+
+	cfg := runtime.Config{
+		Command:    "opencode",
+		PromptMode: "none",
+		Nudge:      "base prompt",
+		PreLaunch:  []string{"claim-work"},
+		PreLaunchMetadataSink: func(_, _, _ string, _ map[string]string) error {
+			return nil
+		},
+	}
+
+	err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
+	if err == nil {
+		t.Fatal("expected pre_launch abort")
+	}
+	if !errors.Is(err, runtime.ErrPreLaunchAborted) {
+		t.Fatalf("error = %v, want ErrPreLaunchAborted", err)
+	}
+
+	assertCallSequence(t, ops, []string{"runPreLaunchCommand"})
+}
+
+func TestDoStartSession_PreLaunchReservedMetadataAborts(t *testing.T) {
+	ops := &fakeStartOps{
+		runPreLaunchStdout: `{"action":"drain","metadata":{"state":"active"}}`,
+	}
+
+	cfg := runtime.Config{
+		Command:   "claude",
+		PreLaunch: []string{"claim-work"},
+		PreLaunchMetadataSink: func(_, _, _ string, _ map[string]string) error {
+			return nil
+		},
+	}
+
+	err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
+	if err == nil {
+		t.Fatal("expected pre_launch abort")
+	}
+	if !errors.Is(err, runtime.ErrPreLaunchAborted) {
+		t.Fatalf("error = %v, want ErrPreLaunchAborted", err)
+	}
+
+	assertCallSequence(t, ops, []string{"runPreLaunchCommand"})
+}
+
+func TestDoStartSession_PreLaunchNullJSONAborts(t *testing.T) {
+	ops := &fakeStartOps{
+		runPreLaunchStdout: `null`,
+	}
+
+	cfg := runtime.Config{
+		Command:   "claude",
+		PreLaunch: []string{"broken-hook"},
+		PreLaunchMetadataSink: func(_, _, _ string, _ map[string]string) error {
+			return nil
+		},
+	}
+
+	err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout)
+	if err == nil {
+		t.Fatal("expected pre_launch abort")
+	}
+	if !errors.Is(err, runtime.ErrPreLaunchAborted) {
+		t.Fatalf("error = %v, want ErrPreLaunchAborted", err)
+	}
+
+	assertCallSequence(t, ops, []string{"runPreLaunchCommand"})
 }
 
 func TestDoStartSession_SetupEnvPassthrough(t *testing.T) {

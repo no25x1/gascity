@@ -1,9 +1,11 @@
 package tmux
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -570,6 +572,7 @@ type startOps interface {
 	sendKeys(name, text string) error
 	setRemainOnExit(name string) error
 	runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error
+	runPreLaunchCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) (string, string, error)
 }
 
 // tmuxStartOps adapts [*Tmux] to the [startOps] interface.
@@ -637,6 +640,28 @@ func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[
 	return c.Run()
 }
 
+func (o *tmuxStartOps) runPreLaunchCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) (string, string, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	c := exec.CommandContext(ctx, "sh", "-c", cmd)
+	if workDir := strings.TrimSpace(env["GC_DIR"]); workDir != "" {
+		c.Dir = workDir
+	}
+	c.Env = os.Environ()
+	for k, v := range env {
+		c.Env = append(c.Env, k+"="+v)
+	}
+	if o.tm.cfg.SocketName != "" {
+		c.Env = append(c.Env, "GC_TMUX_SOCKET="+o.tm.cfg.SocketName)
+	}
+	stdout := &limitedBuffer{max: maxPreLaunchStdout}
+	stderr := &limitedBuffer{max: maxPreLaunchStderr}
+	c.Stdout = stdout
+	c.Stderr = stderr
+	err := c.Run()
+	return stdout.String(), stderr.String(), err
+}
+
 // doStartSession is the pure startup orchestration logic.
 // Testable via fakeStartOps without a real tmux server.
 // The setupTimeout parameter controls the per-command timeout for
@@ -645,10 +670,27 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if len(cfg.PreLaunch) > 0 && cfg.PreLaunchMetadataSink == nil {
+		return &runtime.PreLaunchDecisionError{
+			Err:    runtime.ErrPreLaunchAborted,
+			Action: "abort",
+			Reason: "pre_launch is only supported for reconciler-managed starts",
+			Stage:  "unsupported_start_path",
+		}
+	}
 
 	// Step 0: Run pre-start commands (directory/worktree preparation).
 	if err := runPreStart(ctx, ops, name, cfg, setupTimeout); err != nil {
 		return fmt.Errorf("running pre_start: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	var err error
+	cfg, err = runPreLaunch(ctx, ops, name, cfg, setupTimeout)
+	if err != nil {
+		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -667,7 +709,7 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 
 	hasHints := cfg.ReadyPromptPrefix != "" || cfg.ReadyDelayMs > 0 ||
 		len(cfg.ProcessNames) > 0 || cfg.EmitsPermissionWarning ||
-		cfg.Nudge != "" || len(cfg.PreStart) > 0 || len(cfg.SessionSetup) > 0 || cfg.SessionSetupScript != "" ||
+		cfg.Nudge != "" || len(cfg.PreStart) > 0 || len(cfg.PreLaunch) > 0 || len(cfg.SessionSetup) > 0 || cfg.SessionSetupScript != "" ||
 		len(cfg.SessionLive) > 0
 
 	if !hasHints {
@@ -821,6 +863,315 @@ func runPreStart(ctx context.Context, ops startOps, _ string, cfg runtime.Config
 		}
 	}
 	return nil
+}
+
+type preLaunchCommandResult struct {
+	Action        string            `json:"action,omitempty"`
+	Reason        string            `json:"reason,omitempty"`
+	PromptPrepend string            `json:"prompt_prepend,omitempty"`
+	PromptAppend  string            `json:"prompt_append,omitempty"`
+	NudgePrepend  string            `json:"nudge_prepend,omitempty"`
+	NudgeAppend   string            `json:"nudge_append,omitempty"`
+	Env           map[string]string `json:"env,omitempty"`
+	Metadata      map[string]string `json:"metadata,omitempty"`
+}
+
+const maxPreLaunchStdout = 64 * 1024
+const maxPreLaunchStderr = 16 * 1024
+const maxPreLaunchReason = 1024
+const maxPreLaunchEnvValue = 8 * 1024
+const maxPreLaunchPromptPatch = 64 * 1024
+const maxPreLaunchNudgePatch = 16 * 1024
+
+type limitedBuffer struct {
+	buf bytes.Buffer
+	max int
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	remaining := b.max + 1 - b.buf.Len()
+	if remaining > 0 {
+		if remaining > len(p) {
+			remaining = len(p)
+		}
+		_, _ = b.buf.Write(p[:remaining])
+	}
+	return len(p), nil
+}
+
+func (b *limitedBuffer) String() string { return b.buf.String() }
+func (b *limitedBuffer) Len() int       { return b.buf.Len() }
+
+func runPreLaunch(ctx context.Context, ops startOps, name string, cfg runtime.Config, setupTimeout time.Duration) (runtime.Config, error) {
+	if len(cfg.PreLaunch) == 0 {
+		return cfg, nil
+	}
+	if cfg.Env != nil {
+		copied := make(map[string]string, len(cfg.Env))
+		for k, v := range cfg.Env {
+			copied[k] = v
+		}
+		cfg.Env = copied
+	}
+	ctx, cancel := context.WithTimeout(ctx, setupTimeout)
+	defer cancel()
+	env := make(map[string]string, len(cfg.Env)+1)
+	for k, v := range cfg.Env {
+		env[k] = v
+	}
+	env["GC_SESSION"] = name
+	for i, cmd := range cfg.PreLaunch {
+		stdout, stderr, err := ops.runPreLaunchCommand(ctx, cmd, env, setupTimeout)
+		if err != nil {
+			stage := "script_exit"
+			if errors.Is(err, context.DeadlineExceeded) {
+				stage = "timeout"
+			} else if errors.Is(err, context.Canceled) {
+				stage = "context_cancelled"
+			}
+			return cfg, fmt.Errorf("pre_launch[%d]: %w", i, &runtime.PreLaunchDecisionError{
+				Err:    runtime.ErrPreLaunchAborted,
+				Action: "abort",
+				Reason: strings.TrimSpace(err.Error()),
+				Stage:  stage,
+			})
+		}
+		if len(stdout) > maxPreLaunchStdout {
+			return cfg, fmt.Errorf("pre_launch[%d]: %w", i, &runtime.PreLaunchDecisionError{
+				Err:    runtime.ErrPreLaunchAborted,
+				Action: "abort",
+				Reason: "stdout_too_large",
+				Stage:  "stdout_too_large",
+			})
+		}
+		if len(stderr) > maxPreLaunchStderr {
+			return cfg, fmt.Errorf("pre_launch[%d]: %w", i, &runtime.PreLaunchDecisionError{
+				Err:    runtime.ErrPreLaunchAborted,
+				Action: "abort",
+				Reason: "stderr_too_large",
+				Stage:  "stderr_too_large",
+			})
+		}
+		result, err := parsePreLaunchResult(stdout)
+		if err != nil {
+			return cfg, fmt.Errorf("pre_launch[%d]: %w", i, &runtime.PreLaunchDecisionError{
+				Err:    runtime.ErrPreLaunchAborted,
+				Action: "abort",
+				Reason: err.Error(),
+				Stage:  "json_parse",
+			})
+		}
+		if len(result.Reason) > maxPreLaunchReason {
+			return cfg, fmt.Errorf("pre_launch[%d]: %w", i, &runtime.PreLaunchDecisionError{
+				Err:    runtime.ErrPreLaunchAborted,
+				Action: "abort",
+				Reason: "reason_too_large",
+				Stage:  "metadata_validation",
+			})
+		}
+		next, err := applyPreLaunchResult(cfg, result)
+		if err != nil {
+			return cfg, fmt.Errorf("pre_launch[%d]: %w", i, &runtime.PreLaunchDecisionError{
+				Err:    runtime.ErrPreLaunchAborted,
+				Action: "abort",
+				Reason: err.Error(),
+				Stage:  preLaunchFailureStage(err),
+			})
+		}
+		cfg = next
+		for k, v := range cfg.Env {
+			env[k] = v
+		}
+		switch result.Action {
+		case "", "continue":
+			if err := emitPreLaunchMetadata(cfg, "continue", result.Reason, "", result.Metadata); err != nil {
+				return cfg, fmt.Errorf("pre_launch[%d]: %w", i, &runtime.PreLaunchDecisionError{
+					Err:    runtime.ErrPreLaunchAborted,
+					Action: "abort",
+					Reason: err.Error(),
+					Stage:  "metadata_write",
+				})
+			}
+			continue
+		case "drain":
+			return cfg, &runtime.PreLaunchDecisionError{
+				Err:      runtime.ErrPreLaunchDrained,
+				Action:   "drain",
+				Reason:   result.Reason,
+				Metadata: result.Metadata,
+			}
+		case "abort":
+			return cfg, &runtime.PreLaunchDecisionError{
+				Err:      runtime.ErrPreLaunchAborted,
+				Action:   "abort",
+				Reason:   result.Reason,
+				Stage:    "script_exit",
+				Metadata: result.Metadata,
+			}
+		default:
+			return cfg, fmt.Errorf("pre_launch[%d]: %w", i, &runtime.PreLaunchDecisionError{
+				Err:    runtime.ErrPreLaunchAborted,
+				Action: "abort",
+				Reason: "unknown action " + result.Action,
+				Stage:  "unknown_action",
+			})
+		}
+	}
+	return cfg, nil
+}
+
+func parsePreLaunchResult(stdout string) (preLaunchCommandResult, error) {
+	trimmed := strings.TrimSpace(stdout)
+	if trimmed == "" {
+		return preLaunchCommandResult{Action: "continue"}, nil
+	}
+	if !strings.HasPrefix(trimmed, "{") {
+		return preLaunchCommandResult{}, fmt.Errorf("json_parse: expected object")
+	}
+	var result preLaunchCommandResult
+	if err := json.Unmarshal([]byte(trimmed), &result); err != nil {
+		return preLaunchCommandResult{}, fmt.Errorf("json_parse: %w", err)
+	}
+	if result.Action == "" {
+		result.Action = "continue"
+	}
+	return result, nil
+}
+
+func applyPreLaunchResult(cfg runtime.Config, result preLaunchCommandResult) (runtime.Config, error) {
+	if len(result.Env) > 0 {
+		if cfg.Env == nil {
+			cfg.Env = map[string]string{}
+		}
+		for k, v := range result.Env {
+			if err := validatePreLaunchEnv(k, v); err != nil {
+				return cfg, err
+			}
+			cfg.Env[k] = v
+		}
+	}
+	if err := validatePreLaunchMetadata(result.Metadata); err != nil {
+		return cfg, err
+	}
+	if result.PromptPrepend != "" || result.PromptAppend != "" {
+		if len(result.PromptPrepend)+len(result.PromptAppend) > maxPreLaunchPromptPatch {
+			return cfg, fmt.Errorf("patch_too_large: prompt patch")
+		}
+		if cfg.PromptMode == "none" {
+			return cfg, fmt.Errorf("unsupported_prompt_patch: prompt patches are not supported for prompt_mode=none")
+		} else {
+			prompt, err := promptSuffixPayload(cfg.PromptSuffix)
+			if err != nil {
+				return cfg, fmt.Errorf("unsupported_prompt_patch: %w", err)
+			}
+			cfg.PromptSuffix = shellquote.Quote(result.PromptPrepend + prompt + result.PromptAppend)
+		}
+	}
+	if result.NudgePrepend != "" || result.NudgeAppend != "" {
+		if len(result.NudgePrepend)+len(result.NudgeAppend) > maxPreLaunchNudgePatch {
+			return cfg, fmt.Errorf("patch_too_large: nudge patch")
+		}
+		cfg.Nudge = result.NudgePrepend + cfg.Nudge + result.NudgeAppend
+	}
+	return cfg, nil
+}
+
+func emitPreLaunchMetadata(cfg runtime.Config, action, reason, stage string, metadata map[string]string) error {
+	if len(metadata) == 0 && reason == "" && stage == "" {
+		return nil
+	}
+	if cfg.PreLaunchMetadataSink == nil {
+		return nil
+	}
+	return cfg.PreLaunchMetadataSink(action, reason, stage, metadata)
+}
+
+func promptSuffixPayload(promptSuffix string) (string, error) {
+	if promptSuffix == "" {
+		return "", nil
+	}
+	parts := shellquote.Split(promptSuffix)
+	if len(parts) != 1 {
+		return "", fmt.Errorf("prompt suffix parsed as %d arguments", len(parts))
+	}
+	return parts[0], nil
+}
+
+func validatePreLaunchEnv(key, value string) error {
+	if key == "" || len(key) > 128 {
+		return fmt.Errorf("env_validation: invalid key %q", key)
+	}
+	for i, r := range key {
+		valid := r == '_' || ('A' <= r && r <= 'Z') || (i > 0 && '0' <= r && r <= '9')
+		if !valid {
+			return fmt.Errorf("env_validation: invalid key %q", key)
+		}
+	}
+	if strings.ContainsAny(value, "\x00\n") {
+		return fmt.Errorf("env_validation: invalid value for %q", key)
+	}
+	if len(value) > maxPreLaunchEnvValue {
+		return fmt.Errorf("env_validation: value too large for %q", key)
+	}
+	switch {
+	case reservedPreLaunchEnvKey(key):
+		return fmt.Errorf("env_validation: reserved key %q", key)
+	case key == "PATH", key == "BASH_ENV", key == "ENV", key == "PYTHONPATH", key == "NODE_OPTIONS", key == "GODEBUG":
+		return fmt.Errorf("env_validation: reserved key %q", key)
+	case strings.HasPrefix(key, "LD_"), strings.HasPrefix(key, "DYLD_"):
+		return fmt.Errorf("env_validation: reserved key %q", key)
+	}
+	return nil
+}
+
+func reservedPreLaunchEnvKey(key string) bool {
+	switch key {
+	case "GC_SESSION_ID", "GC_SESSION_NAME", "GC_SESSION", "GC_ALIAS", "GC_AGENT",
+		"GC_TEMPLATE", "GC_SESSION_ORIGIN", "GC_INSTANCE_TOKEN", "GC_RUNTIME_EPOCH",
+		"GC_CONTINUATION_EPOCH", "GC_CITY_PATH", "GC_CITY_NAME", "GC_WORK_DIR",
+		"GC_DIR", "GC_CITY", "GC_HOME", "GT_ROOT":
+		return true
+	}
+	return false
+}
+
+func validatePreLaunchMetadata(metadata map[string]string) error {
+	total := 0
+	for key, value := range metadata {
+		if !strings.HasPrefix(key, "pre_launch.user.") {
+			return fmt.Errorf("metadata_validation: reserved key %q", key)
+		}
+		if len(key) > 128 {
+			return fmt.Errorf("metadata_validation: key too long %q", key)
+		}
+		if len(value) > 4*1024 {
+			return fmt.Errorf("metadata_validation: value too large for %q", key)
+		}
+		total += len(key) + len(value)
+		if total > 16*1024 {
+			return fmt.Errorf("metadata_validation: metadata too large")
+		}
+	}
+	return nil
+}
+
+func preLaunchFailureStage(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	switch {
+	case strings.HasPrefix(msg, "env_validation:"):
+		return "env_validation"
+	case strings.HasPrefix(msg, "metadata_validation:"):
+		return "metadata_validation"
+	case strings.HasPrefix(msg, "unsupported_prompt_patch:"):
+		return "unsupported_prompt_patch"
+	case strings.HasPrefix(msg, "patch_too_large:"):
+		return "patch_too_large"
+	default:
+		return "script_exit"
+	}
 }
 
 // ensureFreshSession creates a session, handling stale tmux state.

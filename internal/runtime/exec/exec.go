@@ -121,6 +121,14 @@ func (p *Provider) runWithTTY(args ...string) error {
 // trust, bypass permissions) in Go using Peek + SendKeys, sharing the
 // same logic as the tmux provider via [runtime.AcceptStartupDialogs].
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if len(cfg.PreLaunch) > 0 {
+		return &runtime.PreLaunchDecisionError{
+			Err:    runtime.ErrPreLaunchAborted,
+			Action: "abort",
+			Reason: "pre_launch is only supported by the tmux provider",
+			Stage:  "unsupported_provider",
+		}
+	}
 	data, err := marshalStartConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("exec provider: marshaling start config: %w", err)

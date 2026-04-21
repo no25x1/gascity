@@ -225,6 +225,14 @@ func TestConfigFingerprintIncludesPreStart(t *testing.T) {
 	}
 }
 
+func TestConfigFingerprintIncludesPreLaunch(t *testing.T) {
+	a := Config{Command: "claude"}
+	b := Config{Command: "claude", PreLaunch: []string{"gc work claim-next --json"}}
+	if ConfigFingerprint(a) == ConfigFingerprint(b) {
+		t.Error("different PreLaunch should produce different hashes")
+	}
+}
+
 func TestConfigFingerprintIncludesSessionSetup(t *testing.T) {
 	a := Config{Command: "claude"}
 	b := Config{Command: "claude", SessionSetup: []string{"tmux set-option -t {{.Session}} remain-on-exit on"}}
@@ -262,6 +270,14 @@ func TestConfigFingerprintPreStartOrderMatters(t *testing.T) {
 	b := Config{Command: "claude", PreStart: []string{"b", "a"}}
 	if ConfigFingerprint(a) == ConfigFingerprint(b) {
 		t.Error("different PreStart order should produce different hashes")
+	}
+}
+
+func TestConfigFingerprintPreLaunchOrderMatters(t *testing.T) {
+	a := Config{Command: "claude", PreLaunch: []string{"a", "b"}}
+	b := Config{Command: "claude", PreLaunch: []string{"b", "a"}}
+	if ConfigFingerprint(a) == ConfigFingerprint(b) {
+		t.Error("different PreLaunch order should produce different hashes")
 	}
 }
 

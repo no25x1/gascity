@@ -466,6 +466,8 @@ type AgentOverride struct {
 	EnvRemove []string `toml:"env_remove,omitempty"`
 	// PreStart overrides the agent's pre_start commands.
 	PreStart []string `toml:"pre_start,omitempty"`
+	// PreLaunch overrides the agent's pre_launch commands.
+	PreLaunch []string `toml:"pre_launch,omitempty"`
 	// PromptTemplate overrides the prompt template path.
 	// Relative paths resolve against the city directory.
 	PromptTemplate *string `toml:"prompt_template,omitempty"`
@@ -519,6 +521,9 @@ type AgentOverride struct {
 	// PreStartAppend appends commands to the agent's pre_start list
 	// (instead of replacing). Applied after PreStart if both are set.
 	PreStartAppend []string `toml:"pre_start_append,omitempty"`
+	// PreLaunchAppend appends commands to the agent's pre_launch list
+	// (instead of replacing). Applied after PreLaunch if both are set.
+	PreLaunchAppend []string `toml:"pre_launch_append,omitempty"`
 	// SessionSetupAppend appends commands to the agent's session_setup list.
 	SessionSetupAppend []string `toml:"session_setup_append,omitempty"`
 	// SessionLiveAppend appends commands to the agent's session_live list.
@@ -1496,6 +1501,11 @@ type Agent struct {
 	// Commands run on the target filesystem: locally for tmux, inside the
 	// pod/container for exec providers. Template variables same as session_setup.
 	PreStart []string `toml:"pre_start,omitempty"`
+	// PreLaunch is a list of shell commands run after pre_start and session
+	// identity preparation, but before the provider process is launched.
+	// Commands may emit a bounded JSON response to continue, drain, abort,
+	// or patch startup prompt/nudge/env/metadata.
+	PreLaunch []string `toml:"pre_launch,omitempty"`
 	// PromptTemplate is the path to this agent's prompt template file.
 	// Relative paths resolve against the city directory.
 	PromptTemplate string `toml:"prompt_template,omitempty"`

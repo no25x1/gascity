@@ -119,6 +119,14 @@ func newProviderWithOps(ops k8sOps) *Provider {
 
 // Start creates a new K8s pod running a tmux session with the agent command.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if len(cfg.PreLaunch) > 0 {
+		return &runtime.PreLaunchDecisionError{
+			Err:    runtime.ErrPreLaunchAborted,
+			Action: "abort",
+			Reason: "pre_launch is only supported by the tmux provider",
+			Stage:  "unsupported_provider",
+		}
+	}
 	if p.image == "" {
 		return fmt.Errorf("starting session %q: GC_K8S_IMAGE is required", name)
 	}

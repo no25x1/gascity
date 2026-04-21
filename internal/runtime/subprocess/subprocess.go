@@ -76,6 +76,14 @@ func NewProviderWithDir(dir string) *Provider {
 // Startup hints (ReadyPromptPrefix, ProcessNames, etc.) are ignored —
 // all sessions are fire-and-forget.
 func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) error {
+	if len(cfg.PreLaunch) > 0 {
+		return &runtime.PreLaunchDecisionError{
+			Err:    runtime.ErrPreLaunchAborted,
+			Action: "abort",
+			Reason: "pre_launch is only supported by the tmux provider",
+			Stage:  "unsupported_provider",
+		}
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 

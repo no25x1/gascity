@@ -359,6 +359,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	expandedSetup := expandSessionSetup(cfgAgent.SessionSetup, setupCtx)
 	resolvedScript := resolveSetupScript(cfgAgent.SessionSetupScript, cfgAgent.SourceDir, p.cityPath)
 	expandedPreStart := expandSessionSetup(cfgAgent.PreStart, setupCtx)
+	expandedPreLaunch := expandSessionSetup(cfgAgent.PreLaunch, setupCtx)
 	expandedLive := expandSessionSetup(cfgAgent.SessionLive, setupCtx)
 
 	// Step 11b: Skill materialization integration (per engdocs
@@ -477,6 +478,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 		Nudge:                  cfgAgent.Nudge,
 		PreStart:               expandedPreStart,
+		PreLaunch:              expandedPreLaunch,
 		SessionSetup:           expandedSetup,
 		SessionSetupScript:     resolvedScript,
 		SessionLive:            expandedLive,
@@ -577,6 +579,7 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		Command:                tp.Command,
 		PromptSuffix:           promptSuffix,
 		PromptFlag:             promptFlag,
+		PromptMode:             resolvedPromptMode(tp.ResolvedProvider),
 		Env:                    env,
 		WorkDir:                tp.WorkDir,
 		ReadyPromptPrefix:      tp.Hints.ReadyPromptPrefix,
@@ -585,6 +588,7 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		EmitsPermissionWarning: tp.Hints.EmitsPermissionWarning,
 		Nudge:                  nudge,
 		PreStart:               tp.Hints.PreStart,
+		PreLaunch:              tp.Hints.PreLaunch,
 		SessionSetup:           tp.Hints.SessionSetup,
 		SessionSetupScript:     tp.Hints.SessionSetupScript,
 		SessionLive:            tp.Hints.SessionLive,
@@ -595,4 +599,11 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		CopyFiles:              tp.Hints.CopyFiles,
 		FingerprintExtra:       tp.FPExtra,
 	}
+}
+
+func resolvedPromptMode(rp *config.ResolvedProvider) string {
+	if rp == nil || rp.PromptMode == "" {
+		return "arg"
+	}
+	return rp.PromptMode
 }

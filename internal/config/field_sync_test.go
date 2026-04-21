@@ -62,6 +62,7 @@ func TestAgentFieldSync(t *testing.T) {
 		"Agent":                   true, // targeting key on AgentOverride
 		"EnvRemove":               true, // remove modifier, no Agent field
 		"PreStartAppend":          true, // append modifier, no Agent field
+		"PreLaunchAppend":         true, // append modifier, no Agent field
 		"SessionSetupAppend":      true, // append modifier, no Agent field
 		"SessionLiveAppend":       true, // append modifier, no Agent field
 		"InstallAgentHooksAppend": true, // append modifier, no Agent field
@@ -173,6 +174,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		Pool:                    &PoolOverride{Min: intVal(2), Max: intVal(10), Check: strVal("echo 5"), OnDeath: strVal("echo dead"), OnBoot: strVal("echo boot")},
 		Env:                     map[string]string{"KEY": "val"},
 		PreStart:                []string{"pre-cmd"},
+		PreLaunch:               []string{"pre-launch-cmd"},
 		PromptTemplate:          strVal("prompts/test.md"),
 		Session:                 strVal("acp"),
 		Provider:                strVal("claude"),
@@ -194,6 +196,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		ResumeCommand:           strVal("claude --resume {{.SessionKey}}"),
 		WakeMode:                strVal("fresh"),
 		PreStartAppend:          []string{"pre-append"},
+		PreLaunchAppend:         []string{"pre-launch-append"},
 		SessionSetupAppend:      []string{"setup-append"},
 		SessionLiveAppend:       []string{"live-append"},
 		InstallAgentHooksAppend: []string{"gemini"},
@@ -230,6 +233,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 	modifiers := map[string]bool{
 		"EnvRemove":               true,
 		"PreStartAppend":          true,
+		"PreLaunchAppend":         true,
 		"SessionSetupAppend":      true,
 		"SessionLiveAppend":       true,
 		"InstallAgentHooksAppend": true,
@@ -288,6 +292,9 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 	if len(agent.PreStart) != 2 || agent.PreStart[1] != "pre-append" {
 		t.Errorf("PreStartAppend not applied: %v", agent.PreStart)
 	}
+	if len(agent.PreLaunch) != 2 || agent.PreLaunch[1] != "pre-launch-append" {
+		t.Errorf("PreLaunchAppend not applied: %v", agent.PreLaunch)
+	}
 	if len(agent.SessionSetup) != 2 || agent.SessionSetup[1] != "setup-append" {
 		t.Errorf("SessionSetupAppend not applied: %v", agent.SessionSetup)
 	}
@@ -321,6 +328,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		Env:                     map[string]string{"KEY": "val"},
 		EnvRemove:               []string{"REMOVE_ME"},
 		PreStart:                []string{"pre-cmd"},
+		PreLaunch:               []string{"pre-launch-cmd"},
 		PromptTemplate:          strVal("prompts/test.md"),
 		Session:                 strVal("acp"),
 		Provider:                strVal("claude"),
@@ -342,6 +350,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		ResumeCommand:           strVal("claude --resume {{.SessionKey}}"),
 		WakeMode:                strVal("fresh"),
 		PreStartAppend:          []string{"pre-append"},
+		PreLaunchAppend:         []string{"pre-launch-append"},
 		SessionSetupAppend:      []string{"setup-append"},
 		SessionLiveAppend:       []string{"live-append"},
 		InstallAgentHooksAppend: []string{"gemini"},
@@ -375,6 +384,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 	modifiers := map[string]bool{
 		"EnvRemove":               true,
 		"PreStartAppend":          true,
+		"PreLaunchAppend":         true,
 		"SessionSetupAppend":      true,
 		"SessionLiveAppend":       true,
 		"InstallAgentHooksAppend": true,
@@ -424,6 +434,9 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 	}
 	if agent.MinActiveSessions == nil || *agent.MinActiveSessions != 2 || agent.MaxActiveSessions == nil || *agent.MaxActiveSessions != 10 {
 		t.Errorf("Scaling not applied correctly: min=%v max=%v", agent.MinActiveSessions, agent.MaxActiveSessions)
+	}
+	if len(agent.PreLaunch) != 2 || agent.PreLaunch[1] != "pre-launch-append" {
+		t.Errorf("PreLaunchAppend not applied: %v", agent.PreLaunch)
 	}
 }
 

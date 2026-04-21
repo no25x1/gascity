@@ -77,6 +77,13 @@ func canonicalConfigHash(params TemplateParams, overlay map[string]string) strin
 	}
 	h.Write([]byte{1}) //nolint:errcheck
 
+	// PreLaunch.
+	for _, pl := range params.Hints.PreLaunch {
+		h.Write([]byte(pl)) //nolint:errcheck
+		h.Write([]byte{0})  //nolint:errcheck
+	}
+	h.Write([]byte{1}) //nolint:errcheck
+
 	// SessionSetup.
 	for _, ss := range params.Hints.SessionSetup {
 		h.Write([]byte(ss)) //nolint:errcheck

@@ -61,6 +61,7 @@ type agentFile struct {
 	Scope                  string            `toml:"scope,omitempty"`
 	Suspended              bool              `toml:"suspended,omitempty"`
 	PreStart               []string          `toml:"pre_start,omitempty"`
+	PreLaunch              []string          `toml:"pre_launch,omitempty"`
 	Nudge                  string            `toml:"nudge,omitempty"`
 	Session                string            `toml:"session,omitempty"`
 	Provider               string            `toml:"provider,omitempty"`
@@ -805,6 +806,7 @@ func agentConfigFromAgent(agent config.Agent) agentFile {
 		Scope:                  agent.Scope,
 		Suspended:              agent.Suspended,
 		PreStart:               agent.PreStart,
+		PreLaunch:              agent.PreLaunch,
 		Nudge:                  agent.Nudge,
 		Session:                agent.Session,
 		Provider:               agent.Provider,

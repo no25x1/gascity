@@ -36,6 +36,8 @@ type AgentPatch struct {
 	EnvRemove []string `toml:"env_remove,omitempty"`
 	// PreStart overrides the agent's pre_start commands.
 	PreStart []string `toml:"pre_start,omitempty"`
+	// PreLaunch overrides the agent's pre_launch commands.
+	PreLaunch []string `toml:"pre_launch,omitempty"`
 	// PromptTemplate overrides the prompt template path.
 	// Relative paths resolve against the city directory.
 	PromptTemplate *string `toml:"prompt_template,omitempty"`
@@ -110,6 +112,9 @@ type AgentPatch struct {
 	// PreStartAppend appends commands to the agent's pre_start list
 	// (instead of replacing). Applied after PreStart if both are set.
 	PreStartAppend []string `toml:"pre_start_append,omitempty"`
+	// PreLaunchAppend appends commands to the agent's pre_launch list
+	// (instead of replacing). Applied after PreLaunch if both are set.
+	PreLaunchAppend []string `toml:"pre_launch_append,omitempty"`
 	// SessionSetupAppend appends commands to the agent's session_setup list.
 	SessionSetupAppend []string `toml:"session_setup_append,omitempty"`
 	// SessionLiveAppend appends commands to the agent's session_live list.
@@ -266,6 +271,12 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	}
 	if len(p.PreStartAppend) > 0 {
 		a.PreStart = append(a.PreStart, p.PreStartAppend...)
+	}
+	if len(p.PreLaunch) > 0 {
+		a.PreLaunch = append([]string(nil), p.PreLaunch...)
+	}
+	if len(p.PreLaunchAppend) > 0 {
+		a.PreLaunch = append(a.PreLaunch, p.PreLaunchAppend...)
 	}
 	if p.PromptTemplate != nil {
 		a.PromptTemplate = *p.PromptTemplate

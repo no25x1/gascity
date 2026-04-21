@@ -206,7 +206,7 @@ func TestCitySchemaAgentDefinition(t *testing.T) {
 	agentProps := defProperties(t, raw, "Agent")
 
 	// Check expected fields exist.
-	for _, field := range []string{"name", "dir", "prompt_template", "provider", "pre_start"} {
+	for _, field := range []string{"name", "dir", "prompt_template", "provider", "pre_start", "pre_launch"} {
 		if _, ok := agentProps[field]; !ok {
 			t.Errorf("Agent missing field %q", field)
 		}

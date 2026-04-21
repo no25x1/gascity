@@ -194,6 +194,9 @@ func (m *Manager) sessionBead(id string) (beads.Bead, string, error) {
 }
 
 func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+	if err := rejectDirectPreLaunch(hints); err != nil {
+		return err
+	}
 	transport, transportVerified := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
 	if State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName) {
@@ -305,6 +308,9 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 }
 
 func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+	if err := rejectDirectPreLaunch(hints); err != nil {
+		return err
+	}
 	transport, _ := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
 	if m.sp.IsRunning(sessName) {

@@ -1090,6 +1090,7 @@ name = "test"
 name = "worker"
 dir = "/repo"
 pre_start = ["mkdir -p /tmp/work", "git worktree add /tmp/work"]
+pre_launch = ["gc work claim-next --json"]
 
 [[agent]]
 name = "mayor"
@@ -1104,15 +1105,26 @@ name = "mayor"
 	if len(cfg.Agents[0].PreStart) != 2 {
 		t.Errorf("Agents[0].PreStart len = %d, want 2", len(cfg.Agents[0].PreStart))
 	}
+	if len(cfg.Agents[0].PreLaunch) != 1 {
+		t.Errorf("Agents[0].PreLaunch len = %d, want 1", len(cfg.Agents[0].PreLaunch))
+	}
 	if len(cfg.Agents[1].PreStart) != 0 {
 		t.Errorf("Agents[1].PreStart len = %d, want 0", len(cfg.Agents[1].PreStart))
+	}
+	if len(cfg.Agents[1].PreLaunch) != 0 {
+		t.Errorf("Agents[1].PreLaunch len = %d, want 0", len(cfg.Agents[1].PreLaunch))
 	}
 }
 
 func TestPreStartRoundTrip(t *testing.T) {
 	c := City{
 		Workspace: Workspace{Name: "test"},
-		Agents:    []Agent{{Name: "worker", Dir: "/repo", PreStart: []string{"echo hello"}}},
+		Agents: []Agent{{
+			Name:      "worker",
+			Dir:       "/repo",
+			PreStart:  []string{"echo hello"},
+			PreLaunch: []string{"gc work claim-next --json"},
+		}},
 	}
 	data, err := c.Marshal()
 	if err != nil {
@@ -1124,6 +1136,9 @@ func TestPreStartRoundTrip(t *testing.T) {
 	}
 	if len(got.Agents[0].PreStart) != 1 || got.Agents[0].PreStart[0] != "echo hello" {
 		t.Errorf("PreStart after round-trip = %v, want [echo hello]", got.Agents[0].PreStart)
+	}
+	if len(got.Agents[0].PreLaunch) != 1 || got.Agents[0].PreLaunch[0] != "gc work claim-next --json" {
+		t.Errorf("PreLaunch after round-trip = %v, want [gc work claim-next --json]", got.Agents[0].PreLaunch)
 	}
 }
 
@@ -1138,6 +1153,9 @@ func TestMarshalOmitsEmptyPreStart(t *testing.T) {
 	}
 	if strings.Contains(string(data), "pre_start") {
 		t.Errorf("Marshal output should not contain 'pre_start' when empty:\n%s", data)
+	}
+	if strings.Contains(string(data), "pre_launch") {
+		t.Errorf("Marshal output should not contain 'pre_launch' when empty:\n%s", data)
 	}
 }
 

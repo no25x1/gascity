@@ -286,6 +286,10 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		dst.PreStart = make([]string, len(src.PreStart))
 		copy(dst.PreStart, src.PreStart)
 	}
+	if len(src.PreLaunch) > 0 {
+		dst.PreLaunch = make([]string, len(src.PreLaunch))
+		copy(dst.PreLaunch, src.PreLaunch)
+	}
 	if len(src.SessionSetup) > 0 {
 		dst.SessionSetup = make([]string, len(src.SessionSetup))
 		copy(dst.SessionSetup, src.SessionSetup)

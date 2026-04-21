@@ -518,6 +518,9 @@ func explainAgent(w io.Writer, a *config.Agent, prov *config.Provenance) {
 	if len(a.PreStart) > 0 {
 		explainField(w, "pre_start", fmt.Sprintf("[%d commands]", len(a.PreStart)), source)
 	}
+	if len(a.PreLaunch) > 0 {
+		explainField(w, "pre_launch", fmt.Sprintf("[%d commands]", len(a.PreLaunch)), source)
+	}
 	if a.PromptTemplate != "" {
 		explainField(w, "prompt_template", a.PromptTemplate, source)
 	}

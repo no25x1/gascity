@@ -35,6 +35,42 @@ var ErrInteractionUnsupported = errors.New("session interaction is unsupported")
 // process, but it exited before startup completed successfully.
 var ErrSessionDiedDuringStartup = errors.New("session died during startup")
 
+// ErrPreLaunchDrained reports that a pre_launch hook intentionally skipped
+// provider launch because there was no useful work for this session.
+var ErrPreLaunchDrained = errors.New("pre_launch drained")
+
+// ErrPreLaunchAborted reports that a pre_launch hook intentionally failed
+// startup before provider launch.
+var ErrPreLaunchAborted = errors.New("pre_launch aborted")
+
+// PreLaunchDecisionError carries the structured decision from a pre_launch
+// hook when it prevents provider launch.
+type PreLaunchDecisionError struct {
+	Err      error
+	Action   string
+	Reason   string
+	Stage    string
+	Metadata map[string]string
+}
+
+func (e *PreLaunchDecisionError) Error() string {
+	if e == nil {
+		return ""
+	}
+	reason := strings.TrimSpace(e.Reason)
+	if reason == "" {
+		return e.Err.Error()
+	}
+	return fmt.Sprintf("%s: %s", e.Err, reason)
+}
+
+func (e *PreLaunchDecisionError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
 // ErrSessionNotFound reports that an operation targeted a session the
 // runtime does not know about. Benign for Stop() — the session was
 // already gone — but fatal for Attach/Send. Providers wrap their own
@@ -374,6 +410,19 @@ type Config struct {
 	// on the target filesystem. Used for directory/worktree preparation.
 	// Failures abort startup so agents never launch into an unprepared workDir.
 	PreStart []string
+
+	// PreLaunch is a list of shell commands run after PreStart and session
+	// identity preparation, but before provider process launch.
+	PreLaunch []string
+
+	// PromptMode records how the startup prompt is delivered ("arg", "flag",
+	// or "none"). pre_launch prompt patches need this to mutate the same
+	// delivery path that template resolution selected.
+	PromptMode string
+
+	// PreLaunchMetadataSink persists validated pre_launch metadata before the
+	// provider process is launched. Providers call it only after validation.
+	PreLaunchMetadataSink func(action, reason, stage string, metadata map[string]string) error
 
 	// SessionSetup is a list of shell commands run after session creation,
 	// between verify-alive and nudge. Commands run in gc's process via sh -c.

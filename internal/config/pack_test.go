@@ -2990,6 +2990,7 @@ schema = 1
 [[agent]]
 name = "polecat"
 pre_start = ["base-setup.sh"]
+pre_launch = ["base-claim.sh"]
 session_setup = ["tmux set status"]
 install_agent_hooks = ["claude"]
 inject_fragments = ["tdd"]
@@ -3000,6 +3001,7 @@ inject_fragments = ["tdd"]
 			Overrides: []AgentOverride{{
 				Agent:                   "polecat",
 				PreStartAppend:          []string{"extra-setup.sh"},
+				PreLaunchAppend:         []string{"extra-claim.sh"},
 				SessionSetupAppend:      []string{"tmux set mouse on"},
 				InstallAgentHooksAppend: []string{"gemini"},
 				InjectFragmentsAppend:   []string{"safety"},
@@ -3013,6 +3015,10 @@ inject_fragments = ["tdd"]
 	wantPreStart := []string{"base-setup.sh", "extra-setup.sh"}
 	if !sliceEqual(a.PreStart, wantPreStart) {
 		t.Errorf("PreStart = %v, want %v", a.PreStart, wantPreStart)
+	}
+	wantPreLaunch := []string{"base-claim.sh", "extra-claim.sh"}
+	if !sliceEqual(a.PreLaunch, wantPreLaunch) {
+		t.Errorf("PreLaunch = %v, want %v", a.PreLaunch, wantPreLaunch)
 	}
 	wantSetup := []string{"tmux set status", "tmux set mouse on"}
 	if !sliceEqual(a.SessionSetup, wantSetup) {
@@ -3038,14 +3044,17 @@ schema = 1
 [[agent]]
 name = "polecat"
 pre_start = ["old-a.sh", "old-b.sh"]
+pre_launch = ["old-claim-a.sh", "old-claim-b.sh"]
 `)
 	cfg := &City{
 		Rigs: []Rig{{
 			Name: "hw", Path: "/tmp/hw", Includes: []string{"packs/test"},
 			Overrides: []AgentOverride{{
-				Agent:          "polecat",
-				PreStart:       []string{"new-base.sh"},
-				PreStartAppend: []string{"extra.sh"},
+				Agent:           "polecat",
+				PreStart:        []string{"new-base.sh"},
+				PreStartAppend:  []string{"extra.sh"},
+				PreLaunch:       []string{"new-claim.sh"},
+				PreLaunchAppend: []string{"extra-claim.sh"},
 			}},
 		}},
 	}
@@ -3055,6 +3064,10 @@ pre_start = ["old-a.sh", "old-b.sh"]
 	want := []string{"new-base.sh", "extra.sh"}
 	if !sliceEqual(cfg.Agents[0].PreStart, want) {
 		t.Errorf("PreStart = %v, want %v", cfg.Agents[0].PreStart, want)
+	}
+	wantLaunch := []string{"new-claim.sh", "extra-claim.sh"}
+	if !sliceEqual(cfg.Agents[0].PreLaunch, wantLaunch) {
+		t.Errorf("PreLaunch = %v, want %v", cfg.Agents[0].PreLaunch, wantLaunch)
 	}
 }
 
@@ -3074,6 +3087,7 @@ name = "polecat"
 			Overrides: []AgentOverride{{
 				Agent:              "polecat",
 				PreStartAppend:     []string{"setup.sh"},
+				PreLaunchAppend:    []string{"claim.sh"},
 				SessionSetupAppend: []string{"tmux set mouse on"},
 			}},
 		}},
@@ -3084,6 +3098,9 @@ name = "polecat"
 	a := cfg.Agents[0]
 	if !sliceEqual(a.PreStart, []string{"setup.sh"}) {
 		t.Errorf("PreStart = %v, want [setup.sh]", a.PreStart)
+	}
+	if !sliceEqual(a.PreLaunch, []string{"claim.sh"}) {
+		t.Errorf("PreLaunch = %v, want [claim.sh]", a.PreLaunch)
 	}
 	if !sliceEqual(a.SessionSetup, []string{"tmux set mouse on"}) {
 		t.Errorf("SessionSetup = %v, want [tmux set mouse on]", a.SessionSetup)

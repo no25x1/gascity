@@ -27,4 +27,5 @@ lives in the [Architecture](../architecture/index.md) section.
 | `session-lifecycle-domain-cleanup-plan` | Implemented with hardening | Red-green-refactor plan for centralizing session lifecycle projection and transition writes behind typed abstractions |
 | `external-messaging-fabric` | Implemented | Provider-neutral external conversation bindings, delivery context, and group sessions |
 | `external-messaging-shared-threads` | Implemented | Transcript-backed shared-thread model with membership replay and speaker-only group routing |
+| `pre-launch-hooks` | Proposed | General pre-inference startup hook for deterministic prompt/env/metadata injection and claim-or-drain scripts |
 | `worker-conformance` | Proposed | Canonical WorkerCore/WorkerInference contract, transcript-first conformance, and migration toward `internal/worker` |

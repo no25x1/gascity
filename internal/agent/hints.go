@@ -17,6 +17,10 @@ type StartupHints struct {
 	// PreStart is a list of shell commands run before session creation.
 	// Already template-expanded by the caller. Failures abort startup.
 	PreStart []string
+	// PreLaunch is a list of shell commands run after pre_start and session
+	// identity preparation, but before provider process launch.
+	// Already template-expanded by the caller.
+	PreLaunch []string
 	// SessionSetup is a list of shell commands run after session creation.
 	// Already template-expanded by the caller.
 	SessionSetup []string

@@ -1499,6 +1499,7 @@ func deepCopyAgents(in []Agent) []Agent {
 		out[i] = in[i]
 		out[i].Args = append([]string(nil), in[i].Args...)
 		out[i].PreStart = append([]string(nil), in[i].PreStart...)
+		out[i].PreLaunch = append([]string(nil), in[i].PreLaunch...)
 		out[i].ProcessNames = append([]string(nil), in[i].ProcessNames...)
 		out[i].Env = deepCopyStringMap(in[i].Env)
 		out[i].OptionDefaults = deepCopyStringMap(in[i].OptionDefaults)
@@ -2331,6 +2332,12 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	}
 	if len(ov.PreStartAppend) > 0 {
 		a.PreStart = append(a.PreStart, ov.PreStartAppend...)
+	}
+	if len(ov.PreLaunch) > 0 {
+		a.PreLaunch = append([]string(nil), ov.PreLaunch...)
+	}
+	if len(ov.PreLaunchAppend) > 0 {
+		a.PreLaunch = append(a.PreLaunch, ov.PreLaunchAppend...)
 	}
 	if ov.PromptTemplate != nil {
 		a.PromptTemplate = *ov.PromptTemplate

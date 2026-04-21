@@ -100,6 +100,14 @@ func NewProviderWithDir(dir string, cfg Config) *Provider {
 // optionally sends the initial nudge. Returns an error if a session with
 // that name already exists or the handshake fails.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if len(cfg.PreLaunch) > 0 {
+		return &runtime.PreLaunchDecisionError{
+			Err:    runtime.ErrPreLaunchAborted,
+			Action: "abort",
+			Reason: "pre_launch is only supported by the tmux provider",
+			Stage:  "unsupported_provider",
+		}
+	}
 	p.mu.Lock()
 
 	// Check in-memory tracking first.

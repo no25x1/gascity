@@ -14,6 +14,7 @@ func TestConfigHash_Canonical(t *testing.T) {
 		Env:     map[string]string{"FOO": "bar", "BAZ": "qux"},
 		Hints: agent.StartupHints{
 			PreStart:     []string{"echo setup"},
+			PreLaunch:    []string{"gc work claim-next --json"},
 			SessionSetup: []string{"echo ready"},
 		},
 		WorkDir:     "/home/user/project",
@@ -63,6 +64,12 @@ func TestConfigHash_Behavioral(t *testing.T) {
 	envChanged.Env = map[string]string{"KEY": "different"}
 	if h := canonicalConfigHash(envChanged, nil); h == baseHash {
 		t.Error("env change should produce different hash")
+	}
+
+	preLaunchChanged := base
+	preLaunchChanged.Hints.PreLaunch = []string{"gc work claim-next --json"}
+	if h := canonicalConfigHash(preLaunchChanged, nil); h == baseHash {
+		t.Error("pre_launch change should produce different hash")
 	}
 }
 

@@ -578,6 +578,7 @@ func TestApplyPatches_AppendAlone(t *testing.T) {
 		Agents: []Agent{{
 			Name:              "worker",
 			PreStart:          []string{"base-setup.sh"},
+			PreLaunch:         []string{"base-claim.sh"},
 			SessionSetup:      []string{"tmux set status"},
 			InstallAgentHooks: []string{"claude"},
 			InjectFragments:   []string{"tdd"},
@@ -587,6 +588,7 @@ func TestApplyPatches_AppendAlone(t *testing.T) {
 		Agents: []AgentPatch{{
 			Name:                    "worker",
 			PreStartAppend:          []string{"extra-setup.sh"},
+			PreLaunchAppend:         []string{"extra-claim.sh"},
 			SessionSetupAppend:      []string{"tmux set mouse on"},
 			InstallAgentHooksAppend: []string{"gemini"},
 			InjectFragmentsAppend:   []string{"safety"},
@@ -599,6 +601,10 @@ func TestApplyPatches_AppendAlone(t *testing.T) {
 	wantPreStart := []string{"base-setup.sh", "extra-setup.sh"}
 	if !sliceEqual(a.PreStart, wantPreStart) {
 		t.Errorf("PreStart = %v, want %v", a.PreStart, wantPreStart)
+	}
+	wantPreLaunch := []string{"base-claim.sh", "extra-claim.sh"}
+	if !sliceEqual(a.PreLaunch, wantPreLaunch) {
+		t.Errorf("PreLaunch = %v, want %v", a.PreLaunch, wantPreLaunch)
 	}
 	wantSetup := []string{"tmux set status", "tmux set mouse on"}
 	if !sliceEqual(a.SessionSetup, wantSetup) {
@@ -617,15 +623,18 @@ func TestApplyPatches_AppendAlone(t *testing.T) {
 func TestApplyPatches_ReplacePlusAppend(t *testing.T) {
 	cfg := &City{
 		Agents: []Agent{{
-			Name:     "worker",
-			PreStart: []string{"old-a.sh", "old-b.sh"},
+			Name:      "worker",
+			PreStart:  []string{"old-a.sh", "old-b.sh"},
+			PreLaunch: []string{"old-claim-a.sh", "old-claim-b.sh"},
 		}},
 	}
 	err := ApplyPatches(cfg, Patches{
 		Agents: []AgentPatch{{
-			Name:           "worker",
-			PreStart:       []string{"new-base.sh"},
-			PreStartAppend: []string{"extra.sh"},
+			Name:            "worker",
+			PreStart:        []string{"new-base.sh"},
+			PreStartAppend:  []string{"extra.sh"},
+			PreLaunch:       []string{"new-claim.sh"},
+			PreLaunchAppend: []string{"extra-claim.sh"},
 		}},
 	})
 	if err != nil {
@@ -634,6 +643,10 @@ func TestApplyPatches_ReplacePlusAppend(t *testing.T) {
 	want := []string{"new-base.sh", "extra.sh"}
 	if !sliceEqual(cfg.Agents[0].PreStart, want) {
 		t.Errorf("PreStart = %v, want %v", cfg.Agents[0].PreStart, want)
+	}
+	wantLaunch := []string{"new-claim.sh", "extra-claim.sh"}
+	if !sliceEqual(cfg.Agents[0].PreLaunch, wantLaunch) {
+		t.Errorf("PreLaunch = %v, want %v", cfg.Agents[0].PreLaunch, wantLaunch)
 	}
 }
 
@@ -645,6 +658,7 @@ func TestApplyPatches_AppendToEmptyBase(t *testing.T) {
 		Agents: []AgentPatch{{
 			Name:               "worker",
 			PreStartAppend:     []string{"setup.sh"},
+			PreLaunchAppend:    []string{"claim.sh"},
 			SessionSetupAppend: []string{"tmux set mouse on"},
 		}},
 	})
@@ -654,6 +668,9 @@ func TestApplyPatches_AppendToEmptyBase(t *testing.T) {
 	a := cfg.Agents[0]
 	if !sliceEqual(a.PreStart, []string{"setup.sh"}) {
 		t.Errorf("PreStart = %v, want [setup.sh]", a.PreStart)
+	}
+	if !sliceEqual(a.PreLaunch, []string{"claim.sh"}) {
+		t.Errorf("PreLaunch = %v, want [claim.sh]", a.PreLaunch)
 	}
 	if !sliceEqual(a.SessionSetup, []string{"tmux set mouse on"}) {
 		t.Errorf("SessionSetup = %v, want [tmux set mouse on]", a.SessionSetup)

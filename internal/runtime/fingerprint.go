@@ -14,7 +14,7 @@ import (
 // the agent should be restarted (via drain when drain ops are available).
 //
 // Included: Command, Env, FingerprintExtra (pool config, etc.),
-// PreStart, SessionSetup, SessionSetupScript, OverlayDir, CopyFiles,
+// PreStart, PreLaunch, SessionSetup, SessionSetupScript, OverlayDir, CopyFiles,
 // SessionLive.
 //
 // Excluded (observation-only hints): WorkDir, ReadyPromptPrefix,
@@ -141,6 +141,13 @@ func hashCoreFields(h hash.Hash, cfg Config) {
 	}
 	h.Write([]byte{1}) //nolint:errcheck // sentinel between slices
 
+	// PreLaunch
+	for _, pl := range cfg.PreLaunch {
+		h.Write([]byte(pl)) //nolint:errcheck // hash.Write never errors
+		h.Write([]byte{0})  //nolint:errcheck // hash.Write never errors
+	}
+	h.Write([]byte{1}) //nolint:errcheck // sentinel between slices
+
 	// SessionSetup
 	for _, ss := range cfg.SessionSetup {
 		h.Write([]byte(ss)) //nolint:errcheck // hash.Write never errors
@@ -249,6 +256,12 @@ func CoreFingerprintBreakdown(cfg Config) map[string]string {
 				h.Write([]byte{0})
 			}
 		}),
+		"PreLaunch": fieldHash(func(h hash.Hash) {
+			for _, pl := range cfg.PreLaunch {
+				h.Write([]byte(pl))
+				h.Write([]byte{0})
+			}
+		}),
 		"SessionSetup": fieldHash(func(h hash.Hash) {
 			for _, ss := range cfg.SessionSetup {
 				h.Write([]byte(ss))
@@ -318,6 +331,8 @@ func LogCoreFingerprintDrift(w io.Writer, name string, storedBreakdown map[strin
 			fmt.Fprintf(w, "    FPExtra: %v (len=%d)\n", current.FingerprintExtra, len(current.FingerprintExtra)) //nolint:errcheck // best-effort diag
 		case "PreStart":
 			fmt.Fprintf(w, "    PreStart: %v\n", current.PreStart) //nolint:errcheck // best-effort diag
+		case "PreLaunch":
+			fmt.Fprintf(w, "    PreLaunch: %v\n", current.PreLaunch) //nolint:errcheck // best-effort diag
 		case "OverlayDir":
 			fmt.Fprintf(w, "    OverlayDir: %q\n", current.OverlayDir) //nolint:errcheck // best-effort diag
 		case "SessionSetup":
