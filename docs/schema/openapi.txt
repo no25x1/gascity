@@ -299,6 +299,24 @@
           "Pool": {
             "$ref": "#/components/schemas/PoolOverride"
           },
+          "PreLaunch": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "PreLaunchAppend": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "PreStart": {
             "items": {
               "type": "string"
@@ -454,6 +472,7 @@
           "Env",
           "EnvRemove",
           "PreStart",
+          "PreLaunch",
           "PromptTemplate",
           "Session",
           "Provider",
@@ -480,6 +499,7 @@
           "ResumeCommand",
           "WakeMode",
           "PreStartAppend",
+          "PreLaunchAppend",
           "SessionSetupAppend",
           "SessionLiveAppend",
           "InstallAgentHooksAppend",

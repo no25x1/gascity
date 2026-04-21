@@ -559,7 +559,7 @@ Failure stages:
 - `metadata_write`
 - `unsupported_prompt_patch`
 - `patch_too_large`
-- `context_cancelled`
+- `context_canceled`
 
 Abort retry uses the existing wake failure machinery, but the failure is tagged
 as pre-launch rather than provider-start. A retry must be idempotent. The

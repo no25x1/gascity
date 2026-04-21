@@ -876,12 +876,14 @@ type preLaunchCommandResult struct {
 	Metadata      map[string]string `json:"metadata,omitempty"`
 }
 
-const maxPreLaunchStdout = 64 * 1024
-const maxPreLaunchStderr = 16 * 1024
-const maxPreLaunchReason = 1024
-const maxPreLaunchEnvValue = 8 * 1024
-const maxPreLaunchPromptPatch = 64 * 1024
-const maxPreLaunchNudgePatch = 16 * 1024
+const (
+	maxPreLaunchStdout      = 64 * 1024
+	maxPreLaunchStderr      = 16 * 1024
+	maxPreLaunchReason      = 1024
+	maxPreLaunchEnvValue    = 8 * 1024
+	maxPreLaunchPromptPatch = 64 * 1024
+	maxPreLaunchNudgePatch  = 16 * 1024
+)
 
 type limitedBuffer struct {
 	buf bytes.Buffer
@@ -927,7 +929,7 @@ func runPreLaunch(ctx context.Context, ops startOps, name string, cfg runtime.Co
 			if errors.Is(err, context.DeadlineExceeded) {
 				stage = "timeout"
 			} else if errors.Is(err, context.Canceled) {
-				stage = "context_cancelled"
+				stage = "context_canceled"
 			}
 			return cfg, fmt.Errorf("pre_launch[%d]: %w", i, &runtime.PreLaunchDecisionError{
 				Err:    runtime.ErrPreLaunchAborted,
@@ -1059,13 +1061,12 @@ func applyPreLaunchResult(cfg runtime.Config, result preLaunchCommandResult) (ru
 		}
 		if cfg.PromptMode == "none" {
 			return cfg, fmt.Errorf("unsupported_prompt_patch: prompt patches are not supported for prompt_mode=none")
-		} else {
-			prompt, err := promptSuffixPayload(cfg.PromptSuffix)
-			if err != nil {
-				return cfg, fmt.Errorf("unsupported_prompt_patch: %w", err)
-			}
-			cfg.PromptSuffix = shellquote.Quote(result.PromptPrepend + prompt + result.PromptAppend)
 		}
+		prompt, err := promptSuffixPayload(cfg.PromptSuffix)
+		if err != nil {
+			return cfg, fmt.Errorf("unsupported_prompt_patch: %w", err)
+		}
+		cfg.PromptSuffix = shellquote.Quote(result.PromptPrepend + prompt + result.PromptAppend)
 	}
 	if result.NudgePrepend != "" || result.NudgeAppend != "" {
 		if len(result.NudgePrepend)+len(result.NudgeAppend) > maxPreLaunchNudgePatch {

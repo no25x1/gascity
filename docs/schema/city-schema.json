@@ -81,6 +81,13 @@
           "type": "array",
           "description": "PreStart is a list of shell commands run before session creation.\nCommands run on the target filesystem: locally for tmux, inside the\npod/container for exec providers. Template variables same as session_setup."
         },
+        "pre_launch": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "PreLaunch is a list of shell commands run after pre_start and session\nidentity preparation, but before the provider process is launched.\nCommands may emit a bounded JSON response to continue, drain, abort,\nor patch startup prompt/nudge/env/metadata."
+        },
         "prompt_template": {
           "type": "string",
           "description": "PromptTemplate is the path to this agent's prompt template file.\nRelative paths resolve against the city directory."
@@ -413,6 +420,13 @@
           "type": "array",
           "description": "PreStart overrides the agent's pre_start commands."
         },
+        "pre_launch": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "PreLaunch overrides the agent's pre_launch commands."
+        },
         "prompt_template": {
           "type": "string",
           "description": "PromptTemplate overrides the prompt template path.\nRelative paths resolve against the city directory."
@@ -516,6 +530,13 @@
           },
           "type": "array",
           "description": "PreStartAppend appends commands to the agent's pre_start list\n(instead of replacing). Applied after PreStart if both are set."
+        },
+        "pre_launch_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "PreLaunchAppend appends commands to the agent's pre_launch list\n(instead of replacing). Applied after PreLaunch if both are set."
         },
         "session_setup_append": {
           "items": {
@@ -655,6 +676,13 @@
           },
           "type": "array",
           "description": "PreStart overrides the agent's pre_start commands."
+        },
+        "pre_launch": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "PreLaunch overrides the agent's pre_launch commands."
         },
         "prompt_template": {
           "type": "string",
@@ -796,6 +824,13 @@
           },
           "type": "array",
           "description": "PreStartAppend appends commands to the agent's pre_start list\n(instead of replacing). Applied after PreStart if both are set."
+        },
+        "pre_launch_append": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "PreLaunchAppend appends commands to the agent's pre_launch list\n(instead of replacing). Applied after PreLaunch if both are set."
         },
         "session_setup_append": {
           "items": {

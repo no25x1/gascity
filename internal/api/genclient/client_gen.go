@@ -267,6 +267,8 @@ type AgentPatch struct {
 	OptionDefaults          map[string]string `json:"OptionDefaults"`
 	OverlayDir              *string           `json:"OverlayDir"`
 	Pool                    PoolOverride      `json:"Pool"`
+	PreLaunch               *[]string         `json:"PreLaunch"`
+	PreLaunchAppend         *[]string         `json:"PreLaunchAppend"`
 	PreStart                *[]string         `json:"PreStart"`
 	PreStartAppend          *[]string         `json:"PreStartAppend"`
 	PromptTemplate          *string           `json:"PromptTemplate"`

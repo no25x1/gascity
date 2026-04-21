@@ -9,8 +9,10 @@ import (
 	"strings"
 )
 
+// ErrClaimConflict marks ordinary contention while claiming a bead.
 var ErrClaimConflict = errors.New("bead claim conflict")
 
+// ClaimWithBD atomically claims a bead for assignee using the bd CLI.
 func ClaimWithBD(ctx context.Context, dir, beadID, assignee string) error {
 	cmd := exec.CommandContext(ctx, "bd", "update", beadID, "--claim", "--json")
 	cmd.Dir = dir
@@ -26,6 +28,7 @@ func ClaimWithBD(ctx context.Context, dir, beadID, assignee string) error {
 	return fmt.Errorf("bd claim %s: %w: %s", beadID, err, msg)
 }
 
+// IsClaimConflict reports whether err is ordinary claim contention.
 func IsClaimConflict(err error) bool {
 	return errors.Is(err, ErrClaimConflict)
 }

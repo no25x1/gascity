@@ -24,6 +24,7 @@ gc [flags]
 | [gc beads](#gc-beads) | Manage the beads provider |
 | [gc build-image](#gc-build-image) | Build a prebaked agent container image |
 | [gc cities](#gc-cities) | List registered cities |
+| [gc completion](#gc-completion) | Generate the autocompletion script for the specified shell |
 | [gc config](#gc-config) | Inspect and validate city configuration |
 | [gc converge](#gc-converge) | Manage convergence loops (bounded iterative refinement) |
 | [gc convoy](#gc-convoy) | Manage convoys — graphs of related work |
@@ -63,6 +64,7 @@ gc [flags]
 | [gc unregister](#gc-unregister) | Remove a city from the machine-wide supervisor |
 | [gc version](#gc-version) | Print gc version |
 | [gc wait](#gc-wait) | Inspect and manage durable session waits |
+| [gc work](#gc-work) | Manage runnable work for agents |
 
 ## gc agent
 
@@ -303,6 +305,127 @@ List registered cities
 ```
 gc cities list
 ```
+
+## gc completion
+
+Generate the autocompletion script for gc for the specified shell.
+See each sub-command's help for details on how to use the generated script.
+
+```
+gc completion
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc completion bash](#gc-completion-bash) | Generate the autocompletion script for bash |
+| [gc completion fish](#gc-completion-fish) | Generate the autocompletion script for fish |
+| [gc completion powershell](#gc-completion-powershell) | Generate the autocompletion script for powershell |
+| [gc completion zsh](#gc-completion-zsh) | Generate the autocompletion script for zsh |
+
+## gc completion bash
+
+Generate the autocompletion script for the bash shell.
+
+This script depends on the 'bash-completion' package.
+If it is not installed already, you can install it via your OS's package manager.
+
+To load completions in your current shell session:
+
+	source &lt;(gc completion bash)
+
+To load completions for every new session, execute once:
+
+#### Linux:
+
+	gc completion bash &gt; /etc/bash_completion.d/gc
+
+#### macOS:
+
+	gc completion bash &gt; $(brew --prefix)/etc/bash_completion.d/gc
+
+You will need to start a new shell for this setup to take effect.
+
+```
+gc completion bash
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--no-descriptions` | bool |  | disable completion descriptions |
+
+## gc completion fish
+
+Generate the autocompletion script for the fish shell.
+
+To load completions in your current shell session:
+
+	gc completion fish | source
+
+To load completions for every new session, execute once:
+
+	gc completion fish &gt; ~/.config/fish/completions/gc.fish
+
+You will need to start a new shell for this setup to take effect.
+
+```
+gc completion fish [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--no-descriptions` | bool |  | disable completion descriptions |
+
+## gc completion powershell
+
+Generate the autocompletion script for powershell.
+
+To load completions in your current shell session:
+
+	gc completion powershell | Out-String | Invoke-Expression
+
+To load completions for every new session, add the output of the above command
+to your powershell profile.
+
+```
+gc completion powershell [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--no-descriptions` | bool |  | disable completion descriptions |
+
+## gc completion zsh
+
+Generate the autocompletion script for the zsh shell.
+
+If shell completion is not already enabled in your environment you will need
+to enable it.  You can execute the following once:
+
+	echo "autoload -U compinit; compinit" &gt;&gt; ~/.zshrc
+
+To load completions in your current shell session:
+
+	source &lt;(gc completion zsh)
+
+To load completions for every new session, execute once:
+
+#### Linux:
+
+	gc completion zsh &gt; "$&#123;fpath[1]&#125;/_gc"
+
+#### macOS:
+
+	gc completion zsh &gt; $(brew --prefix)/share/zsh/site-functions/_gc
+
+You will need to start a new shell for this setup to take effect.
+
+```
+gc completion zsh [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--no-descriptions` | bool |  | disable completion descriptions |
 
 ## gc config
 
@@ -2700,3 +2823,29 @@ Manually mark a wait ready
 ```
 gc wait ready <wait-id>
 ```
+
+## gc work
+
+Manage runnable work for agents
+
+```
+gc work
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc work claim-next](#gc-work-claim-next) | Atomically claim the next routed work item |
+
+## gc work claim-next
+
+Atomically claim the next routed work item
+
+```
+gc work claim-next [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--assignee` | string |  | session identity to claim as |
+| `--json` | bool |  | emit pre_launch JSON |
+| `--template` | string |  | agent template/routing target |
