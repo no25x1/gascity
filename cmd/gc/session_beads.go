@@ -55,15 +55,6 @@ func snapshotOrLoadSessionBeads(store beads.Store, sessionBeads *sessionBeadSnap
 	return loadSessionBeads(store)
 }
 
-var resolvedProviderSessionMetadataKeys = []string{
-	"provider",
-	"provider_kind",
-	"builtin_ancestor",
-	"resume_flag",
-	"resume_style",
-	"resume_command",
-}
-
 func resolvedProviderSessionMetadata(resolved *config.ResolvedProvider) map[string]string {
 	if resolved == nil {
 		return nil
@@ -99,11 +90,7 @@ func queueResolvedProviderSessionMetadata(existing map[string]string, queue func
 		return
 	}
 	desired := resolvedProviderSessionMetadata(resolved)
-	for _, key := range resolvedProviderSessionMetadataKeys {
-		value := desired[key]
-		if key == "provider" && value == "" {
-			continue
-		}
+	for key, value := range desired {
 		if strings.TrimSpace(existing[key]) != value {
 			queue(key, value)
 		}

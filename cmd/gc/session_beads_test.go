@@ -1951,7 +1951,7 @@ func TestSyncSessionBeads_RefreshesStoredConfigDerivedMetadataOnConfigChange(t *
 	}
 }
 
-func TestSyncSessionBeads_ClearsRemovedConfigDerivedMetadataOnConfigChange(t *testing.T) {
+func TestSyncSessionBeads_ClearsConfigDerivedMetadataForNamelessResolvedProvider(t *testing.T) {
 	store := newCountingMetadataStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 22, 12, 5, 0, 0, time.UTC)}
 	sp := runtime.NewFake()
@@ -1986,12 +1986,10 @@ func TestSyncSessionBeads_ClearsRemovedConfigDerivedMetadataOnConfigChange(t *te
 
 	ds := map[string]TemplateParams{
 		"worker": {
-			TemplateName: "worker",
-			Command:      "/usr/bin/custom --fast",
-			WakeMode:     "resume",
-			ResolvedProvider: &config.ResolvedProvider{
-				Name: "custom-runtime",
-			},
+			TemplateName:     "worker",
+			Command:          "/usr/bin/custom --fast",
+			WakeMode:         "resume",
+			ResolvedProvider: &config.ResolvedProvider{},
 		},
 	}
 
@@ -2016,8 +2014,8 @@ func TestSyncSessionBeads_ClearsRemovedConfigDerivedMetadataOnConfigChange(t *te
 	if got["command"] != "/usr/bin/custom --fast" {
 		t.Fatalf("command = %q, want /usr/bin/custom --fast", got["command"])
 	}
-	if got["provider"] != "custom-runtime" {
-		t.Fatalf("provider = %q, want custom-runtime", got["provider"])
+	if got["provider"] != "" {
+		t.Fatalf("provider = %q, want empty", got["provider"])
 	}
 	if got["provider_kind"] != "" {
 		t.Fatalf("provider_kind = %q, want empty", got["provider_kind"])
