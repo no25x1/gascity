@@ -146,6 +146,28 @@ func hasStoredResolvedProviderSessionMetadataKeys(meta map[string]string, keys [
 	return false
 }
 
+func storedResolvedProviderSessionMetadataHash(meta map[string]string, keys []string) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	subset := make(map[string]string)
+	for _, key := range keys {
+		if value := strings.TrimSpace(meta[key]); value != "" {
+			subset[key] = value
+		}
+	}
+	if len(subset) == 0 {
+		return ""
+	}
+	h := sha256.New()
+	hashSortedStringMap(h, subset)
+	sum := fmt.Sprintf("%x", h.Sum(nil))
+	if len(sum) > 16 {
+		return sum[:16]
+	}
+	return sum
+}
+
 func shouldSyncResolvedProviderFamilyMetadata(b beads.Bead, tp TemplateParams, alive bool) bool {
 	state := strings.TrimSpace(b.Metadata["state"])
 	if !alive || (state != "active" && state != "awake") {
@@ -964,6 +986,11 @@ func syncSessionBeadsWithSnapshot(
 		// resolved provider, including clearing stale fields that no longer apply.
 		if tp.Command != "" && b.Metadata["command"] != tp.Command {
 			queueMeta("command", tp.Command)
+		}
+		if alive && (state == "active" || state == "awake") && strings.TrimSpace(b.Metadata[startedProviderFamilyHashKey]) == "" {
+			if liveFamilyHash := storedResolvedProviderSessionMetadataHash(b.Metadata, resolvedProviderFamilyMetadataKeys); liveFamilyHash != "" {
+				queueMeta(startedProviderFamilyHashKey, liveFamilyHash)
+			}
 		}
 		queueResolvedProviderSessionMetadataKeys(b.Metadata, queueMeta, tp.ResolvedProvider, resolvedProviderResumeMetadataKeys)
 		if shouldSyncResolvedProviderFamilyMetadata(b, tp, alive) {
