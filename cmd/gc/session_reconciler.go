@@ -820,8 +820,9 @@ func reconcileSessionBeadsTraced(
 			if template != "" && storedHash != "" {
 				if cfgAgent := findAgentByTemplate(cfg, template); cfgAgent != nil {
 					agentCfg := templateParamsToConfig(tp)
-					currentHash := runtime.CoreFingerprint(agentCfg)
-					if storedHash != currentHash {
+					match := startedConfigMatchesFingerprint(session.Metadata, agentCfg, tp.ResolvedProvider)
+					currentHash := match.currentHash
+					if !match.matches {
 						resetConfiguredNamedSessionForConfigDrift(session, store, sp, name, false, "asleep", stderr)
 						if trace != nil {
 							trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "repair_in_place", traceRecordPayload{

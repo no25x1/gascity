@@ -1667,6 +1667,120 @@ func TestReconcileSessionBeads_LegacyStartedHashWithoutProviderMetadataDoesNotDr
 	}
 }
 
+func TestReconcileSessionBeads_AsleepNamedSessionDoesNotResetWhenProviderAwareHashMatches(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true"}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	tp := TemplateParams{
+		Command:                 "true",
+		SessionName:             sessionName,
+		TemplateName:            "worker",
+		ConfiguredNamedIdentity: "worker",
+		ConfiguredNamedMode:     "on_demand",
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:            "claude-wrapper",
+			BuiltinAncestor: "claude",
+		},
+	}
+	env.desiredState[sessionName] = tp
+	session := env.createSessionBead(sessionName, "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+		"state":                      "asleep",
+		"session_key":                "keep-key",
+		"started_config_hash":        coreFingerprintForTemplateParams(tp, nil),
+		"provider":                   "claude-wrapper",
+		"provider_kind":              "claude",
+		"builtin_ancestor":           "claude",
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session: %v", err)
+	}
+	if got.Metadata["started_config_hash"] == "" {
+		t.Fatal("started_config_hash was cleared despite matching provider-aware hash")
+	}
+	if got.Metadata["session_key"] != "keep-key" {
+		t.Fatalf("session_key = %q, want keep-key without spurious reset", got.Metadata["session_key"])
+	}
+	if got.Metadata["state"] != "asleep" {
+		t.Fatalf("state = %q, want asleep", got.Metadata["state"])
+	}
+}
+
+func TestReconcileSessionBeads_AsleepNamedSessionResetsOnProviderOnlyDrift(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true"}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	oldTP := TemplateParams{
+		Command:                 "true",
+		SessionName:             sessionName,
+		TemplateName:            "worker",
+		ConfiguredNamedIdentity: "worker",
+		ConfiguredNamedMode:     "on_demand",
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:            "claude-wrapper",
+			BuiltinAncestor: "claude",
+		},
+	}
+	newTP := TemplateParams{
+		Command:                 "true",
+		SessionName:             sessionName,
+		TemplateName:            "worker",
+		ConfiguredNamedIdentity: "worker",
+		ConfiguredNamedMode:     "on_demand",
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:            "gemini-wrapper",
+			BuiltinAncestor: "gemini",
+		},
+	}
+	env.desiredState[sessionName] = newTP
+	session := env.createSessionBead(sessionName, "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+		"state":                      "asleep",
+		"session_key":                "stale-key",
+		"started_config_hash":        coreFingerprintForTemplateParams(oldTP, nil),
+		"provider":                   "claude-wrapper",
+		"provider_kind":              "claude",
+		"builtin_ancestor":           "claude",
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session: %v", err)
+	}
+	if got.Metadata["started_config_hash"] != "" {
+		t.Fatalf("started_config_hash = %q, want cleared for provider-only drift reset", got.Metadata["started_config_hash"])
+	}
+	if got.Metadata["session_key"] == "" || got.Metadata["session_key"] == "stale-key" {
+		t.Fatalf("session_key = %q, want rotated key after provider-only drift reset", got.Metadata["session_key"])
+	}
+	if got.Metadata["continuation_reset_pending"] != "true" {
+		t.Fatalf("continuation_reset_pending = %q, want true", got.Metadata["continuation_reset_pending"])
+	}
+	if got.Metadata["state"] != "asleep" {
+		t.Fatalf("state = %q, want asleep", got.Metadata["state"])
+	}
+}
+
 // Regression test for #127: a freshly created session can be drained for
 // config-drift shortly after wake because the reconciler's drift check runs
 // before started_config_hash is written. The fix skips drift detection until
