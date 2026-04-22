@@ -1697,6 +1697,36 @@ func TestReconcileSessionBeads_LegacyStartedHashWithoutProviderMetadataDrainsOnL
 	}
 }
 
+func TestReconcileSessionBeads_LegacyStartedHashWithoutProviderMetadataDrainsOnExplicitProviderClear(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.desiredState["worker"] = TemplateParams{
+		Command:          "test-cmd",
+		SessionName:      "worker",
+		TemplateName:     "worker",
+		ResolvedProvider: &config.ResolvedProvider{},
+	}
+	_ = env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"})
+	if err := env.sp.SetMeta("worker", "GC_PROVIDER", "claude"); err != nil {
+		t.Fatalf("SetMeta(GC_PROVIDER): %v", err)
+	}
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	ds := env.dt.get(session.ID)
+	if ds == nil {
+		t.Fatalf("expected drain when live provider family disagrees with explicit cleared provider for legacy started hash (stderr=%s)", env.stderr.String())
+	}
+	if ds.reason != "config-drift" {
+		t.Fatalf("drain reason = %q, want config-drift", ds.reason)
+	}
+}
+
 func TestReconcileSessionBeads_AsleepNamedSessionDoesNotResetWhenProviderAwareHashMatches(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{

@@ -648,7 +648,7 @@ func reconcileSessionBeadsTraced(
 					if match.matches && match.legacyProviderFallback {
 						liveProvider := liveSessionProviderFamily(sp, name)
 						expectedProvider := expectedProviderFamilyForTemplate(session, tp)
-						if expectedProvider != "" && liveProvider != "" && liveProvider != expectedProvider {
+						if liveProvider != "" && liveProvider != expectedProvider {
 							match.matches = false
 						}
 					}

@@ -142,6 +142,47 @@ func applySessionMetadataBatch(session *beads.Bead, batch map[string]string) {
 	}
 }
 
+func sessionMetadataSnapshot(meta map[string]string, keys []string) map[string]string {
+	if len(keys) == 0 {
+		return nil
+	}
+	snapshot := make(map[string]string, len(keys))
+	for _, key := range keys {
+		snapshot[key] = strings.TrimSpace(meta[key])
+	}
+	return snapshot
+}
+
+func prepareStartRollbackKeys(wakeMode string) []string {
+	keys := []string{
+		"instance_token",
+		"continuation_epoch",
+		"continuation_reset_pending",
+		"detached_at",
+		"last_woke_at",
+		"sleep_reason",
+		"sleep_intent",
+		"generation",
+		"session_key",
+	}
+	keys = append(keys, pendingStartFingerprintMetadataKeys...)
+	if wakeMode == "fresh" {
+		keys = append(keys, sessionpkg.FreshWakeConversationResetKeys()...)
+	}
+	return keys
+}
+
+func rollbackPreparedStartMetadata(session *beads.Bead, store beads.Store, snapshot map[string]string) error {
+	if session == nil || store == nil || len(snapshot) == 0 {
+		return nil
+	}
+	if err := store.SetMetadataBatch(session.ID, snapshot); err != nil {
+		return fmt.Errorf("rolling back pre-wake metadata: %w", err)
+	}
+	applySessionMetadataBatch(session, snapshot)
+	return nil
+}
+
 func clearPendingStartFingerprintMetadata(batch map[string]string) {
 	if batch == nil {
 		return
@@ -379,15 +420,22 @@ func prepareStartCandidate(
 	clk clock.Clock,
 ) (*preparedStart, error) {
 	session := candidate.session
+	rollbackSnapshot := sessionMetadataSnapshot(session.Metadata, prepareStartRollbackKeys(strings.TrimSpace(session.Metadata["wake_mode"])))
 	if _, _, err := preWakeCommit(session, store, clk); err != nil {
+		return nil, err
+	}
+	rollbackOnError := func(err error) (*preparedStart, error) {
+		if rbErr := rollbackPreparedStartMetadata(session, store, rollbackSnapshot); rbErr != nil {
+			return nil, errors.Join(err, rbErr)
+		}
 		return nil, err
 	}
 	prepared, err := buildPreparedStart(candidate, cfg, store)
 	if err != nil {
-		return nil, err
+		return rollbackOnError(err)
 	}
 	if err := stagePendingStartFingerprint(session, prepared, store); err != nil {
-		return nil, err
+		return rollbackOnError(err)
 	}
 	return prepared, nil
 }

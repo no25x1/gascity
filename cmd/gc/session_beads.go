@@ -137,13 +137,23 @@ func shouldSyncCommandMetadata(b beads.Bead, tp TemplateParams, alive bool) bool
 	if !alive {
 		return true
 	}
-	if tp.ResolvedProvider == nil {
-		return true
-	}
 	if shouldSyncResolvedProviderMetadata(b, tp, alive) {
 		return true
 	}
+	if tp.ResolvedProvider == nil {
+		return !storedResumeContractDependsOnCommand(b.Metadata)
+	}
 	return !resolvedProviderSessionMetadataDiffers(b.Metadata, tp.ResolvedProvider, resolvedProviderConfigMetadataKeys)
+}
+
+func storedResumeContractDependsOnCommand(meta map[string]string) bool {
+	if strings.TrimSpace(meta["session_key"]) == "" {
+		return false
+	}
+	if strings.TrimSpace(meta["resume_command"]) != "" {
+		return false
+	}
+	return strings.TrimSpace(meta["resume_flag"]) != ""
 }
 
 func canRebindConfiguredNamedSession(b beads.Bead, identity, sessionName, backingTemplate string) bool {

@@ -1339,6 +1339,88 @@ func TestRecoverRunningPendingCreate_SetsRestartRequestedWhenDesiredProviderClea
 	}
 }
 
+func TestPrepareStartCandidate_RollsBackPreWakeMetadataWhenPendingFingerprintStageFails(t *testing.T) {
+	store := &failNthMetadataBatchStore{MemStore: beads.NewMemStore(), failOn: 2}
+	clk := &clock.Fake{Time: time.Date(2026, 4, 22, 12, 14, 0, 0, time.UTC)}
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":                      "sky",
+			"wake_mode":                         "fresh",
+			"generation":                        "1",
+			"instance_token":                    "old-token",
+			"continuation_epoch":                "7",
+			"continuation_reset_pending":        "true",
+			"last_woke_at":                      "2026-04-22T12:00:00Z",
+			"session_key":                       "old-key",
+			"started_config_hash":               "old-start",
+			"started_live_hash":                 "old-start-live",
+			"live_hash":                         "old-live",
+			"startup_dialog_verified":           "true",
+			pendingStartedConfigHashMetadataKey: "stale-pending",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tp := TemplateParams{
+		Command:      "claude --dangerously-skip-permissions",
+		SessionName:  "sky",
+		TemplateName: "helper",
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:            "claude-wrapper",
+			BuiltinAncestor: "claude",
+			SessionIDFlag:   "--session-id",
+			ResumeFlag:      "--resume",
+			ResumeStyle:     "flag",
+		},
+	}
+
+	if _, err := prepareStartCandidate(startCandidate{session: &bead, tp: tp}, &config.City{Agents: []config.Agent{{Name: "helper"}}}, store, clk); err == nil {
+		t.Fatal("prepareStartCandidate succeeded, want staging failure")
+	}
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["generation"] != "1" {
+		t.Fatalf("generation = %q, want rolled back 1", got.Metadata["generation"])
+	}
+	if got.Metadata["instance_token"] != "old-token" {
+		t.Fatalf("instance_token = %q, want old-token", got.Metadata["instance_token"])
+	}
+	if got.Metadata["continuation_epoch"] != "7" {
+		t.Fatalf("continuation_epoch = %q, want 7", got.Metadata["continuation_epoch"])
+	}
+	if got.Metadata["continuation_reset_pending"] != "true" {
+		t.Fatalf("continuation_reset_pending = %q, want true", got.Metadata["continuation_reset_pending"])
+	}
+	if got.Metadata["last_woke_at"] != "2026-04-22T12:00:00Z" {
+		t.Fatalf("last_woke_at = %q, want original timestamp", got.Metadata["last_woke_at"])
+	}
+	if got.Metadata["session_key"] != "old-key" {
+		t.Fatalf("session_key = %q, want old-key", got.Metadata["session_key"])
+	}
+	if got.Metadata["started_config_hash"] != "old-start" {
+		t.Fatalf("started_config_hash = %q, want old-start", got.Metadata["started_config_hash"])
+	}
+	if got.Metadata["started_live_hash"] != "old-start-live" {
+		t.Fatalf("started_live_hash = %q, want old-start-live", got.Metadata["started_live_hash"])
+	}
+	if got.Metadata["live_hash"] != "old-live" {
+		t.Fatalf("live_hash = %q, want old-live", got.Metadata["live_hash"])
+	}
+	if got.Metadata["startup_dialog_verified"] != "true" {
+		t.Fatalf("startup_dialog_verified = %q, want true", got.Metadata["startup_dialog_verified"])
+	}
+	if got.Metadata[pendingStartedConfigHashMetadataKey] != "stale-pending" {
+		t.Fatalf("%s = %q, want restored stale-pending", pendingStartedConfigHashMetadataKey, got.Metadata[pendingStartedConfigHashMetadataKey])
+	}
+}
+
 // A successful atomic start batch must land state=active, state_reason,
 // creation_complete_at, AND the pending_create_claim clear together —
 // downstream readers (e.g. the pool bead sweep) rely on this atomicity so
