@@ -2417,6 +2417,50 @@ func TestPrepareStartCandidate_PrefersResolvedProviderFamilyOverBeadMetadata(t *
 	}
 }
 
+func TestPrepareStartCandidate_ExplicitEmptyResolvedProviderClearsGCProvider(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title: "mayor",
+		Type:  "task",
+		Metadata: map[string]string{
+			"session_name":       "s-gc-test",
+			"template":           "mayor",
+			"session_origin":     "manual",
+			"provider":           "claude-wrapper",
+			"provider_kind":      "claude",
+			"builtin_ancestor":   "claude",
+			"generation":         "1",
+			"continuation_epoch": "1",
+			"instance_token":     "tok",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create bead: %v", err)
+	}
+	tp := TemplateParams{
+		Command:          "claude",
+		WorkDir:          t.TempDir(),
+		SessionName:      "s-gc-test",
+		Alias:            "mayor",
+		ResolvedProvider: &config.ResolvedProvider{},
+		TemplateName:     "mayor",
+		InstanceName:     "mayor",
+	}
+
+	prepared, err := prepareStartCandidate(
+		startCandidate{session: &bead, tp: tp},
+		&config.City{},
+		store,
+		clock.Real{},
+	)
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+	if got := prepared.cfg.Env["GC_PROVIDER"]; got != "" {
+		t.Fatalf("GC_PROVIDER = %q, want empty for explicit cleared provider", got)
+	}
+}
+
 func TestPrepareStartCandidate_EmptyBeadAliasPreservesTemplateGCAlias(t *testing.T) {
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{

@@ -426,11 +426,16 @@ func buildPreparedStart(
 		delete(runtimeEnv, "GC_ALIAS")
 	}
 	agentCfg.Env = mergeEnv(agentCfg.Env, runtimeEnv)
-	gcProvider := resolvedProviderLaunchFamily(tp.ResolvedProvider)
-	if gcProvider == "" {
-		gcProvider = sessionProviderFamily(*session)
+	gcProvider := ""
+	projectGCProvider := false
+	if tp.ResolvedProvider != nil {
+		gcProvider = resolvedProviderLaunchFamily(tp.ResolvedProvider)
+		projectGCProvider = true
+	} else if fallback := sessionProviderFamily(*session); fallback != "" {
+		gcProvider = fallback
+		projectGCProvider = true
 	}
-	if gcProvider != "" {
+	if projectGCProvider {
 		agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 	}
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
