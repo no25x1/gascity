@@ -1843,6 +1843,44 @@ func TestInstantiateRejectsResidualTitleVars(t *testing.T) {
 	})
 }
 
+func TestAttachReportsAllMissingRequiredVarsAtOnce(t *testing.T) {
+	store := beads.NewMemStore()
+	parent, err := store.Create(beads.Bead{Title: "Parent", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create(parent): %v", err)
+	}
+
+	recipe := &formula.Recipe{
+		Name: "attach-required-vars",
+		Steps: []formula.RecipeStep{
+			{ID: "attach-required-vars", Title: "Attach required vars", Type: "task", IsRoot: true},
+			{ID: "attach-required-vars.step", Title: "Do work for {{target_id}}", Type: "task"},
+		},
+		Deps: []formula.RecipeDep{
+			{StepID: "attach-required-vars.step", DependsOnID: "attach-required-vars", Type: "parent-child"},
+		},
+		Vars: map[string]*formula.VarDef{
+			"target_id": {Description: "Bead being worked on", Required: true},
+			"workspace": {Description: "Workspace path", Required: true},
+		},
+	}
+
+	_, err = Attach(context.Background(), store, recipe, parent.ID, AttachOptions{})
+	if err == nil {
+		t.Fatal("Attach should reject missing required vars")
+	}
+	errText := err.Error()
+	if !strings.Contains(errText, `variable "target_id" is required`) {
+		t.Fatalf("Attach error = %q, want missing target_id reported", errText)
+	}
+	if !strings.Contains(errText, `variable "workspace" is required`) {
+		t.Fatalf("Attach error = %q, want missing workspace reported", errText)
+	}
+	if strings.Contains(errText, "bead title contains unresolved variable(s)") {
+		t.Fatalf("Attach error = %q, want consolidated required-var validation instead of title-only failure", errText)
+	}
+}
+
 func TestInstantiateRejectsResidualTimeoutVars(t *testing.T) {
 	makeRecipe := func(stepTimeout string) *formula.Recipe {
 		return &formula.Recipe{
