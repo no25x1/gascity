@@ -1821,6 +1821,27 @@ func TestInstantiateRejectsResidualTitleVars(t *testing.T) {
 		}
 	})
 
+	t.Run("root title override substitutes provided vars", func(t *testing.T) {
+		result, err := Instantiate(context.Background(), store, &formula.Recipe{
+			Name: "root-override-vars",
+			Steps: []formula.RecipeStep{
+				{ID: "root-override-vars", Title: "fallback", Type: "molecule", IsRoot: true},
+			},
+			Vars: map[string]*formula.VarDef{
+				"env": {Description: "Deployment environment", Required: true},
+			},
+		}, Options{
+			Title: "Deploy {{env}}",
+			Vars:  map[string]string{"env": "prod"},
+		})
+		if err != nil {
+			t.Fatalf("should succeed with substituted title override: %v", err)
+		}
+		if result.Created != 1 {
+			t.Errorf("Created = %d, want 1", result.Created)
+		}
+	})
+
 	t.Run("graph-apply path rejects unresolved vars", func(t *testing.T) {
 		gaStore := &graphApplySpyStore{MemStore: beads.NewMemStore()}
 		prev := IsGraphApplyEnabled()

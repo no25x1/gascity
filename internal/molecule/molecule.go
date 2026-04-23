@@ -944,10 +944,11 @@ func unresolvedTitleValidationErrors(recipe *formula.Recipe, opts Options, missi
 		if recipe.RootOnly && i > 0 {
 			break
 		}
-		title := formula.Substitute(step.Title, vars)
+		rawTitle := step.Title
 		if step.IsRoot && opts.Title != "" {
-			title = opts.Title
+			rawTitle = opts.Title
 		}
+		title := formula.Substitute(rawTitle, vars)
 		if !strings.Contains(title, "{{") {
 			continue
 		}
