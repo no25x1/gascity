@@ -21437,6 +21437,16 @@
               "description": "Pagination cursor: return entries before this UUID.",
               "type": "string"
             }
+          },
+          {
+            "description": "Pagination cursor: return entries after this UUID.",
+            "explode": false,
+            "in": "query",
+            "name": "after",
+            "schema": {
+              "description": "Pagination cursor: return entries after this UUID.",
+              "type": "string"
+            }
           }
         ],
         "responses": {
