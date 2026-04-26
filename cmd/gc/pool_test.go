@@ -144,7 +144,7 @@ func TestEvaluatePoolDefaultScaleCheckCountsRoutedReadyWork(t *testing.T) {
 	}
 }
 
-func TestEvaluatePoolDefaultScaleCheckCountsRoutedActiveUnassignedWork(t *testing.T) {
+func TestEvaluatePoolDefaultScaleCheckIgnoresRoutedActiveUnassignedWork(t *testing.T) {
 	skipSlowCmdGCTest(t, "uses real bd and jq for default scale_check coverage; run make test-cmd-gc-process for full coverage")
 	bdPath, err := findPreferredBinary("bd", "/home/ubuntu/.local/bin/bd")
 	if err != nil {
@@ -187,8 +187,8 @@ func TestEvaluatePoolDefaultScaleCheckCountsRoutedActiveUnassignedWork(t *testin
 	if err != nil {
 		t.Fatalf("evaluatePool with routed in-progress work: %v", err)
 	}
-	if got != 1 {
-		t.Fatalf("evaluatePool with routed in-progress work = %d, want 1", got)
+	if got != 0 {
+		t.Fatalf("evaluatePool with routed in-progress work = %d, want 0", got)
 	}
 }
 
