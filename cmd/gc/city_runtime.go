@@ -374,6 +374,11 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		return
 	}
 
+	cr.applyStartupConfigReload(ctx, dirty, &lastProviderName, cityRoot)
+	if ctx.Err() != nil {
+		return
+	}
+
 	// Dispatch due orders before startup session reconciliation. A cold-start
 	// reconcile can take minutes when it has stale or config-drifted sessions;
 	// due event/condition formulas should not wait behind that maintenance work.
@@ -825,6 +830,24 @@ func (cr *CityRuntime) reloadConfig(
 	cityRoot string,
 ) {
 	cr.reloadConfigTraced(ctx, lastProviderName, cityRoot, nil, reloadSourceWatch)
+}
+
+func (cr *CityRuntime) applyStartupConfigReload(
+	ctx context.Context,
+	dirty *atomic.Bool,
+	lastProviderName *string,
+	cityRoot string,
+) {
+	if cr.tomlPath == "" || cityRoot == "" || cr.configRev == "" || lastProviderName == nil || ctx.Err() != nil {
+		return
+	}
+	if dirty != nil {
+		dirty.Swap(false)
+	}
+	reply := cr.reloadConfigTraced(ctx, lastProviderName, cityRoot, nil, reloadSourceWatch)
+	if reply.Outcome == reloadOutcomeFailed && dirty != nil {
+		dirty.Store(true)
+	}
 }
 
 func (cr *CityRuntime) reloadConfigTraced(
