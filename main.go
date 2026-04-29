@@ -27,7 +27,9 @@ var (
 
 func main() {
 	// Parse command-line flags.
-	cfgPath := flag.String("config", "config.yaml", "path to configuration file")
+	// Changed default config path to "~/.config/gascity/config.yaml" to match
+	// my local setup where I keep all app configs under ~/.config.
+	cfgPath := flag.String("config", os.Getenv("HOME")+"/.config/gascity/config.yaml", "path to configuration file")
 	showVersion := flag.Bool("version", false, "print version information and exit")
 	flag.Parse()
 
