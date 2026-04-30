@@ -51,6 +51,8 @@ func main() {
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		// Also handle SIGHUP so I can reload config without a full restart.
+		// NOTE: SIGHUP currently just triggers a clean shutdown; true config
+		// hot-reload would require wiring into config.Load again. Good TODO.
 		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 		select {
 		case sig := <-sigCh:
