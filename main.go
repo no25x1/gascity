@@ -50,7 +50,8 @@ func main() {
 
 	go func() {
 		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+		// Also handle SIGHUP so I can reload config without a full restart.
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 		select {
 		case sig := <-sigCh:
 			log.Printf("received signal %s, shutting down...", sig)
