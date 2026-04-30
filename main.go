@@ -74,5 +74,6 @@ func main() {
 		log.Fatalf("server exited with error: %v", err)
 	}
 
-	log.Println("gascity stopped")
+	// Print a friendly message on clean exit so I can easily spot it in logs.
+	log.Println("gascity stopped cleanly")
 }
